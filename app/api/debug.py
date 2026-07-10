@@ -2,10 +2,12 @@
 api/debug.py — Debug endpoints. DEV_MODE only.
 
 Routes:
-  POST /api/debug/log                 receive a JS log entry (in-memory buffer)
-  GET  /api/debug/live                current in-memory log (polled by pop-out)
-  GET  /api/debug/info                general app state
-  GET  /api/debug/tags/<recording_id> raw FLAC tags from files vs. DB values
+  POST /api/debug/log   receive a JS log entry (in-memory buffer)
+  GET  /api/debug/live  current in-memory log (polled by pop-out)
+  GET  /api/debug/info  general app state
+
+(The on-disk FLAC tag viewer moved to the always-on "File Tags" pane:
+ GET /api/recordings/<id>/tags.)
 """
 
 from collections import deque
@@ -18,10 +20,6 @@ _dbg_log = deque(maxlen=200)
 
 from app.extensions import db
 from app.models.recording import Recording
-
-from mutagen.flac import FLAC
-from mutagen import MutagenError
-import os
 
 bp = Blueprint("debug", __name__)
 
@@ -77,62 +75,3 @@ def debug_info():
     })
 
 
-# ── GET /api/debug/tags/<recording_id> ───────────────────────────────────────
-
-@bp.route("/tags/<int:recording_id>")
-@login_required
-def debug_tags(recording_id):
-    """
-    Read raw Vorbis comments from every FLAC file in the recording.
-    Returns both the file-level tags and the corresponding DB values so you
-    can spot drift between what's in the files and what's in the DB.
-    """
-    _require_dev()
-
-    rec = db.session.get(Recording, recording_id)
-    if not rec:
-        return jsonify({"error": "Not found"}), 404
-
-    library_root = current_app.config.get("LIBRARY_ROOT", "")
-    # ── DB snapshot: exactly what write_flac_tags would produce ───────────────
-    # (shared builder, so this can't drift from the real writer)
-    from app.utils.ingest import build_recording_tags
-    db_tags, track_total = build_recording_tags(rec)
-    db_tracks = {
-        t.track_number: {"TITLE": t.title, "TRACKNUMBER": str(t.track_number),
-                         "TRACKTOTAL": track_total}
-        for t in rec.tracks
-    }
-
-    # ── Read actual tags from files ───────────────────────────────────────────
-    file_results = []
-    for track in sorted(rec.tracks, key=lambda t: t.track_number):
-        abs_path = os.path.join(library_root, rec.folder_path, track.file_path)
-        entry = {
-            "track_number": track.track_number,
-            "filename":     track.file_path,
-            "abs_path":     abs_path,
-            "tags":         None,
-            "error":        None,
-        }
-        try:
-            audio = FLAC(abs_path)
-            # Vorbis comments are multi-valued lists; unwrap single values
-            entry["tags"] = {k: (v[0] if len(v) == 1 else v)
-                             for k, v in (audio.tags or {}).items()}
-        except FileNotFoundError:
-            entry["error"] = "File not found"
-        except MutagenError as e:
-            entry["error"] = f"Mutagen: {e}"
-        except Exception as e:
-            entry["error"] = f"Error: {e}"
-
-        file_results.append(entry)
-
-    return jsonify({
-        "recording_id":  rec.id,
-        "folder_path":   rec.folder_path,
-        "db_tags":       db_tags,
-        "db_tracks":     db_tracks,
-        "files":         file_results,
-    })

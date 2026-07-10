@@ -62,6 +62,7 @@ const API = (() => {
       update:     (id, data) => put(`/api/recordings/${id}`, data),
       delete:     (id)       => request('DELETE', `/api/recordings/${id}`),
       writeTags:  (id)       => post(`/api/recordings/${id}/write-tags`),
+      fileTags:   (id)       => get(`/api/recordings/${id}/tags`),
       reprocess:  (id)       => post(`/api/recordings/${id}/reprocess`),
     },
 

@@ -136,17 +136,6 @@
     </div>
 
     <div class="dbg-section">
-      <div class="dbg-section-head" data-target="dbg-tags">FLAC Tags ▾</div>
-      <div class="dbg-section-body" id="dbg-tags">
-        <div class="dbg-tags-toolbar">
-          <button class="dbg-btn" id="dbg-btn-tags">Read file tags</button>
-          <span class="dbg-hint" id="dbg-tags-hint">for active recording</span>
-        </div>
-        <div id="dbg-tags-content"></div>
-      </div>
-    </div>
-
-    <div class="dbg-section">
       <div class="dbg-section-head" data-target="dbg-log">API Log ▾</div>
       <div class="dbg-section-body" id="dbg-log">
         <div class="dbg-log-toolbar">
@@ -227,99 +216,8 @@
     } catch {}
   }
 
-  // ── FLAC tag inspector ───────────────────────────────────────────────────────
-  document.getElementById('dbg-btn-tags').addEventListener('click', async () => {
-    const recId = window.fluxState?.recordingId
-    const hint  = document.getElementById('dbg-tags-hint')
-    const out   = document.getElementById('dbg-tags-content')
-
-    if (!recId) {
-      hint.textContent = '⚠ no recording active'
-      return
-    }
-
-    hint.textContent = `reading rec #${recId}…`
-    out.innerHTML    = ''
-
-    try {
-      const r = await _origFetch(`/api/debug/tags/${recId}`, { credentials: 'same-origin' })
-      const d = await r.json()
-      hint.textContent = `rec #${recId} — ${d.files?.length ?? 0} file(s)`
-      out.innerHTML    = renderTagInspector(d)
-
-      out.querySelectorAll('.dbg-file-head').forEach(h => {
-        h.addEventListener('click', () => {
-          const body = h.nextElementSibling
-          body.style.display = body.style.display === 'none' ? '' : 'none'
-          h.textContent = h.textContent.replace(
-            body.style.display === 'none' ? '▾' : '▸',
-            body.style.display === 'none' ? '▸' : '▾'
-          )
-        })
-      })
-    } catch (e) {
-      hint.textContent = '⚠ error'
-      out.innerHTML    = `<div class="dbg-err">${e.message}</div>`
-    }
-  })
-
-  function renderTagInspector(d) {
-    const containerKeys = [
-      'ARTIST', 'ALBUM', 'DATE', 'CONCERTDATE',
-      'CONCERTVENUE', 'CONCERTLOCATION', 'RECORDINGSOURCE', 'LINEAGE'
-    ]
-
-    let html = `<div class="dbg-sub-head">Expected (from DB)</div>
-                <div class="dbg-tag-grid">`
-    for (const key of containerKeys) {
-      const val = d.db_tags?.[key]
-      html += `<div class="dbg-tag-key">${esc(key)}</div>
-               <div class="dbg-tag-val">${esc(val ?? '—')}</div>`
-    }
-    html += `</div>
-             <div class="dbg-sub-head" style="margin-top:10px">
-               Files (${d.files?.length ?? 0})
-             </div>`
-
-    for (const f of (d.files || [])) {
-      const filename = f.filename.split('/').pop()
-      html += `<div class="dbg-file-row">
-        <div class="dbg-file-head">▸ ${esc(filename)}${f.error ? ' ⚠' : ''}</div>
-        <div class="dbg-file-body" style="display:none">`
-
-      if (f.error) {
-        html += `<div class="dbg-err">${esc(f.error)}</div>`
-      } else if (f.tags) {
-        const dbTrack  = d.db_tracks?.[f.track_number] || {}
-        const priority = ['TITLE', 'TRACKNUMBER', 'TRACKTOTAL']
-        const allKeys  = [...new Set([...priority, ...Object.keys(f.tags).sort()])]
-
-        html += '<div class="dbg-tag-grid">'
-        for (const key of allKeys) {
-          const fileVal = f.tags[key]
-          const dbVal   = dbTrack[key] ?? d.db_tags?.[key]
-          const match   = fileVal !== undefined && dbVal !== undefined
-                          ? (fileVal === dbVal ? 'match' : 'mismatch')
-                          : fileVal === undefined ? 'absent' : ''
-          const dot = match === 'match'    ? '<span class="dbg-dot dbg-dot-ok">●</span>'
-                    : match === 'mismatch' ? '<span class="dbg-dot dbg-dot-warn">●</span>'
-                    : match === 'absent'   ? '<span class="dbg-dot dbg-dot-dim">○</span>'
-                    : ''
-          html += `<div class="dbg-tag-key">${dot}${esc(key)}</div>
-                   <div class="dbg-tag-val ${match === 'mismatch' ? 'dbg-mismatch' : ''}">
-                     ${esc(fileVal ?? '—')}
-                   </div>`
-        }
-        html += '</div>'
-      } else {
-        html += '<div class="dbg-hint">No tags</div>'
-      }
-
-      html += '</div></div>'
-    }
-
-    return html
-  }
+  // FLAC tag inspector removed 2026-07-09 — the always-on "File Tags" pane in
+  // the recording view replaces it (GET /api/recordings/<id>/tags).
 
   // ── API log ──────────────────────────────────────────────────────────────────
   function _refreshLog() {

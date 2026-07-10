@@ -340,6 +340,34 @@ def build_recording_tags(recording):
     return container_tags, str(len(tracks))
 
 
+def read_recording_tags(recording, library_root):
+    """
+    Read the actual on-disk Vorbis comments from every FLAC file in a recording.
+
+    Returns a list of {track_number, title, tags, error}. Multi-valued Vorbis
+    comments are kept as lists; single values are unwrapped. Never exposes file
+    paths (frontend obfuscation). Shared by the user-facing tags viewer and the
+    dev debug endpoint.
+    """
+    out = []
+    for track in sorted(recording.tracks, key=lambda t: t.track_number):
+        abs_path = os.path.join(library_root, recording.folder_path, track.file_path)
+        entry = {"track_number": track.track_number, "title": track.title,
+                 "tags": None, "error": None}
+        try:
+            audio = FLAC(abs_path)
+            entry["tags"] = {k: (v[0] if len(v) == 1 else v)
+                             for k, v in (audio.tags or {}).items()}
+        except FileNotFoundError:
+            entry["error"] = "File not found"
+        except MutagenError as e:
+            entry["error"] = f"Mutagen: {e}"
+        except Exception as e:                       # noqa: BLE001 — surface any read error
+            entry["error"] = f"Error: {e}"
+        out.append(entry)
+    return out
+
+
 def write_flac_tags(recording, library_root):
     """
     Write Vorbis comments from DB records to every FLAC file in a recording.

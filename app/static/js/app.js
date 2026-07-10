@@ -788,50 +788,41 @@ const App = (() => {
       .filter(e => e.event_type === 'metadata_updated')
       .length
 
-    // Flat track list — no disc/set grouping
-    const trackRows = (() => {
-      const tracks = rec.tracks || []
-      const tRows = tracks.map(t => {
-        const isPlaying  = t.id === state.playingTrackId
-        const playingCls = isPlaying ? ' playing' : ''
-        const playIcon   = isPlaying ? '▶' : '▷'
-        // Flag chips (labels from the shared TRACK_FLAGS registry)
-        const flagChips = (t.flags || []).map(f =>
-          `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`
-        ).join('')
-        const officialBadge = t.is_official
-          ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
+    // Inner HTML of a track's title cell: title + official badge + flag chips
+    // + inline note. Factored so the right-click quick-edit menu can refresh a
+    // single row in place after changing flags or notes.
+    function trackTitleInnerHtml(t) {
+      const officialBadge = t.is_official
+        ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
+      const flagChips = (t.flags || []).map(f =>
+        `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`).join('')
+      const noteText = t.notes
+        ? `<span class="track-note-inline truncate" title="${esc(t.notes)}">${esc(t.notes)}</span>` : ''
+      return `${esc(t.title)}${officialBadge}${flagChips ? ' ' + flagChips : ''}${noteText ? ' ' + noteText : ''}`
+    }
 
-        // Note preview — faint, same weight as the track number, sits after
-        // the flag chips on the title line. Editable inline via the pencil
-        // icon (admin/archivist only); empty span still rendered so the
-        // click handler has somewhere to swap in the input.
-        const noteText = t.notes
-          ? `<span class="track-note-inline truncate" title="${esc(t.notes)}">${esc(t.notes)}</span>`
-          : ''
-        const noteDisplay = `<span class="track-note-display" data-track-id="${t.id}">${noteText}</span>`
-        const noteEditBtn = canEditLibrary()
-          ? `<button class="track-note-edit-btn" data-track-id="${t.id}" type="button" title="${t.notes ? 'Edit note' : 'Add note'}">✎</button>`
-          : ''
-
-        const songwriterInline = t.songwriter
-          ? `<span class="track-songwriter-inline truncate">${esc(t.songwriter)}</span>` : ''
-
-        return `
-          <div class="track-row${playingCls}" data-track-id="${t.id}" data-flags="${(t.flags||[]).join(',')}">
-            <span class="track-play">${playIcon}</span>
-            <span class="track-num">${String(t.track_number || '').padStart(2,'0')}</span>
-            <span class="track-title-wrap">
-              <span class="track-title truncate">${esc(t.title)}${officialBadge}${flagChips ? ' ' + flagChips : ''}${noteText ? ' ' + noteDisplay : noteDisplay}${noteEditBtn}</span>
-            </span>
-            <span class="track-meta-right">
-              ${songwriterInline}
-              <span class="track-dur">${fmtDuration(t.duration)}</span>
-            </span>
-          </div>`
-      }).join('')
-      return tRows
-    })()
+    // Flat track list — no disc/set grouping. Right-click a row to quick-edit
+    // its flags and note (admin/archivist).
+    const editHint = canEditLibrary() ? ' title="Right-click to edit flags & note"' : ''
+    const trackRows = (rec.tracks || []).map(t => {
+      const isPlaying  = t.id === state.playingTrackId
+      const playingCls = isPlaying ? ' playing' : ''
+      const playIcon   = isPlaying ? '▶' : '▷'
+      const songwriterInline = t.songwriter
+        ? `<span class="track-songwriter-inline truncate">${esc(t.songwriter)}</span>` : ''
+      return `
+        <div class="track-row${playingCls}" data-track-id="${t.id}" data-flags="${(t.flags||[]).join(',')}"${editHint}>
+          <span class="track-play">${playIcon}</span>
+          <span class="track-num">${String(t.track_number || '').padStart(2,'0')}</span>
+          <span class="track-title-wrap">
+            <span class="track-title truncate">${trackTitleInnerHtml(t)}</span>
+          </span>
+          <span class="track-meta-right">
+            ${songwriterInline}
+            <span class="track-dur">${fmtDuration(t.duration)}</span>
+          </span>
+        </div>`
+    }).join('')
 
     const infoContent = rec.info_file_content
       ? `<pre class="info-file-content">${esc(rec.info_file_content)}</pre>`
@@ -905,12 +896,17 @@ const App = (() => {
     const sourceDisplay  = [rec.source, rec.source_modifier].filter(Boolean).join(' · ')
     const lineageDisplay = rec.lineage ? trunc(rec.lineage, 220) : null
 
-    // Top-right panel: always show Source + Lineage + Quality + Rating, then Fidelity if analysed
+    // Top-right panel: always show Source + Lineage + Quality + Rating, then Fidelity if analysed.
+    // Source/Lineage/Quality/Rating are quick-editable in place (admin/archivist):
+    // click the value (or the dash) → type → Enter to save.
+    const qEditable = canEditLibrary()
+    const qc  = qEditable ? ' hm-val--editable' : ''
+    const qa  = f => qEditable ? ` data-qedit="${f}" title="Click to edit"` : ''
     const infoRows = `
-      <div class="hm-row"><span class="hm-label">Source</span><span class="hm-val">${esc(sourceDisplay || '—')}</span></div>
-      <div class="hm-row"><span class="hm-label">Lineage</span><span class="hm-val">${esc(lineageDisplay || rec.lineage || '—')}</span></div>
-      <div class="hm-row"><span class="hm-label">Quality</span><span class="hm-val ${qualityClass(rec.quality)}">${esc(rec.quality || '—')}</span></div>
-      <div class="hm-row"><span class="hm-label">Rating</span><span class="hm-val">${rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'}</span></div>`
+      <div class="hm-row"><span class="hm-label">Source</span><span class="hm-val${qc}"${qa('source')}>${esc(sourceDisplay || '—')}</span></div>
+      <div class="hm-row"><span class="hm-label">Lineage</span><span class="hm-val${qc}"${qa('lineage')}>${esc(lineageDisplay || rec.lineage || '—')}</span></div>
+      <div class="hm-row"><span class="hm-label">Quality</span><span class="hm-val ${qualityClass(rec.quality)}${qc}"${qa('quality')}>${esc(rec.quality || '—')}</span></div>
+      <div class="hm-row"><span class="hm-label">Rating</span><span class="hm-val${qc}"${qa('rating')}>${rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'}</span></div>`
 
     const metricsSection = firstAnalysed
       ? `<hr class="hm-divider">
@@ -1001,6 +997,14 @@ const App = (() => {
               </div>
             </div>
 
+            <!-- File Tags pane — actual on-disk Vorbis comments -->
+            <div class="slide-pane" id="sp-filetags">
+              <div class="slide-pane-header">File Tags <span class="filetags-hint">(Vorbis, on disk)</span></div>
+              <div class="slide-pane-scroll" id="sp-filetags-body">
+                <div class="info-panel-empty">Loading…</div>
+              </div>
+            </div>
+
             <!-- Debug pane (DEV_MODE only) -->
             <div class="slide-pane" id="sp-debug">
               <div class="slide-pane-header">Debug <span class="dbg-badge dbg-badge-dev">DEV</span></div>
@@ -1012,6 +1016,7 @@ const App = (() => {
           <!-- Vertical tab strip anchored to the right edge -->
           <div class="slide-tabs">
             <button class="slide-tab" data-pane="info">Info File</button>
+            <button class="slide-tab" data-pane="filetags">File Tags</button>
             <button class="slide-tab" data-pane="spectrogram">Spectrogram</button>
             ${window.fluxDebug ? `<button class="slide-tab slide-tab--dev" data-pane="debug">Debug</button>` : ''}
           </div>
@@ -1068,45 +1073,141 @@ const App = (() => {
       })
     })
 
-    // Inline note editor — pencil icon swaps the note display for a text
-    // input, right there in the track list, so people can jot a note while
-    // they're listening instead of hopping over to Edit Recording.
-    mainContent.querySelectorAll('.track-note-edit-btn').forEach(btn => {
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation()   // don't trigger the row's play-on-click
-        const tid  = parseInt(btn.dataset.trackId)
-        const disp = mainContent.querySelector(`.track-note-display[data-track-id="${tid}"]`)
-        if (!disp || disp.querySelector('.track-note-input')) return   // already editing
-
-        const track   = rec.tracks.find(t => t.id === tid)
-        const current = track?.notes || ''
-        disp.innerHTML = `<input type="text" class="track-note-input" value="${esc(current)}" placeholder="Add a note…" />`
-        const input = disp.querySelector('.track-note-input')
-        input.addEventListener('click', e => e.stopPropagation())
-        input.focus()
-        input.select()
-
-        let saved = false
-        const save = async () => {
-          if (saved) return
-          saved = true
-          const value = input.value.trim() || null
-          if (track) track.notes = value
+    // ── Quick edit: recording metadata (Source/Lineage/Quality/Rating) ────────
+    // Click an editable value → inline input → Enter saves, Esc cancels.
+    function metaCellDisplay(field) {
+      if (field === 'source')  return esc([rec.source, rec.source_modifier].filter(Boolean).join(' · ') || '—')
+      if (field === 'lineage') { const l = rec.lineage; return esc(l ? (l.length > 220 ? l.slice(0, 220) + '…' : l) : '—') }
+      if (field === 'rating')  return rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'
+      return esc(rec.quality || '—')  // quality
+    }
+    function startMetaQuickEdit(cell) {
+      const field = cell.dataset.qedit
+      const raw = field === 'rating'  ? (rec.rating != null ? rec.rating : '')
+                : field === 'source'  ? (rec.source  || '')
+                : field === 'lineage' ? (rec.lineage || '')
+                :                       (rec.quality || '')
+      const type  = field === 'rating' ? 'number' : 'text'
+      const extra = field === 'rating' ? 'min="0" max="100"' : ''
+      cell.innerHTML = `<input class="hm-qedit-input" type="${type}" ${extra} value="${esc(String(raw))}" />`
+      const input = cell.querySelector('input')
+      input.focus(); input.select()
+      let done = false
+      const finish = async (save) => {
+        if (done) return; done = true
+        if (save) {
+          const v = input.value.trim()
+          const payload = {}
+          if (field === 'rating') payload.rating = v === '' ? null : Math.max(0, Math.min(100, parseInt(v, 10) || 0))
+          else payload[field] = v || null
           try {
-            await API.tracks.update(tid, { notes: value })
-          } catch (e) {
-            console.error('Failed to save note:', e)
-          }
-          renderRecordingView(recordingId)
+            await API.recordings.update(recordingId, { ...payload, change_note: 'Quick edit' })
+            Object.assign(rec, payload)
+            const wt = document.getElementById('btn-write-tags')   // now has unwritten changes
+            wt?.classList.add('btn-staged'); wt?.classList.remove('btn-ghost')
+          } catch (e) { console.error('Quick edit failed:', e) }
         }
-        input.addEventListener('blur', save)
-        input.addEventListener('keydown', e => {
-          e.stopPropagation()
-          if (e.key === 'Enter')  { e.preventDefault(); input.blur() }
-          if (e.key === 'Escape') { saved = true; renderRecordingView(recordingId) }
+        cell.innerHTML = metaCellDisplay(field)
+        if (field === 'quality') cell.className = `hm-val ${qualityClass(rec.quality)} hm-val--editable`
+      }
+      input.addEventListener('keydown', e => {
+        e.stopPropagation()
+        if (e.key === 'Enter')  { e.preventDefault(); finish(true) }
+        else if (e.key === 'Escape') { finish(false) }
+      })
+      input.addEventListener('blur', () => finish(true))
+    }
+    if (canEditLibrary()) {
+      mainContent.querySelector('.rec-header-right')?.addEventListener('click', ev => {
+        const cell = ev.target.closest('.hm-val--editable[data-qedit]')
+        if (cell && !cell.querySelector('input')) startMetaQuickEdit(cell)
+      })
+    }
+
+    // ── Quick edit: right-click a track → flags + note popup ──────────────────
+    function refreshTrackRow(t) {
+      const row = mainContent.querySelector(`.track-row[data-track-id="${t.id}"]`)
+      if (!row) return
+      const titleEl = row.querySelector('.track-title')
+      if (titleEl) titleEl.innerHTML = trackTitleInnerHtml(t)
+      row.dataset.flags = (t.flags || []).join(',')
+      applySkipFilter()
+    }
+    function closeTrackQuickEdit() {
+      const m = document.getElementById('track-qmenu')
+      if (m) { try { m._saveNote?.() } catch (_) {} m.remove() }
+      document.removeEventListener('mousedown', _qmenuOutside)
+      document.removeEventListener('keydown', _qmenuEsc)
+    }
+    function _qmenuOutside(e) {
+      const m = document.getElementById('track-qmenu')
+      if (m && !m.contains(e.target)) closeTrackQuickEdit()
+    }
+    function _qmenuEsc(e) { if (e.key === 'Escape') closeTrackQuickEdit() }
+    function openTrackQuickEdit(track, clientX, clientY) {
+      closeTrackQuickEdit()
+      const menu = document.createElement('div')
+      menu.className = 'track-qmenu'
+      menu.id = 'track-qmenu'
+      const flagPills = TRACK_FLAGS.map(f => {
+        const active = (track.flags || []).includes(f.key)
+        return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" type="button">${f.label}</button>`
+      }).join('')
+      menu.innerHTML = `
+        <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
+        <div class="track-qmenu-label">Flags</div>
+        <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>
+        <div class="track-qmenu-label">Note</div>
+        <textarea class="track-qmenu-note" placeholder="Add a note…">${esc(track.notes || '')}</textarea>`
+      document.body.appendChild(menu)
+
+      // Position at cursor, clamped to the viewport
+      const r = menu.getBoundingClientRect()
+      const x = Math.max(8, Math.min(clientX, window.innerWidth  - r.width  - 8))
+      const y = Math.max(8, Math.min(clientY, window.innerHeight - r.height - 8))
+      menu.style.left = x + 'px'
+      menu.style.top  = y + 'px'
+
+      // Flags — toggle saves immediately
+      menu.querySelectorAll('.flag-pill').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          btn.classList.toggle('active')
+          const flags = [...menu.querySelectorAll('.flag-pill.active')].map(b => b.dataset.flag)
+          track.flags = flags
+          try { await API.tracks.update(track.id, { flags }) } catch (e) { console.error(e) }
+          refreshTrackRow(track)
         })
       })
-    })
+
+      // Note — save on blur / Enter (Shift+Enter for a newline)
+      const noteEl = menu.querySelector('.track-qmenu-note')
+      const saveNote = async () => {
+        const value = noteEl.value.trim() || null
+        if (value === (track.notes || null)) return
+        track.notes = value
+        try { await API.tracks.update(track.id, { notes: value }) } catch (e) { console.error(e) }
+        refreshTrackRow(track)
+      }
+      menu._saveNote = saveNote
+      noteEl.addEventListener('keydown', e => {
+        e.stopPropagation()
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveNote().then(closeTrackQuickEdit) }
+      })
+
+      setTimeout(() => {
+        document.addEventListener('mousedown', _qmenuOutside)
+        document.addEventListener('keydown', _qmenuEsc)
+      }, 0)
+    }
+    if (canEditLibrary()) {
+      mainContent.querySelectorAll('.track-row[data-track-id]').forEach(row => {
+        row.addEventListener('contextmenu', ev => {
+          ev.preventDefault()
+          const track = rec.tracks.find(t => t.id === parseInt(row.dataset.trackId))
+          if (track) openTrackQuickEdit(track, ev.clientX, ev.clientY)
+        })
+      })
+    }
 
     // Edit metadata
     document.getElementById('btn-edit-meta')?.addEventListener('click', () => {
@@ -1154,8 +1255,17 @@ const App = (() => {
         if (result.errors?.length) {
           alert(`Tags written to ${result.written} file(s).\n\nWarnings:\n${result.errors.map(([f, e]) => `${f}: ${e}`).join('\n')}`)
         }
-        // Reload to clear the staged indicator
-        renderRecordingView(recordingId)
+        // Update in place (no full reload) so the side panel stays open and the
+        // user sees the result instantly. Clear the staged indicator on the
+        // button, then refresh the File Tags pane if it's open.
+        btn.disabled = false
+        btn.textContent = 'Write Tags to Files'
+        btn.classList.remove('btn-staged')
+        btn.classList.add('btn-ghost')
+        const ftPane = document.getElementById('sp-filetags')
+        if (ftPane && ftPane.classList.contains('active')) {
+          loadFileTags(recordingId)
+        }
       } catch (e) {
         alert('Error writing tags: ' + e.message)
         const btn = document.getElementById('btn-write-tags')
@@ -1213,6 +1323,10 @@ const App = (() => {
               const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
               loadSpectrogram(defaultTrackId, defaultTrack?.title)
             }
+
+            // Load on-disk Vorbis tags each time the File Tags tab opens
+            // (re-fetch so it reflects the latest "Write Tags to Files").
+            if (pane === 'filetags') loadFileTags(recordingId)
 
             // Mount/refresh debug panel
             if (pane === 'debug') {
@@ -1278,6 +1392,28 @@ const App = (() => {
     }
 
     // Spectrogram loads lazily when the tab is opened (see slide tab wiring above)
+
+    // ── File Tags pane ────────────────────────────────────────────────────────
+    // Fetch the actual on-disk Vorbis comments and render them as a well-formed
+    // JSON object keyed by "NN · Title", so the effect of "Write Tags to Files"
+    // is visible and verifiable.
+    async function loadFileTags(recId) {
+      const body = document.getElementById('sp-filetags-body')
+      if (!body) return
+      body.innerHTML = '<div class="info-panel-empty">Loading…</div>'
+      try {
+        const data = await API.recordings.fileTags(recId)
+        const obj = {}
+        ;(data.tracks || []).forEach(t => {
+          const key = `${String(t.track_number || '').padStart(2, '0')} · ${t.title || ''}`
+          obj[key] = t.error ? { error: t.error } : (t.tags || {})
+        })
+        const json = JSON.stringify(obj, null, 2)
+        body.innerHTML = `<pre class="filetags-json">${esc(json)}</pre>`
+      } catch (e) {
+        body.innerHTML = `<div class="info-panel-empty">Failed to read tags: ${esc(e.message || '')}</div>`
+      }
+    }
 
     // Reload spectrogram when a new track is clicked (only if the pane is open)
     mainContent.querySelectorAll('.track-row[data-track-id]').forEach(row => {
@@ -3401,9 +3537,10 @@ const App = (() => {
     if (recData) {
       sourceStr = [recData.source, recData.source_modifier].filter(Boolean).join(' · ')
     }
-    const metaParts = [performerName || artist, dateStr, venueStr].filter(Boolean)
+    // Player bar line 2: Date · Venue (artist name is redundant here — it's
+    // shown on line 3). Line 3: the artist/band name.
+    const metaParts = [dateStr, venueStr].filter(Boolean)
     const meta      = metaParts.join(' · ') || sourceStr || '—'
-    // Third line in player bar: artist name (not source type)
     const recLabel  = performerName || artist || ''
 
     // Filter out non-music tracks when the skip toggle is on

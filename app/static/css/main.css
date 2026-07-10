@@ -725,6 +725,10 @@ body {
   white-space: pre-wrap;
   margin-top: 2px;
   max-width: 480px;
+  /* Long notes scroll within a capped box instead of pushing the waveform
+     and track list off-screen. */
+  max-height: 140px;
+  overflow-y: auto;
 }
 
 .badge-row {
@@ -970,44 +974,13 @@ body {
   max-width: 160px;
 }
 
-/* Faint inline note preview — same weight/color as the track number */
+/* Faint inline note preview — same weight/color as the track number.
+   Editing moved to the right-click quick-edit popup (.track-qmenu). */
 .track-note-inline {
   font-size: 11px;
   color: var(--t2);
   font-family: var(--font-mono);
   margin-left: 6px;
-}
-
-.track-note-display { display: inline; }
-
-/* Pencil icon to add/edit a note — subtle until the row is hovered so the
-   list doesn't look cluttered when just browsing/listening */
-.track-note-edit-btn {
-  font-size: 11px;
-  color: var(--t3);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0 2px;
-  margin-left: 6px;
-  opacity: 0;
-  transition: opacity 0.1s, color 0.1s;
-}
-.track-row:hover .track-note-edit-btn { opacity: 0.55; }
-.track-note-edit-btn:hover { opacity: 1 !important; color: var(--accent); }
-
-/* Inline note input — replaces the note display while editing */
-.track-note-input {
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--t0);
-  background: var(--bg-1);
-  border: 1px solid var(--accent);
-  border-radius: 3px;
-  padding: 1px 5px;
-  margin-left: 6px;
-  width: 180px;
-  outline: none;
 }
 
 /* Info file panel — fixed width so pre content doesn't stretch the column */
@@ -1052,6 +1025,26 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+}
+
+/* File Tags pane — pretty-printed on-disk Vorbis comments */
+.filetags-json {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--t1);
+  padding: 14px 18px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.filetags-hint {
+  font-size: 10px;
+  color: var(--t3);
+  font-style: italic;
+  margin-left: 6px;
 }
 
 .info-panel-empty {
@@ -2374,6 +2367,75 @@ input[type="range"].progress-bar {
   color: var(--accent-lit);
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 }
+
+/* ── Quick edit: recording metadata fields (click-to-edit) ───────────────── */
+.hm-val--editable {
+  cursor: text;
+  border-radius: 3px;
+  padding: 0 3px;
+  margin: 0 -3px;
+  transition: background 0.1s;
+}
+.hm-val--editable:hover { background: var(--bg-4); }
+
+.hm-qedit-input {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t0);
+  background: var(--bg-1);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 5px;
+  width: 100%;
+  min-width: 60px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+/* ── Quick edit: track right-click popup ─────────────────────────────────── */
+.track-qmenu {
+  position: fixed;
+  z-index: 1000;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  background: var(--bg-2);
+  border: 1px solid var(--bd-2);
+  border-radius: var(--r-sm);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 10px 12px 12px;
+}
+.track-qmenu-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t0);
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.track-qmenu-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t3);
+  margin: 8px 0 4px;
+}
+.track-qmenu-note {
+  width: 100%;
+  min-height: 48px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t0);
+  background: var(--bg-1);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  padding: 5px 7px;
+  outline: none;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.track-qmenu-note:focus { border-color: var(--accent); }
 
 /* ── Expandable track detail row (edit view + ingest) ────────────────────── */
 .et-expand-cell { text-align: center; }

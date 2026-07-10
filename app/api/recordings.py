@@ -18,7 +18,8 @@ from app.extensions import db
 from app.models.recording import Recording, RecordingFingerprint
 from app.models.recording_event import RecordingEvent
 from app.models.track import Track
-from app.utils.ingest import scan_folder, read_flac_tags, parse_info_file, write_flac_tags, _parse_location
+from app.utils.ingest import (scan_folder, read_flac_tags, parse_info_file,
+                              write_flac_tags, read_recording_tags, _parse_location)
 from app.utils.analysis import analyse_recording
 from app.utils.pruning import prune_after_recording_delete
 
@@ -402,6 +403,26 @@ def write_tags(recording_id):
         return jsonify({"error": "No files written", "errors": errors}), 500
 
     return jsonify({"written": n_written, "errors": errors})
+
+
+# ── GET /api/recordings/<id>/tags ─────────────────────────────────────────────
+
+@bp.route("/<int:recording_id>/tags")
+@login_required
+def get_recording_file_tags(recording_id):
+    """
+    Return the actual on-disk Vorbis comments for every FLAC file in the
+    recording. Powers the "File Tags" viewer so the effect of "Write Tags to
+    Files" is visible. File paths are never exposed.
+    """
+    rec = db.session.get(Recording, recording_id)
+    if not rec:
+        return jsonify({"error": "Not found"}), 404
+    library_root = current_app.config.get("LIBRARY_ROOT", "")
+    return jsonify({
+        "recording_id": rec.id,
+        "tracks":       read_recording_tags(rec, library_root),
+    })
 
 
 # ── POST /api/recordings/<id>/reprocess ───────────────────────────────────────
