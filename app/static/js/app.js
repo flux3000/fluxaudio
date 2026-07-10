@@ -20,8 +20,25 @@ const App = (() => {
     skipNonMusic:    false,  // filter announcements/banter/tuning from queue
   }
 
-  // Flags treated as "non-music" for the skip filter
-  const NON_MUSIC_FLAGS = ['announcement', 'banter', 'tuning', 'audience', 'interview', 'introduction', 'band_intros']
+  // ── Track flag registry — single source of truth ─────────────────────────
+  // Every flag list/label/skip-set is derived from this one array. `nonMusic`
+  // marks flags whose tracks are skipped by the "Skip non-music" filter.
+  const TRACK_FLAGS = [
+    { key: 'start_truncated', label: 'Start Truncated', nonMusic: false },
+    { key: 'end_truncated',   label: 'End Truncated',   nonMusic: false },
+    { key: 'incomplete',      label: 'Incomplete',      nonMusic: false },
+    { key: 'unknown_title',   label: 'Unknown Title',   nonMusic: false },
+    { key: 'banter',          label: 'Banter',          nonMusic: true  },
+    { key: 'tuning',          label: 'Tuning',          nonMusic: true  },
+    { key: 'audience',        label: 'Audience',        nonMusic: true  },
+    { key: 'medley',          label: 'Medley',          nonMusic: false },
+    { key: 'announcement',    label: 'Announcement',    nonMusic: true  },
+    { key: 'interview',       label: 'Interview',       nonMusic: true  },
+    { key: 'introduction',    label: 'Introduction',    nonMusic: true  },
+    { key: 'band_intros',     label: 'Band Intros',     nonMusic: true  },
+  ]
+  const NON_MUSIC_FLAGS = TRACK_FLAGS.filter(f => f.nonMusic).map(f => f.key)
+  const FLAG_LABELS     = Object.fromEntries(TRACK_FLAGS.map(f => [f.key, f.label]))
 
   /** Apply/remove the skip-filter visual state to all track rows in the current view. */
   function applySkipFilter() {
@@ -164,7 +181,7 @@ const App = (() => {
     step:       'folder',  // 'folder' | 'review' | 'tracks' | 'confirm'
     folderPath: null,
     scan:       null,      // full scan API response
-    behavior:   'move',    // 'copy' | 'move'
+    behavior:   'copy',    // 'copy' | 'move' — default copy: never destroy source unless asked
     form: {},              // resolved metadata (populated on review step)
     tracks:     [],        // array of { track_number, title, set, duration, filename }
   }
@@ -221,6 +238,15 @@ const App = (() => {
     const m = Math.floor(secs / 60)
     const s = Math.floor(secs % 60)
     return `${m}:${s.toString().padStart(2,'0')}`
+  }
+
+  // Show-length runtime, e.g. "1h 42m" or "47m" — for the catalog length column.
+  function fmtRuntime(secs) {
+    if (!secs) return ''
+    const totalMin = Math.round(secs / 60)
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return h ? `${h}h ${m}m` : `${m}m`
   }
 
   function sourceBadge(source) {
@@ -323,6 +349,45 @@ const App = (() => {
   function canEditLibrary() {
     const role = state.user?.role
     return role === 'admin' || role === 'archivist'
+  }
+
+  // Shared artist-name autocomplete wiring — used by both the ingest form and
+  // the Edit Recording reassignment field. Sets the input value on pick.
+  function wireArtistAutocomplete(nameEl, dropEl, { createLabel = 'New artist' } = {}) {
+    if (!nameEl || !dropEl) return
+    let debounce = null
+    const close = () => { dropEl.style.display = 'none'; dropEl.innerHTML = '' }
+
+    function show(names, q) {
+      const rows = names.map(n =>
+        `<div class="artist-result" data-name="${esc(n)}">${esc(n)}</div>`).join('')
+      const exact = names.some(n => n.toLowerCase() === q.toLowerCase())
+      const createRow = (!exact && q)
+        ? `<div class="artist-result artist-result-new" data-name="${esc(q)}">+ ${esc(createLabel)}: "${esc(q)}"</div>`
+        : ''
+      dropEl.innerHTML = rows + createRow
+      dropEl.style.display = (rows || createRow) ? 'block' : 'none'
+      dropEl.querySelectorAll('.artist-result').forEach(el => {
+        el.addEventListener('mousedown', e => {
+          e.preventDefault()
+          nameEl.value = el.dataset.name
+          close()
+        })
+      })
+    }
+
+    nameEl.addEventListener('input', () => {
+      const q = nameEl.value.trim()
+      clearTimeout(debounce)
+      if (q.length < 2) { close(); return }
+      debounce = setTimeout(async () => {
+        try { show(await API.artists.search(q), q) } catch (_) { close() }
+      }, 220)
+    })
+    nameEl.addEventListener('blur',  () => setTimeout(close, 200))
+    nameEl.addEventListener('focus', () => {
+      if (nameEl.value.trim().length >= 2) nameEl.dispatchEvent(new Event('input'))
+    })
   }
 
   function setMainHTML(html) {
@@ -580,6 +645,11 @@ const App = (() => {
 
     state.selectedArtist = artist
 
+    // Only show performances that actually have recordings — a performance
+    // with zero recordings (orphan) would otherwise render a phantom, empty
+    // year-group header (e.g. "UNKNOWN").
+    performances = performances.filter(p => (p.recordings || []).length > 0)
+
     const totalRecordings = performances.reduce((n, p) => n + p.recordings.length, 0)
 
     // Group performances by year
@@ -599,19 +669,36 @@ const App = (() => {
         const venue  = p.venue_name || ''
         const title  = p.title ? `<em>${esc(p.title)}</em> · ` : ''
 
+        // Performer name — always shown under the venue. Uses the specific
+        // performer (e.g. "Bill Evans Trio") when present, otherwise falls
+        // back to the canonical artist name so every recording is labeled.
+        const performerName = p.performer_name || artist.name
+        const performerLabel = performerName
+          ? `<span class="rec-performer truncate" title="${esc(performerName)}">${esc(performerName)}</span>`
+          : ''
+
         // Each performance row, then child rows per recording
         return p.recordings.map((r, ri) => {
-          const modifier = r.source_modifier ? ` · ${esc(r.source_modifier)}` : ''
           const quality  = r.quality || ''
           const qcls     = qualityClass(quality)
+          const runtime  = fmtRuntime(r.duration_sec)
+          const ratingHtml = r.rating != null
+            ? `<span class="rating-badge rating-badge--sm">${r.rating}</span>` : ''
+          const incMarker = r.is_complete
+            ? '' : '<span class="rec-inc" title="Incomplete recording">inc</span>'
           return `
             <div class="rec-row" data-rec-id="${r.id}" data-perf-id="${p.performance_id}">
               <span class="rec-date truncate">${ri === 0 ? esc(date) : ''}</span>
-              <span class="rec-venue truncate">${ri === 0 ? title + esc(venue || '(unknown venue)') : ''}</span>
+              <span class="rec-venue-wrap">
+                <span class="rec-venue truncate">${ri === 0 ? title + esc(venue || '(unknown venue)') : ''}</span>
+                ${ri === 0 ? performerLabel : ''}
+              </span>
               <span class="rec-location truncate">${ri === 0 ? esc(loc) : ''}</span>
               <span>${sourceBadge(r.source)}</span>
               <span class="quality ${qcls}">${esc(quality)}</span>
-              <span class="rec-tracks">${r.track_count}t</span>
+              <span class="rec-rating">${ratingHtml}</span>
+              <span class="rec-runtime">${runtime}</span>
+              <span class="rec-tracks">${r.track_count}t${incMarker ? ' ' + incMarker : ''}</span>
               <button class="rec-play-btn" data-rec-id="${r.id}" title="Play first track">▶</button>
             </div>`
         }).join('')
@@ -708,15 +795,7 @@ const App = (() => {
         const isPlaying  = t.id === state.playingTrackId
         const playingCls = isPlaying ? ' playing' : ''
         const playIcon   = isPlaying ? '▶' : '▷'
-        // Flag chips
-        const FLAG_LABELS = {
-          start_truncated: 'Start Trunc', end_truncated: 'End Trunc',
-          incomplete: 'Incomplete', banter: 'Banter', medley: 'Medley',
-          announcement: 'Announcement', tuning: 'Tuning',
-          audience: 'Audience', unknown_title: 'Unknown Title',
-          interview: 'Interview', introduction: 'Introduction',
-          band_intros: 'Band Intros',
-        }
+        // Flag chips (labels from the shared TRACK_FLAGS registry)
         const flagChips = (t.flags || []).map(f =>
           `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`
         ).join('')
@@ -1552,6 +1631,7 @@ const App = (() => {
       source:             e.source  || null,
       lineage:            e.lineage || null,
       is_complete:        true,
+      behavior:           'copy',   // batch import is non-destructive by default
       info_file_content:  scan.info_file_content || null,
       fingerprints:       scan.fingerprints || [],
       tracks,
@@ -1938,22 +2018,8 @@ const App = (() => {
       </div>` : ''
 
     // Track table rows — play preview + is_official + expandable optional details
-    const _ingestFlagDefs = [
-      { key: 'start_truncated', label: 'Start Truncated' },
-      { key: 'end_truncated',   label: 'End Truncated'   },
-      { key: 'incomplete',      label: 'Incomplete'       },
-      { key: 'unknown_title',   label: 'Unknown Title'    },
-      { key: 'banter',          label: 'Banter'           },
-      { key: 'tuning',          label: 'Tuning'           },
-      { key: 'audience',        label: 'Audience'         },
-      { key: 'medley',          label: 'Medley'           },
-      { key: 'announcement',    label: 'Announcement'     },
-      { key: 'interview',       label: 'Interview'        },
-      { key: 'introduction',    label: 'Introduction'     },
-      { key: 'band_intros',     label: 'Band Intros'      },
-    ]
     const trackRows = ingest.tracks.map((t, i) => {
-      const flagPills = _ingestFlagDefs.map(f => {
+      const flagPills = TRACK_FLAGS.map(f => {
         const active = (t.flags || []).includes(f.key)
         return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" data-idx="${i}" type="button">${f.label}</button>`
       }).join('')
@@ -2352,51 +2418,11 @@ const App = (() => {
     })()
 
     // Artist autocomplete
-    ;(function () {
-      const nameEl  = document.getElementById('f-artist')
-      const dropEl  = document.getElementById('f-artist-dropdown')
-      if (!nameEl || !dropEl) return
-      let debounce = null
-
-      function closeDropdown() { dropEl.style.display = 'none'; dropEl.innerHTML = '' }
-
-      function showResults(names, q) {
-        dropEl.innerHTML = ''
-        const rows = names.map(name => `
-          <div class="artist-result" data-name="${esc(name)}">${esc(name)}</div>`
-        ).join('')
-        // Always offer "use as typed" create option if text doesn't exactly match
-        const exactMatch = names.some(n => n.toLowerCase() === q.toLowerCase())
-        const createRow = (!exactMatch && q)
-          ? `<div class="artist-result artist-result-new" data-name="${esc(q)}">+ New artist: "${esc(q)}"</div>`
-          : ''
-        dropEl.innerHTML = rows + createRow
-        dropEl.style.display = (rows || createRow) ? 'block' : 'none'
-
-        dropEl.querySelectorAll('.artist-result').forEach(el => {
-          el.addEventListener('mousedown', e => {
-            e.preventDefault()
-            nameEl.value = el.dataset.name
-            closeDropdown()
-          })
-        })
-      }
-
-      nameEl.addEventListener('input', () => {
-        const q = nameEl.value.trim()
-        clearTimeout(debounce)
-        if (q.length < 2) { closeDropdown(); return }
-        debounce = setTimeout(async () => {
-          try { showResults(await API.artists.search(q), q) }
-          catch (_) { closeDropdown() }
-        }, 220)
-      })
-
-      nameEl.addEventListener('blur',  () => setTimeout(closeDropdown, 200))
-      nameEl.addEventListener('focus', () => {
-        if (nameEl.value.trim().length >= 2) nameEl.dispatchEvent(new Event('input'))
-      })
-    })()
+    wireArtistAutocomplete(
+      document.getElementById('f-artist'),
+      document.getElementById('f-artist-dropdown'),
+      { createLabel: 'New artist' }
+    )
 
     // End date toggle — show/hide the row; pre-fill from start date on first reveal
     ;(function () {
@@ -2476,7 +2502,10 @@ const App = (() => {
             ${loc ? `<span class="venue-result-loc">${esc(loc)}</span>` : ''}
           </div>`
         }).join('')
-        const createRow = q
+        // Only offer "+ Create" when the typed name doesn't already exist —
+        // no point suggesting creation of a venue that's right there in the list.
+        const exactMatch = venues.some(v => v.name.toLowerCase() === q.toLowerCase())
+        const createRow = (q && !exactMatch)
           ? `<div class="venue-result venue-result-create" data-id="" data-name="${esc(q)}">+ Create "${esc(q)}"</div>`
           : ''
         dropEl.innerHTML = rows + createRow
@@ -2856,8 +2885,7 @@ const App = (() => {
       const payload = {
         source_folder_path: ingest.folderPath,
         ...ingest.form,
-        // Save user's behavior choice into a preference-like field
-        // (backend reads from UserPreference, so we temporarily set it via the form)
+        behavior: ingest.behavior,   // 'copy' | 'move' — honored by the backend
         tracks: ingest.tracks,
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
@@ -2925,24 +2953,9 @@ const App = (() => {
     const locStr    = perf ? fmtLocation(perf.city, perf.state, perf.country) : ''
     const dateLine  = [dateStr, venueStr, locStr].filter(Boolean).join(' · ')
 
-    const ALL_FLAGS = [
-      { key: 'start_truncated', label: 'Start Truncated' },
-      { key: 'end_truncated',   label: 'End Truncated'   },
-      { key: 'incomplete',      label: 'Incomplete'       },
-      { key: 'unknown_title',   label: 'Unknown Title'    },
-      { key: 'banter',          label: 'Banter'           },
-      { key: 'tuning',          label: 'Tuning'           },
-      { key: 'audience',        label: 'Audience'         },
-      { key: 'medley',          label: 'Medley'           },
-      { key: 'announcement',    label: 'Announcement'     },
-      { key: 'interview',       label: 'Interview'        },
-      { key: 'introduction',    label: 'Introduction'     },
-      { key: 'band_intros',     label: 'Band Intros'      },
-    ]
-
     // Track rows — title + is_official, with expandable optional detail section
     const trackRows = (rec.tracks || []).map(t => {
-      const flagPills = ALL_FLAGS.map(f => {
+      const flagPills = TRACK_FLAGS.map(f => {
         const active = (t.flags || []).includes(f.key)
         return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" data-tid="${t.id}" type="button">${f.label}</button>`
       }).join('')
@@ -2993,10 +3006,16 @@ const App = (() => {
     // Back label: "← Performer · Date · Venue" — same compact style as recording detail breadcrumb
     const editBreadcrumb = ['←', perfName, dateStr, venueStr].filter(Boolean).join(' · ')
 
+    // Recording title — recordings carry no stored title, so identify by
+    // performer · date · venue (+ source), matching the folder-name convention.
+    // "Other" is a meaningless source label, so it's omitted from the title.
+    const recSrc     = (rec.source && rec.source !== 'Other') ? ` (${rec.source})` : ''
+    const recTitle   = [perfName, dateStr, venueStr].filter(Boolean).join(' · ') + recSrc
+
     setMainHTML(`
       <!-- Header: recording being edited -->
       <div class="edit-header-bar">
-        <h2 class="edit-header-title">Editing ${esc(perfName)}</h2>
+        <h2 class="edit-header-title">Editing ${esc(recTitle)}</h2>
       </div>
       <!-- Compact single-line edit bar -->
       <div class="action-bar edit-mode-bar">
@@ -3018,8 +3037,11 @@ const App = (() => {
           <div class="ingest-field-grid" style="grid-template-columns:1fr 72px 52px 52px; gap:10px; margin-bottom:10px">
             <div class="ingest-field">
               <label>Artist</label>
-              <input type="text" value="${esc(perf?.performer||'')}" readonly tabindex="-1"
-                style="opacity:.55; cursor:default; background:var(--bg-3)" />
+              <div class="artist-picker-wrap">
+                <input type="text" id="e-artist" value="${esc(perf?.performer||'')}" autocomplete="off"
+                  title="Change to reassign this recording to a different artist" />
+                <div class="artist-dropdown" id="e-artist-dropdown" style="display:none"></div>
+              </div>
             </div>
             <div class="ingest-field">
               <label>Year</label>
@@ -3038,16 +3060,14 @@ const App = (() => {
           <!-- Venue live-search picker -->
           <div class="ingest-field" style="margin-bottom:16px">
             <label>Venue</label>
-            <div style="display:flex; align-items:flex-start; gap:14px">
-              <div class="venue-picker-wrap" style="flex:1">
-                <input type="text" id="e-venue-name" value="${esc(initVenueName)}" autocomplete="off" style="width:100%" />
-                <input type="hidden" id="e-venue-id" value="${esc(String(initVenueId))}" />
-                <div class="venue-dropdown" id="venue-dropdown" style="display:none"></div>
-              </div>
-              <div id="venue-location-hint" style="font-size:13px; color:var(--t1); padding-top:7px; white-space:nowrap; min-width:120px">${
-                esc(fmtLocation(perf?.city, perf?.state, perf?.country))
-              }</div>
+            <div class="venue-picker-wrap" style="max-width:420px">
+              <input type="text" id="e-venue-name" value="${esc(initVenueName)}" autocomplete="off" style="width:100%" />
+              <input type="hidden" id="e-venue-id" value="${esc(String(initVenueId))}" />
+              <div class="venue-dropdown" id="venue-dropdown" style="display:none"></div>
             </div>
+            <div id="venue-location-hint" style="font-size:12px; color:var(--t2); margin-top:5px; min-height:15px">${
+              esc(fmtLocation(perf?.city, perf?.state, perf?.country))
+            }</div>
           </div>
 
           <!-- Recording fields — all on one row -->
@@ -3184,6 +3204,13 @@ const App = (() => {
       }
     })
 
+    // ── Artist autocomplete (reassignment) ────────────────────────────────────
+    wireArtistAutocomplete(
+      document.getElementById('e-artist'),
+      document.getElementById('e-artist-dropdown'),
+      { createLabel: 'Reassign to new artist' }
+    )
+
     // ── Venue live-search picker ──────────────────────────────────────────────
     ;(function () {
       const nameEl     = document.getElementById('e-venue-name')
@@ -3209,7 +3236,10 @@ const App = (() => {
             ${loc ? `<span class="venue-result-loc">${esc(loc)}</span>` : ''}
           </div>`
         }).join('')
-        const createRow = q
+        // Only offer "+ Create" when the typed name doesn't already exist —
+        // no point suggesting creation of a venue that's right there in the list.
+        const exactMatch = venues.some(v => v.name.toLowerCase() === q.toLowerCase())
+        const createRow = (q && !exactMatch)
           ? `<div class="venue-result venue-result-create" data-id="" data-name="${esc(q)}">+ Create "${esc(q)}"</div>`
           : ''
         dropEl.innerHTML = rows + createRow
@@ -3272,6 +3302,12 @@ const App = (() => {
           start_year:  parseInt(document.getElementById('e-year').value)  || null,
           start_month: parseInt(document.getElementById('e-month').value) || null,
           start_day:   parseInt(document.getElementById('e-day').value)   || null,
+        }
+        // Artist reassignment — only send when the name actually changed, so we
+        // don't churn the performer chain on every save.
+        const artistName = document.getElementById('e-artist').value.trim()
+        if (artistName && artistName !== (perf?.performer || '')) {
+          perfUpdate.performer_name = artistName
         }
         // Always send venue_id: set to int if selected, null if name cleared
         const venueName = document.getElementById('e-venue-name').value.trim()

@@ -33,7 +33,8 @@ class Config:
     ))
 
     # ── App ───────────────────────────────────────────────────
-    DEBUG = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    # Note: Flask's own debug reloader is always forced off under PyWebView
+    # (see run.py), so no DEBUG flag is carried here.
     HOST  = "127.0.0.1"
     PORT  = 5757        # internal Flask port used by PyWebView
 

@@ -14,11 +14,12 @@ Routes:
 
 from flask import Blueprint, request, jsonify
 from flask_login import login_required
-from sqlalchemy import or_, func
+from sqlalchemy import func
 
 from app.extensions import db
 from app.models.event import Event
 from app.models.venue import Venue
+from app.utils.format import format_partial_date
 
 bp = Blueprint("events", __name__)
 
@@ -78,8 +79,8 @@ def get_event(event_id):
         "performances": [
             {
                 "id":        p.id,
-                "performer": p.performer.name if p.performer else None,
-                "date":      _fmt_date(p),
+                "performer": p.artist.name if p.artist else None,
+                "date":      format_partial_date(p.start_year, p.start_month, p.start_day),
                 "stage":     p.stage,
                 "recording_count": len(p.recordings),
             }
@@ -175,10 +176,3 @@ def _event_summary(e):
         "end_day":          e.end_day,
         "performance_count": len(e.performances),
     }
-
-
-def _fmt_date(p):
-    parts = [str(p.start_year or "?")]
-    if p.start_month: parts.append(str(p.start_month).zfill(2))
-    if p.start_day:   parts.append(str(p.start_day).zfill(2))
-    return "-".join(parts)

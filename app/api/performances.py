@@ -10,23 +10,46 @@ Routes:
 
 from flask import Blueprint, jsonify, request
 from flask_login import login_required
+from sqlalchemy import func
 
 from app.extensions import db
 from app.models.performance import Performance
-from app.models.performer import Performer, PerformerArtist
+from app.models.artist import Artist, ArtistCanonical
+from app.models.canonical_artist import CanonicalArtist
+from app.utils.format import format_partial_date
+from app.utils.serialize import recording_summary
+from app.utils.pruning import prune_artist_if_orphaned
 
 bp = Blueprint("performances", __name__)
 
 
-def _fmt_date(year, month, day):
-    """Format nullable year/month/day into a display string."""
-    if not year:
-        return None
-    if month and day:
-        return f"{year}-{month:02d}-{day:02d}"
-    if month:
-        return f"{year}-{month:02d}"
-    return str(year)
+def _resolve_or_create_artist(name):
+    """
+    Resolve an artist by name (case-insensitive) or create it with a 1:1
+    canonical artist, mirroring the ingest chain. In the decoupled model, if a
+    canonical of that name already exists it is reused (a new bare artist is
+    linked to it) rather than duplicated.
+    """
+    artist = db.session.query(Artist).filter(
+        func.lower(Artist.name) == name.lower()
+    ).first()
+    if artist:
+        return artist
+
+    artist = Artist(name=name)
+    db.session.add(artist)
+    db.session.flush()
+
+    canonical = db.session.query(CanonicalArtist).filter(
+        func.lower(CanonicalArtist.name) == name.lower()
+    ).first()
+    if not canonical:
+        canonical = CanonicalArtist(name=name)
+        db.session.add(canonical)
+        db.session.flush()
+    db.session.add(ArtistCanonical(artist_id=artist.id, canonical_artist_id=canonical.id, order=0))
+    db.session.flush()
+    return artist
 
 
 # ── GET /api/performances/ ─────────────────────────────────────────────────────
@@ -37,11 +60,12 @@ def list_performances():
     artist_id = request.args.get("artist_id", type=int)
     year      = request.args.get("year",      type=int)
 
+    # `artist_id` query param filters by CANONICAL artist (sidebar grouping).
     q = db.session.query(Performance)
     if artist_id:
-        q = (q.join(Performer,       Performer.id == Performance.performer_id)
-               .join(PerformerArtist, PerformerArtist.performer_id == Performer.id)
-               .filter(PerformerArtist.artist_id == artist_id))
+        q = (q.join(Artist,          Artist.id == Performance.artist_id)
+               .join(ArtistCanonical, ArtistCanonical.artist_id == Artist.id)
+               .filter(ArtistCanonical.canonical_artist_id == artist_id))
     if year:
         q = q.filter(Performance.start_year == year)
 
@@ -49,8 +73,8 @@ def list_performances():
     return jsonify([
         {
             "id":        p.id,
-            "performer": p.performer.name,
-            "date":      _fmt_date(p.start_year, p.start_month, p.start_day),
+            "performer": p.artist.name,
+            "date":      format_partial_date(p.start_year, p.start_month, p.start_day),
             "venue":     p.venue.name if p.venue else None,
             "city":      p.venue.city  if p.venue else p.city,
             "state":     p.venue.state if p.venue else p.state,
@@ -70,9 +94,10 @@ def get_performance(performance_id):
 
     v = p.venue
     return jsonify({
+        # JSON keys kept stable (performer* = the performing Artist) for the frontend.
         "id":           p.id,
-        "performer_id": p.performer_id,
-        "performer":    p.performer.name,
+        "performer_id": p.artist_id,
+        "performer":    p.artist.name,
         "title":        p.title,
         "stage":        p.stage,
         "start_year":   p.start_year,
@@ -87,17 +112,7 @@ def get_performance(performance_id):
         "state":        v.state   if v else p.state,
         "country":      v.country if v else p.country,
         "notes":        p.notes,
-        "recordings": [
-            {
-                "id":              r.id,
-                "source":          r.source,
-                "source_modifier": r.source_modifier,
-                "quality":         r.quality,
-                "is_complete":     r.is_complete,
-                "track_count":     len(r.tracks),
-            }
-            for r in p.recordings
-        ],
+        "recordings":   [recording_summary(r) for r in p.recordings],
     })
 
 
@@ -110,7 +125,7 @@ def create_performance():
     if not data.get("performer_id"):
         return jsonify({"error": "performer_id is required"}), 400
     p = Performance(
-        performer_id = data["performer_id"],
+        artist_id    = data["performer_id"],   # JSON param kept stable; maps to artist
         venue_id     = data.get("venue_id"),
         event_id     = data.get("event_id"),
         title        = data.get("title"),
@@ -140,10 +155,25 @@ def update_performance(performance_id):
     if not p:
         return jsonify({"error": "Not found"}), 404
     data = request.get_json()
+
+    # Reassign the Artist when a new name is supplied and it differs from the
+    # current one. Scoped to this performance — the recording(s) under it move
+    # to the resolved/created artist. The old artist is pruned if it's left
+    # with no performances. (JSON param `performer_name` kept stable.)
+    reassigned = None
+    new_name = (data.get("performer_name") or "").strip()
+    if new_name and new_name.lower() != p.artist.name.lower():
+        old_artist_id = p.artist_id
+        artist = _resolve_or_create_artist(new_name)
+        p.artist_id = artist.id
+        db.session.flush()
+        prune_artist_if_orphaned(old_artist_id)
+        reassigned = artist.name
+
     for f in ["title", "stage", "start_year", "start_month", "start_day",
               "end_year", "end_month", "end_day", "venue_id",
               "city", "state", "country", "notes"]:
         if f in data:
             setattr(p, f, data[f])
     db.session.commit()
-    return jsonify({"id": p.id})
+    return jsonify({"id": p.id, "reassigned_to": reassigned})

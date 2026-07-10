@@ -35,8 +35,11 @@ class Track(db.Model):
     # True when this track has been officially released by the copyright holder
     is_official  = db.Column(db.Boolean, nullable=False, default=False)
 
-    # JSON array of flag strings. Valid values:
-    #   start_truncated, end_truncated, incomplete, banter, medley
+    # JSON array of flag strings. Valid values (see TRACK_FLAGS in app.js —
+    # that frontend registry is the single source of truth):
+    #   start_truncated, end_truncated, incomplete, unknown_title, banter,
+    #   tuning, audience, medley, announcement, interview, introduction,
+    #   band_intros
     flags        = db.Column(db.Text, nullable=True)
 
     # Composer / songwriter credit (optional, not in standard FLAC tags)

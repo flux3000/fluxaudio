@@ -21,6 +21,8 @@ from dateutil import parser as _dateutil_parser
 from dateutil.parser import ParserError as _ParserError
 import geonamescache as _geonamescache
 
+from app.utils.format import format_partial_date
+
 
 # ── File classification ────────────────────────────────────────────────────────
 
@@ -287,13 +289,64 @@ def read_flac_tags(audio_files):
 
 # ── FLAC tag writing ───────────────────────────────────────────────────────────
 
+def build_recording_tags(recording):
+    """
+    Build the container-level Vorbis comment dict for a recording from its
+    Recording → Performance → Artist → Venue chain. Single source of truth
+    for the DB→tag mapping, shared by write_flac_tags (which writes it to disk)
+    and the debug endpoint (which compares it against on-disk tags).
+
+    Returns (container_tags: dict, track_total: str). Only non-empty values are
+    included in container_tags.
+    """
+    perf   = recording.performance
+    venue  = perf.venue if perf else None
+    tracks = recording.tracks
+
+    # ── Concert date string ───────────────────────────────────────────────────
+    concert_date = format_partial_date(
+        perf.start_year, perf.start_month, perf.start_day) if perf else None
+
+    # ── Venue name + location ─────────────────────────────────────────────────
+    venue_name = venue.name if venue else None
+    if venue:
+        location_parts = [p for p in [venue.city, venue.state, venue.country] if p]
+    elif perf:
+        location_parts = [p for p in [perf.city, perf.state, perf.country] if p]
+    else:
+        location_parts = []
+
+    # ── Source string ─────────────────────────────────────────────────────────
+    source_str = recording.source
+    if recording.source_modifier:
+        source_str = (f"{source_str} - {recording.source_modifier}"
+                      if source_str else recording.source_modifier)
+
+    # ── Artist / album labels ─────────────────────────────────────────────────
+    artist_name = perf.artist.name if (perf and perf.artist) else None
+    album_parts = [p for p in [artist_name, concert_date, venue_name] if p]
+    album_str   = " - ".join(album_parts) if album_parts else None
+
+    container_tags = {}
+    if artist_name:       container_tags["ARTIST"]          = artist_name
+    if album_str:         container_tags["ALBUM"]           = album_str
+    if perf and perf.start_year: container_tags["DATE"]     = str(perf.start_year)
+    if concert_date:      container_tags["CONCERTDATE"]     = concert_date
+    if venue_name:        container_tags["CONCERTVENUE"]    = venue_name
+    if location_parts:    container_tags["CONCERTLOCATION"] = ", ".join(location_parts)
+    if source_str:        container_tags["RECORDINGSOURCE"] = source_str
+    if recording.lineage: container_tags["LINEAGE"]         = recording.lineage
+
+    return container_tags, str(len(tracks))
+
+
 def write_flac_tags(recording, library_root):
     """
     Write Vorbis comments from DB records to every FLAC file in a recording.
 
-    Builds container-level tags from the Recording → Performance → Performer
-    → Venue chain, then per-track TITLE/TRACKNUMBER/TRACKTOTAL for each Track.
-    Existing Vorbis comments are replaced entirely (clean write).
+    Builds container-level tags via build_recording_tags(), then per-track
+    TITLE/TRACKNUMBER/TRACKTOTAL for each Track. Existing Vorbis comments are
+    replaced entirely (clean write).
 
     Args:
         recording:    Recording ORM object with relationships loaded
@@ -302,55 +355,8 @@ def write_flac_tags(recording, library_root):
     Returns:
         (n_written, errors) where errors is a list of (filename, message) tuples.
     """
-    perf    = recording.performance
-    venue   = perf.venue
-    tracks  = recording.tracks  # ordered by track_number via relationship
-
-    # ── Build concert date string ──────────────────────────────────────────────
-    date_parts = [perf.start_year, perf.start_month, perf.start_day]
-    if all(date_parts):
-        concert_date = f"{perf.start_year}-{perf.start_month:02d}-{perf.start_day:02d}"
-    elif perf.start_year and perf.start_month:
-        concert_date = f"{perf.start_year}-{perf.start_month:02d}"
-    elif perf.start_year:
-        concert_date = str(perf.start_year)
-    else:
-        concert_date = None
-
-    # ── Venue name + location ─────────────────────────────────────────────────
-    venue_name = None
-    location_parts = []
-    if venue:
-        venue_name = venue.name
-        location_parts = [p for p in [venue.city, venue.state, venue.country] if p]
-    else:
-        # Fallback: bare city/state on the performance itself
-        location_parts = [p for p in [perf.city, perf.state, perf.country] if p]
-
-    # ── Source string ─────────────────────────────────────────────────────────
-    source_str = recording.source
-    if recording.source_modifier:
-        source_str = f"{source_str} - {recording.source_modifier}" if source_str else recording.source_modifier
-
-    # ── Artist / album labels ─────────────────────────────────────────────────
-    artist_name = perf.performer.name if perf.performer else None
-
-    # ALBUM: "Artist - YYYY-MM-DD - Venue" (collector convention)
-    album_parts = [p for p in [artist_name, concert_date, venue_name] if p]
-    album_str   = " - ".join(album_parts) if album_parts else None
-
-    # ── Container tags dict (only include non-None values) ────────────────────
-    container_tags = {}
-    if artist_name:  container_tags["ARTIST"]          = artist_name
-    if album_str:    container_tags["ALBUM"]            = album_str
-    if perf.start_year: container_tags["DATE"]          = str(perf.start_year)
-    if concert_date: container_tags["CONCERTDATE"]      = concert_date
-    if venue_name:   container_tags["CONCERTVENUE"]     = venue_name
-    if location_parts: container_tags["CONCERTLOCATION"] = ", ".join(location_parts)
-    if source_str:   container_tags["RECORDINGSOURCE"]  = source_str
-    if recording.lineage: container_tags["LINEAGE"]     = recording.lineage
-
-    track_total = str(len(tracks))
+    tracks = recording.tracks  # ordered by track_number via relationship
+    container_tags, track_total = build_recording_tags(recording)
 
     n_written = 0
     errors    = []

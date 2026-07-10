@@ -4,13 +4,14 @@ api/ingest.py — Full ingest confirmation endpoint.
 POST /api/ingest/confirm
 
 Handles the full "resolve or create" chain from a single payload:
-  Artist → Performer → Venue (optional) → Performance → Recording + Tracks
+  CanonicalArtist → Artist → Venue (optional) → Performance → Recording + Tracks
 
 This avoids the frontend needing to pre-resolve IDs. The user just
 provides names and dates; this endpoint does the lookup/create work.
 """
 
 import os
+import json
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from sqlalchemy import func
@@ -18,8 +19,8 @@ from sqlalchemy import func
 _AUDIO_EXTS = {'.flac', '.mp3', '.wav', '.aiff', '.aif', '.m4a', '.ogg', '.ape', '.wv'}
 
 from app.extensions import db
-from app.models.artist import Artist
-from app.models.performer import Performer, PerformerArtist
+from app.models.artist import Artist, ArtistCanonical
+from app.models.canonical_artist import CanonicalArtist
 from app.models.venue import Venue
 from app.models.event import Event
 from app.models.performance import Performance
@@ -87,33 +88,32 @@ def confirm_ingest():
     end_month   = data.get("end_month")
     end_day     = data.get("end_day")
 
-    # ── 1. Find or create Artist ───────────────────────────────────────────────
+    # ── 1. Find or create CanonicalArtist (grouping node) ─────────────────────
     sort_name_in = (data.get("sort_name") or "").strip() or None
-    artist = db.session.query(Artist).filter(
-        func.lower(Artist.name) == artist_name.lower()
+    canonical = db.session.query(CanonicalArtist).filter(
+        func.lower(CanonicalArtist.name) == artist_name.lower()
     ).first()
-    if not artist:
-        # sort_name only applies at creation time — an existing artist's
+    if not canonical:
+        # sort_name only applies at creation time — an existing canonical's
         # sort_name is edited via the Artists admin page, not silently
         # overwritten by a later ingest.
-        artist = Artist(name=artist_name, sort_name=sort_name_in)
-        db.session.add(artist)
+        canonical = CanonicalArtist(name=artist_name, sort_name=sort_name_in)
+        db.session.add(canonical)
         db.session.flush()
 
-    # ── 2. Find or create Performer (1:1 with artist for MVP) ─────────────────
-    # A "1:1 performer" is one where the sole artist_link is this artist.
-    performer = (
-        db.session.query(Performer)
-        .join(PerformerArtist, PerformerArtist.performer_id == Performer.id)
-        .filter(PerformerArtist.artist_id == artist.id)
+    # ── 2. Find or create Artist (performing credit, 1:1 with canonical) ──────
+    artist = (
+        db.session.query(Artist)
+        .join(ArtistCanonical, ArtistCanonical.artist_id == Artist.id)
+        .filter(ArtistCanonical.canonical_artist_id == canonical.id)
         .first()
     )
-    if not performer:
-        performer = Performer(name=artist_name)
-        db.session.add(performer)
+    if not artist:
+        artist = Artist(name=artist_name)
+        db.session.add(artist)
         db.session.flush()
-        db.session.add(PerformerArtist(
-            performer_id=performer.id, artist_id=artist.id, order=0
+        db.session.add(ArtistCanonical(
+            artist_id=artist.id, canonical_artist_id=canonical.id, order=0
         ))
         db.session.flush()
 
@@ -159,10 +159,10 @@ def confirm_ingest():
 
     # ── 4. Find or create Performance ─────────────────────────────────────────
     perf_q = db.session.query(Performance).filter(
-        Performance.performer_id == performer.id,
-        Performance.start_year   == start_year,
-        Performance.start_month  == start_month,
-        Performance.start_day    == start_day,
+        Performance.artist_id   == artist.id,
+        Performance.start_year  == start_year,
+        Performance.start_month == start_month,
+        Performance.start_day   == start_day,
     )
     if venue:
         perf_q = perf_q.filter(Performance.venue_id == venue.id)
@@ -170,7 +170,7 @@ def confirm_ingest():
     performance = perf_q.first()
     if not performance:
         performance = Performance(
-            performer_id = performer.id,
+            artist_id    = artist.id,
             venue_id     = venue.id  if venue  else None,
             event_id     = event.id  if event  else None,
             start_year   = start_year,
@@ -202,10 +202,14 @@ def confirm_ingest():
     )
 
     # ── 6. Move / copy folder into library ────────────────────────────────────
-    pref = db.session.query(UserPreference).filter_by(
-        user_id=current_user.id, key="ingest_file_behavior"
-    ).first()
-    behavior     = pref.value if pref else "move"
+    # Behavior precedence: explicit request payload → saved user preference →
+    # "copy" (safe default — never destroy the source unless asked to).
+    behavior = (data.get("behavior") or "").strip().lower()
+    if behavior not in ("move", "copy"):
+        pref = db.session.query(UserPreference).filter_by(
+            user_id=current_user.id, key="ingest_file_behavior"
+        ).first()
+        behavior = pref.value if pref else "copy"
     library_root = str(current_app.config["LIBRARY_ROOT"])
 
     try:
@@ -221,7 +225,6 @@ def confirm_ingest():
         return jsonify({"error": f"File operation failed: {str(e)}"}), 500
 
     # ── 7. Create Recording ───────────────────────────────────────────────────
-    import json as _json
     rec_is_official = bool(data.get("is_official", False))
     rec = Recording(
         performance_id       = performance.id,
@@ -252,7 +255,7 @@ def confirm_ingest():
             duration     = t.get("duration"),
             file_path    = t.get("filename", ""),
             is_official  = track_official,
-            flags        = _json.dumps(flags_raw) if flags_raw else None,
+            flags        = json.dumps(flags_raw) if flags_raw else None,
             songwriter   = t.get("songwriter") or None,
             notes        = t.get("notes") or None,
         ))
@@ -419,7 +422,6 @@ def batch_scan():
       - already_ingested: bool  (folder path already in DB)
     """
     from app.utils.ingest import scan_folder, read_flac_tags, parse_info_file
-    from app.models.performer import Performer
     from app.models.recording import Recording
 
     data       = request.get_json() or {}
@@ -428,8 +430,8 @@ def batch_scan():
     if not source_dir or not os.path.isdir(source_dir):
         return jsonify({"error": f"Directory not found: {source_dir!r}"}), 400
 
-    # Known performer names for fuzzy artist matching
-    known_performers = [p.name for p in db.session.query(Performer.name).all()]
+    # Known artist names for fuzzy artist matching
+    known_performers = [a.name for a in db.session.query(Artist.name).all()]
 
     # Already-ingested folder paths (relative or basename match)
     ingested_paths = {

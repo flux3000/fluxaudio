@@ -2,13 +2,15 @@
 api/tracks.py — Track endpoints.
 
 Routes:
-  GET  /api/tracks/<id>        — track detail
-  PUT  /api/tracks/<id>        — update track metadata; renames file when title changes
-  POST /api/tracks/<id>/play   — log a play event
+  GET  /api/tracks/<id>              — track detail
+  PUT  /api/tracks/<id>              — update track metadata; renames file when title changes
+  GET  /api/tracks/<id>/spectrogram  — linear-frequency spectrogram PNG
+  POST /api/tracks/<id>/play         — log a play event
 """
 
 import io
 import os
+import json
 import logging
 import traceback
 from flask import Blueprint, jsonify, request, current_app, send_file
@@ -31,7 +33,7 @@ from app.models.track import Track
 from app.models.play_log import PlayLog
 from app.utils.folder_naming import _sanitize
 
-log = bp = Blueprint("tracks", __name__)
+bp  = Blueprint("tracks", __name__)
 log = logging.getLogger(__name__)
 
 
@@ -57,7 +59,6 @@ def get_track(track_id):
     t = db.session.get(Track, track_id)
     if not t:
         return jsonify({"error": "Not found"}), 404
-    import json as _json
     return jsonify({
         "id":           t.id,
         "recording_id": t.recording_id,
@@ -66,7 +67,7 @@ def get_track(track_id):
         "set":          t.set,
         "duration":     t.duration,
         "is_official":  bool(t.is_official),
-        "flags":        _json.loads(t.flags) if t.flags else [],
+        "flags":        json.loads(t.flags) if t.flags else [],
         "songwriter":   t.songwriter,
         "notes":        t.notes,
         "stream_url":   f"/api/stream/{t.id}",
@@ -107,8 +108,6 @@ def update_track(track_id):
                 log.warning("Track file not found for rename: %s", old_abs)
 
     # ── DB field updates ──────────────────────────────────────────────────────
-    import json as _json
-
     for field in ["title", "set", "notes", "songwriter"]:
         if field in data:
             setattr(t, field, data[field] or None)
@@ -119,7 +118,7 @@ def update_track(track_id):
     if "flags" in data:
         flags = data["flags"]
         if isinstance(flags, list):
-            t.flags = _json.dumps(flags) if flags else None
+            t.flags = json.dumps(flags) if flags else None
         elif isinstance(flags, str):
             t.flags = flags or None
         else:

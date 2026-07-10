@@ -452,7 +452,7 @@ body {
 /* Recording row in catalog — grid layout */
 .rec-row {
   display: grid;
-  grid-template-columns: 102px 1fr 130px 54px 36px 46px 28px;
+  grid-template-columns: 100px 1fr 116px 46px 30px 40px 58px 48px 26px;
   align-items: center;
   gap: 10px;
   padding: 9px 28px;
@@ -471,9 +471,24 @@ body {
   letter-spacing: -0.02em;
 }
 
+/* Venue + performer sub-label stacked in one grid cell */
+.rec-venue-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
 .rec-venue {
   font-size: 13px;
   color: var(--t0);
+  min-width: 0;
+}
+
+/* Non-canonical performer name, e.g. "Bill Evans Trio" under "Bill Evans" */
+.rec-performer {
+  font-size: 11px;
+  color: var(--t2);
   min-width: 0;
 }
 
@@ -483,11 +498,37 @@ body {
   min-width: 0;
 }
 
+.rec-rating { text-align: right; }
+
+.rec-runtime {
+  font-size: 11px;
+  color: var(--t1);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .rec-tracks {
   font-size: 11px;
   color: var(--t2);
   font-variant-numeric: tabular-nums;
   text-align: right;
+  white-space: nowrap;
+}
+
+/* "inc" marker for incomplete recordings */
+.rec-inc {
+  color: var(--amber);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Smaller rating badge for the dense catalog row */
+.rating-badge--sm {
+  font-size: 10px;
+  padding: 0 4px;
+  min-width: 20px;
 }
 
 .rec-play-btn {

@@ -50,9 +50,16 @@ def _format_date_range(start_year, start_month, start_day,
 
 
 def _format_source(source, source_modifier):
-    """Combine source type and optional modifier."""
-    if not source:
-        return None
+    """
+    Combine source type and optional modifier for the folder name.
+
+    "Other" is a catch-all bucket, not a meaningful source label — it loses the
+    context that it's the source field — so it is dropped from the name. If a
+    source detail (modifier) is present with "Other", the detail carries the
+    real info and is used alone.
+    """
+    if not source or source == "Other":
+        return source_modifier or None
     if source_modifier:
         return f"{source} - {source_modifier}"
     return source

@@ -46,18 +46,18 @@ class User(UserMixin, db.Model):
 
 class UserArtistPermission(db.Model):
     """
-    Grants an archivist edit access to a specific artist.
+    Grants an archivist edit access to a specific canonical artist.
     Only evaluated when user.all_artists is False.
     """
     __tablename__ = "user_artist_permission"
 
-    id        = db.Column(db.Integer, primary_key=True)
-    user_id   = db.Column(db.Integer, db.ForeignKey("user.id"),   nullable=False)
-    artist_id = db.Column(db.Integer, db.ForeignKey("artist.id"), nullable=False)
+    id                  = db.Column(db.Integer, primary_key=True)
+    user_id             = db.Column(db.Integer, db.ForeignKey("user.id"),             nullable=False)
+    canonical_artist_id = db.Column(db.Integer, db.ForeignKey("canonical_artist.id"), nullable=False)
 
     # Relationships
-    user   = db.relationship("User",   back_populates="artist_permissions")
-    artist = db.relationship("Artist", back_populates="user_permissions")
+    user             = db.relationship("User",            back_populates="artist_permissions")
+    canonical_artist = db.relationship("CanonicalArtist", back_populates="user_permissions")
 
     def __repr__(self):
-        return f"<UserArtistPermission user={self.user_id} artist={self.artist_id}>"
+        return f"<UserArtistPermission user={self.user_id} canonical_artist={self.canonical_artist_id}>"

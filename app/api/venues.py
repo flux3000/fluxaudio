@@ -14,6 +14,7 @@ from sqlalchemy import or_
 
 from app.extensions import db
 from app.models.venue import Venue
+from app.utils.format import format_partial_date
 
 bp = Blueprint("venues", __name__)
 
@@ -55,14 +56,6 @@ def get_venue(venue_id):
         reverse=True,
     )
 
-    def fmt_date(p):
-        parts = [str(p.start_year or "?")]
-        if p.start_month:
-            parts.append(str(p.start_month).zfill(2))
-        if p.start_day:
-            parts.append(str(p.start_day).zfill(2))
-        return "-".join(parts)
-
     return jsonify({
         "id":                v.id,
         "name":              v.name,
@@ -74,8 +67,8 @@ def get_venue(venue_id):
         "performances": [
             {
                 "id":        p.id,
-                "performer": p.performer.name,
-                "date":      fmt_date(p),
+                "performer": p.artist.name,
+                "date":      format_partial_date(p.start_year, p.start_month, p.start_day),
             }
             for p in perfs
         ],

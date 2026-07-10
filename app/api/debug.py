@@ -2,8 +2,10 @@
 api/debug.py — Debug endpoints. DEV_MODE only.
 
 Routes:
-  GET /api/debug/info                general app state
-  GET /api/debug/tags/<recording_id> raw FLAC tags from files vs. DB values
+  POST /api/debug/log                 receive a JS log entry (in-memory buffer)
+  GET  /api/debug/live                current in-memory log (polled by pop-out)
+  GET  /api/debug/info                general app state
+  GET  /api/debug/tags/<recording_id> raw FLAC tags from files vs. DB values
 """
 
 from collections import deque
@@ -59,7 +61,7 @@ def debug_live():
 def debug_info():
     _require_dev()
 
-    from app.models.artist import Artist
+    from app.models.canonical_artist import CanonicalArtist
     from app.models.track import Track
 
     return jsonify({
@@ -68,7 +70,7 @@ def debug_info():
         "db_path":     str(current_app.config.get("SQLALCHEMY_DATABASE_URI", "")),
         "user":        {"id": current_user.id, "username": current_user.username},
         "counts": {
-            "artists":    db.session.query(Artist).count(),
+            "artists":    db.session.query(CanonicalArtist).count(),
             "recordings": db.session.query(Recording).count(),
             "tracks":     db.session.query(Track).count(),
         },
@@ -92,46 +94,13 @@ def debug_tags(recording_id):
         return jsonify({"error": "Not found"}), 404
 
     library_root = current_app.config.get("LIBRARY_ROOT", "")
-    perf  = rec.performance
-    venue = perf.venue if perf else None
-
-    # ── DB snapshot (what write_flac_tags would produce) ──────────────────────
-    date_parts = [perf.start_year, perf.start_month, perf.start_day] if perf else []
-    if perf and all(date_parts):
-        concert_date = f"{perf.start_year}-{perf.start_month:02d}-{perf.start_day:02d}"
-    elif perf and perf.start_year and perf.start_month:
-        concert_date = f"{perf.start_year}-{perf.start_month:02d}"
-    elif perf and perf.start_year:
-        concert_date = str(perf.start_year)
-    else:
-        concert_date = None
-
-    loc_parts  = [p for p in ([venue.city, venue.state, venue.country] if venue
-                               else [perf.city, perf.state, perf.country] if perf
-                               else []) if p]
-    source_str = rec.source
-    if rec.source_modifier:
-        source_str = f"{source_str} - {rec.source_modifier}" if source_str else rec.source_modifier
-
-    artist_name = perf.performer.name if (perf and perf.performer) else None
-    album_parts = [p for p in [artist_name,
-                                concert_date,
-                                venue.name if venue else None] if p]
-
-    db_tags = {
-        "ARTIST":          artist_name,
-        "ALBUM":           " - ".join(album_parts) if album_parts else None,
-        "DATE":            str(perf.start_year) if (perf and perf.start_year) else None,
-        "CONCERTDATE":     concert_date,
-        "CONCERTVENUE":    venue.name if venue else None,
-        "CONCERTLOCATION": ", ".join(loc_parts) if loc_parts else None,
-        "RECORDINGSOURCE": source_str,
-        "LINEAGE":         rec.lineage,
-        # track-level tags are per-file below
-    }
+    # ── DB snapshot: exactly what write_flac_tags would produce ───────────────
+    # (shared builder, so this can't drift from the real writer)
+    from app.utils.ingest import build_recording_tags
+    db_tags, track_total = build_recording_tags(rec)
     db_tracks = {
         t.track_number: {"TITLE": t.title, "TRACKNUMBER": str(t.track_number),
-                         "TRACKTOTAL": str(len(rec.tracks))}
+                         "TRACKTOTAL": track_total}
         for t in rec.tracks
     }
 

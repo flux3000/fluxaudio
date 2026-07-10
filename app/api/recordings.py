@@ -20,6 +20,7 @@ from app.models.recording_event import RecordingEvent
 from app.models.track import Track
 from app.utils.ingest import scan_folder, read_flac_tags, parse_info_file, write_flac_tags, _parse_location
 from app.utils.analysis import analyse_recording
+from app.utils.pruning import prune_after_recording_delete
 
 bp = Blueprint("recordings", __name__)
 
@@ -301,27 +302,62 @@ def update_recording(recording_id):
 
 # ── DELETE /api/recordings/<id> ──────────────────────────────────────────────
 
+def _delete_tracks_of_recording(recording_id):
+    """
+    Delete every track of a recording along with its dependent child rows
+    (track_analysis, play_log). Done in app code because SQLite FK cascades
+    are not enforced on the existing schema — see delete_recording.
+    """
+    from app.models.track import Track
+    from app.models.track_analysis import TrackAnalysis
+    from app.models.play_log import PlayLog
+
+    track_ids = [
+        t.id for t in db.session.query(Track.id).filter_by(recording_id=recording_id).all()
+    ]
+    if track_ids:
+        db.session.query(TrackAnalysis).filter(TrackAnalysis.track_id.in_(track_ids)).delete(
+            synchronize_session=False)
+        db.session.query(PlayLog).filter(PlayLog.track_id.in_(track_ids)).delete(
+            synchronize_session=False)
+        db.session.query(Track).filter(Track.id.in_(track_ids)).delete(
+            synchronize_session=False)
+
+
 @bp.route("/<int:recording_id>", methods=["DELETE"])
 @login_required
 def delete_recording(recording_id):
     """
     Delete a recording and all its child records (tracks, events, fingerprints).
-    Does NOT touch files on disk — audio files are left in place.
+    Then prune any performance/performer/canonical-artist left empty by the
+    delete. Does NOT touch files on disk — audio files are left in place.
     """
-    from app.models.track import Track
     from app.models.recording import RecordingFingerprint
     rec = db.session.get(Recording, recording_id)
     if not rec:
         return jsonify({"error": "Recording not found"}), 404
 
-    # Delete children explicitly (avoid relying on cascade config)
-    db.session.query(Track).filter_by(recording_id=recording_id).delete()
-    db.session.query(RecordingFingerprint).filter_by(recording_id=recording_id).delete()
-    db.session.query(RecordingEvent).filter_by(recording_id=recording_id).delete()
-    db.session.delete(rec)
+    performance_id = rec.performance_id
+
+    # Delete children explicitly, bottom-up. SQLite FK enforcement is off and
+    # the existing tables were created without ON DELETE actions, so nothing
+    # cascades for us — we clear every child of every track (analysis, play
+    # logs) plus the recording's own children, or they orphan silently. Bulk
+    # deletes (no ORM cascade) keep this predictable.
+    _delete_tracks_of_recording(recording_id)
+    db.session.query(RecordingFingerprint).filter_by(recording_id=recording_id).delete(
+        synchronize_session=False)
+    db.session.query(RecordingEvent).filter_by(recording_id=recording_id).delete(
+        synchronize_session=False)
+    db.session.query(Recording).filter_by(id=recording_id).delete(synchronize_session=False)
+    db.session.flush()
+
+    # Prune the now-empty chain above the recording.
+    pruned = prune_after_recording_delete(performance_id)
+
     db.session.commit()
 
-    return '', 204
+    return jsonify({"deleted": recording_id, "pruned": pruned}), 200
 
 
 # ── POST /api/recordings/<id>/write-tags ──────────────────────────────────────

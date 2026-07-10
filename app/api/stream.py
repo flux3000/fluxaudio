@@ -20,6 +20,50 @@ from app.models.recording import Recording
 bp = Blueprint("stream", __name__)
 
 CHUNK_SIZE = 1024 * 256  # 256 KB chunks
+MIMETYPE   = "audio/flac"
+
+
+def _serve_file(full_path):
+    """
+    Stream a file with HTTP Range support (enables seeking): a 206 partial
+    response when a Range header is present, else a 200 full-file stream.
+    Single implementation shared by both stream endpoints.
+    """
+    file_size    = os.path.getsize(full_path)
+    range_header = request.headers.get("Range")
+
+    if range_header:
+        byte_start, byte_end = _parse_range(range_header, file_size)
+        length = byte_end - byte_start + 1
+
+        def generate_range():
+            with open(full_path, "rb") as f:
+                f.seek(byte_start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(CHUNK_SIZE, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        return Response(generate_range(), status=206, headers={
+            "Content-Range":  f"bytes {byte_start}-{byte_end}/{file_size}",
+            "Accept-Ranges":  "bytes",
+            "Content-Length": str(length),
+            "Content-Type":   MIMETYPE,
+        })
+
+    def generate_full():
+        with open(full_path, "rb") as f:
+            while chunk := f.read(CHUNK_SIZE):
+                yield chunk
+
+    return Response(generate_full(), status=200, headers={
+        "Content-Length": str(file_size),
+        "Accept-Ranges":  "bytes",
+        "Content-Type":   MIMETYPE,
+    })
 
 
 @bp.route("/<int:track_id>")
@@ -40,46 +84,7 @@ def stream_track(track_id):
     if not os.path.isfile(full_path):
         abort(404)
 
-    file_size = os.path.getsize(full_path)
-    mimetype  = "audio/flac"
-
-    # ── Handle Range requests (enables seeking) ────────────────
-    range_header = request.headers.get("Range")
-    if range_header:
-        byte_start, byte_end = _parse_range(range_header, file_size)
-        length = byte_end - byte_start + 1
-
-        def generate_range():
-            with open(full_path, "rb") as f:
-                f.seek(byte_start)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(CHUNK_SIZE, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-
-        headers = {
-            "Content-Range":  f"bytes {byte_start}-{byte_end}/{file_size}",
-            "Accept-Ranges":  "bytes",
-            "Content-Length": str(length),
-            "Content-Type":   mimetype,
-        }
-        return Response(generate_range(), status=206, headers=headers)
-
-    # ── Full file stream ───────────────────────────────────────
-    def generate_full():
-        with open(full_path, "rb") as f:
-            while chunk := f.read(CHUNK_SIZE):
-                yield chunk
-
-    headers = {
-        "Content-Length": str(file_size),
-        "Accept-Ranges":  "bytes",
-        "Content-Type":   mimetype,
-    }
-    return Response(generate_full(), status=200, headers=headers)
+    return _serve_file(full_path)
 
 
 @bp.route("/ingest-preview")
@@ -103,44 +108,7 @@ def stream_ingest_preview():
     if not os.path.isfile(full_path):
         abort(404)
 
-    file_size = os.path.getsize(full_path)
-    mimetype  = "audio/flac"
-
-    range_header = request.headers.get("Range")
-    if range_header:
-        byte_start, byte_end = _parse_range(range_header, file_size)
-        length = byte_end - byte_start + 1
-
-        def generate_range():
-            with open(full_path, "rb") as f:
-                f.seek(byte_start)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(CHUNK_SIZE, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-
-        headers = {
-            "Content-Range":  f"bytes {byte_start}-{byte_end}/{file_size}",
-            "Accept-Ranges":  "bytes",
-            "Content-Length": str(length),
-            "Content-Type":   mimetype,
-        }
-        return Response(generate_range(), status=206, headers=headers)
-
-    def generate_full():
-        with open(full_path, "rb") as f:
-            while chunk := f.read(CHUNK_SIZE):
-                yield chunk
-
-    headers = {
-        "Content-Length": str(file_size),
-        "Accept-Ranges":  "bytes",
-        "Content-Type":   mimetype,
-    }
-    return Response(generate_full(), status=200, headers=headers)
+    return _serve_file(full_path)
 
 
 def _parse_range(range_header, file_size):
