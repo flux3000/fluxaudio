@@ -21,6 +21,7 @@ from app.models.track import Track
 from app.utils.ingest import (scan_folder, read_flac_tags, parse_info_file,
                               write_flac_tags, read_recording_tags, _parse_location)
 from app.utils.analysis import analyse_recording
+from app.utils.health import compute_health
 from app.utils.pruning import prune_after_recording_delete
 
 bp = Blueprint("recordings", __name__)
@@ -69,6 +70,7 @@ def get_recording(recording_id):
         "is_official":          bool(rec.is_official),
         "info_file_content":    rec.info_file_content,
         "notes":                rec.notes,
+        "ai_research":          _json.loads(rec.ai_research_json) if rec.ai_research_json else None,
         "tracks": [
             {
                 "id":           t.id,
@@ -192,7 +194,7 @@ def scan_recording():
             "content":  content,
         })
 
-    return jsonify({
+    resp = {
         "folder_path":      folder_path,
         "folder_name":      os.path.basename(folder_path),
         "audio_file_count": len(files["audio_files"]),
@@ -231,6 +233,7 @@ def scan_recording():
                         "track_number": t["track_number"],
                         "title":        t["title"],
                         "duration":     t["duration"],
+                        "raw":          t.get("raw", {}),
                     }
                     for t in from_tags["tracks"]
                 ],
@@ -255,7 +258,9 @@ def scan_recording():
                 ],
             },
         },
-    })
+    }
+    resp["health"] = compute_health(resp)
+    return jsonify(resp)
 
 
 # ── PUT /api/recordings/<id> ──────────────────────────────────────────────────

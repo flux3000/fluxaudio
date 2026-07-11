@@ -848,6 +848,8 @@ body {
   min-height: 0;
   overflow-y: auto;
 }
+/* Tab content (Info File, File Tags JSON, AI Assist) is selectable/copyable */
+.slide-pane-scroll, .slide-pane-scroll * { -webkit-user-select: text; user-select: text; }
 .slide-pane-scroll::-webkit-scrollbar { width: 4px; }
 .slide-pane-scroll::-webkit-scrollbar-thumb { background: var(--bd-2); border-radius: 2px; }
 
@@ -1987,90 +1989,271 @@ input[type="range"].progress-bar {
   word-break: break-all;
 }
 
-/* ── Incoming queue view ─────────────────────────────────────────────────────── */
+/* ── Review top bar (full-width; AI Assist button far top-right) ─────────────── */
 
-.incoming-list {
-  padding: 12px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.incoming-row {
+.ingest-review-topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
-  background: var(--bg-1);
-  border: 1px solid var(--bd-0);
-  border-radius: var(--r-sm);
-  transition: border-color 0.15s;
-}
-
-.incoming-row:hover {
-  border-color: var(--bd-1);
-}
-
-.incoming-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.incoming-name {
-  font-size: 13px;
-  color: var(--t0);
-  font-weight: 450;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.incoming-issues {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.incoming-issue {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.incoming-issue-error {
-  background: rgba(220, 80, 80, 0.15);
-  color: #e06060;
-  border: 1px solid rgba(220, 80, 80, 0.25);
-}
-
-.incoming-issue-warn {
-  background: rgba(210, 150, 40, 0.15);
-  color: #c99040;
-  border: 1px solid rgba(210, 150, 40, 0.25);
-}
-
-.incoming-issue-info {
-  background: rgba(100, 140, 200, 0.12);
-  color: #7899c0;
-  border: 1px solid rgba(100, 140, 200, 0.2);
-}
-
-.incoming-meta {
-  display: flex;
+  justify-content: space-between;
   gap: 12px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--bd-1);
   flex-shrink: 0;
 }
+.ingest-topbar-title { margin: 0; font-size: 15px; font-weight: 500; color: var(--t0); }
 
-.incoming-stat {
-  font-size: 11px;
-  color: var(--t2);
-  white-space: nowrap;
+.health-ai-btn { flex-shrink: 0; white-space: nowrap; }
+
+.health-ai-btn--glow {
+  box-shadow: 0 0 0 0 rgba(120, 150, 220, 0.5);
+  animation: healthAiPulse 2s ease-in-out infinite;
 }
+
+@keyframes healthAiPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(120, 150, 220, 0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(120, 150, 220, 0.18); }
+}
+
+/* ── Info Quality Review panel (right strip) ─────────────────────────────────── */
+
+.iqr-score-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 14px 6px;
+}
+.iqr-score { font-size: 26px; font-weight: 600; line-height: 1; flex-shrink: 0; }
+.iqr-score--green  { color: #5aa96a; }
+.iqr-score--yellow { color: #c99040; }
+.iqr-score--red    { color: #e06060; }
+.iqr-band {
+  font-size: 11px;
+  color: var(--t1);
+  line-height: 1.3;
+}
+
+.iqr-sentences {
+  list-style: none;
+  margin: 0;
+  padding: 0 14px 10px;
+}
+.iqr-sentence {
+  padding: 4px 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--t1);
+  border-bottom: 1px solid var(--bd-0);
+}
+.iqr-sentence.iqr-intrinsic { color: var(--t3); font-style: italic; }
+.iqr-ok { padding: 4px 14px 10px; font-size: 11.5px; color: #5aa96a; list-style: none; }
+
+/* ⓘ tooltip on the Info Quality Review header */
+.iqr-info { position: relative; cursor: help; }
+.iqr-info:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: 130%;
+  right: 0;
+  width: 230px;
+  padding: 8px 10px;
+  background: var(--bg-0);
+  border: 1px solid var(--bd-1);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  line-height: 1.45;
+  color: var(--t1);
+  white-space: normal;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  z-index: 60;
+}
+
+/* ── Modal (generic) + Settings ──────────────────────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-card {
+  background: var(--bg-1);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md, 8px);
+  width: 380px;
+  max-width: 92vw;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--bd-0);
+}
+.modal-header h3 { margin: 0; font-size: 14px; color: var(--t0); }
+
+.modal-body { padding: 14px 16px; }
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--bd-0);
+}
+
+.settings-label {
+  display: block;
+  font-size: 11px;
+  color: var(--t1);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.settings-hint { color: var(--t3); font-weight: 400; }
+
+.settings-key-row { display: flex; gap: 6px; }
+.settings-key-row input { flex: 1; }
+.settings-modal select,
+.settings-modal input { width: 100%; }
+
+.settings-warn {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #c99040;
+}
+
+/* ── AI Analysis panel (ingest review right strip) ───────────────────────────── */
+
+.rev-panel-header--ai { background: rgba(120, 150, 220, 0.08); }
+
+.ai-panel-empty,
+.ai-panel-loading {
+  padding: 14px 16px;
+  font-size: 12px;
+  color: var(--t2);
+  text-align: center;
+}
+.ai-panel-loading { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+
+.ai-thinking {
+  padding: 10px 14px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--t1);
+  white-space: pre-wrap;
+  border-bottom: 1px solid var(--bd-0);
+}
+
+.ai-block-title {
+  padding: 8px 14px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--t2);
+  font-weight: 600;
+}
+
+.ai-proposals {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.ai-proposals th {
+  text-align: left;
+  padding: 3px 8px;
+  color: var(--t3);
+  font-weight: 500;
+  border-bottom: 1px solid var(--bd-0);
+}
+.ai-proposals td { padding: 4px 8px; border-bottom: 1px solid var(--bd-0); vertical-align: top; }
+.ai-field { text-transform: capitalize; color: var(--t2); white-space: nowrap; }
+.ai-cur   { color: var(--t3); }
+.ai-prop  { color: var(--t0); font-weight: 450; }
+.ai-src-link { text-decoration: none; opacity: 0.7; }
+
+.ai-conf { font-size: 9px; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; }
+.ai-conf--high   { background: rgba(90, 169, 106, 0.15); color: #5aa96a; }
+.ai-conf--medium { background: rgba(210, 150, 40, 0.15); color: #c99040; }
+.ai-conf--low    { background: rgba(150, 150, 150, 0.15); color: var(--t2); }
+
+.ai-apply-btn.applied { color: #5aa96a; }
+.btn-xs { padding: 1px 7px; font-size: 10px; }
+
+.ai-block { padding: 0 14px 6px; }
+.ai-block ul { margin: 2px 0 0; padding-left: 18px; font-size: 11px; color: var(--t1); line-height: 1.5; }
+.ai-block--verify ul { color: #c99040; }
+.ai-none { padding: 4px 14px 8px; font-size: 11px; color: var(--t3); }
+
+/* Fields auto-filled / applied from AI proposals */
+.ai-applied {
+  border-color: rgba(120, 150, 220, 0.6) !important;
+  background: rgba(120, 150, 220, 0.06) !important;
+}
+
+/* ── AI Assist tab (ingest review right column) ──────────────────────────────── */
+
+.ai-tab-score {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px 16px 6px;
+}
+.ai-tab-score-num { font-size: 24px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.ai-tab-score-num--green  { color: #5aa96a; }
+.ai-tab-score-num--yellow { color: #c99040; }
+.ai-tab-score-num--red    { color: #e06060; }
+.ai-tab-score-msg { font-size: 11px; color: var(--t1); line-height: 1.3; }
+
+.ai-tab-run { padding: 4px 16px 12px; border-bottom: 1px solid var(--bd-0); }
+.ai-tab-hint { margin-top: 6px; font-size: 10.5px; color: var(--t3); line-height: 1.4; }
+
+.ai-loading {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 24px 16px; color: var(--t2); font-size: 12px;
+}
+
+.ai-results { padding: 2px 0 12px; }
+.ai-summary {
+  margin: 0 0 8px; padding: 0;
+  font-size: 11.5px; line-height: 1.55; color: var(--t1);
+  white-space: pre-wrap;   /* honor the newline breaks inserted by formatAiThinking */
+}
+.ai-res-empty { margin: 4px 0 0; font-size: 11.5px; color: var(--t3); }
+
+/* AI-proposed track listing */
+.ai-tt-list { margin-top: 2px; }
+.ai-tt-row {
+  display: flex; gap: 10px; padding: 2px 0;
+  font-size: 11.5px; line-height: 1.4;
+}
+.ai-tt-num { flex-shrink: 0; width: 22px; color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
+.ai-tt-title { color: var(--t1); }
+.ai-res-section { padding: 8px 16px; }
+.ai-res-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--t2); font-weight: 600; margin-bottom: 6px;
+}
+.ai-res-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 0; border-bottom: 1px solid var(--bd-0);
+  font-size: 11.5px;
+}
+.ai-res-field { flex-shrink: 0; width: 64px; color: var(--t3); text-transform: capitalize; }
+.ai-res-value { flex: 1; min-width: 0; color: var(--t0); word-break: break-word; }
+.ai-res-conf { color: var(--t3); font-size: 10px; }
+.ai-res-note { margin: 0 0 5px; font-size: 11.5px; line-height: 1.5; color: var(--t1); }
+
+/* Neutral, theme-aware links (never blue) */
+.ai-link { color: var(--t2); text-decoration: underline; text-underline-offset: 2px; }
+.ai-link:hover { color: var(--t0); }
 
 /* ── Ingest view ────────────────────────────────────────────────────────────── */
 
@@ -2437,6 +2620,19 @@ input[type="range"].progress-bar {
 }
 .track-qmenu-note:focus { border-color: var(--accent); }
 
+.track-qmenu-songwriter {
+  width: 100%;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--t0);
+  background: var(--bg-1);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+  box-sizing: border-box;
+}
+.track-qmenu-songwriter:focus { border-color: var(--accent); }
+
 /* ── Expandable track detail row (edit view + ingest) ────────────────────── */
 .et-expand-cell { text-align: center; }
 .et-official-cell { text-align: center; }
@@ -2511,16 +2707,24 @@ input[type="range"].progress-bar {
 
 /* ── Review step split layout ────────────────────────────────────────────────── */
 
+.ingest-review-outer {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--player-h));
+  overflow: hidden;
+}
+
 .ingest-review-shell {
   display: flex;
-  height: calc(100vh - var(--player-h));
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
 .ingest-review-form {
   display: flex;
   flex-direction: column;
-  flex-basis: 50%;
+  flex: 2 1 0;          /* main area ~2/3 */
   min-width: 260px;
   overflow: hidden;
 }
@@ -2566,11 +2770,11 @@ input[type="range"].progress-bar {
 
 .ingest-review-raw {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;   /* panes + vertical tab rail */
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  background: var(--bg-2);
+  background: var(--bg-1);
 }
 
 .rev-section-title {

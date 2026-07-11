@@ -1,0 +1,62 @@
+########################################################################
+# Flux Audio — Standard LCR Info File Template
+#
+# This is the canonical text-file format for a live concert recording (LCR).
+# The AI Research Assistant generates/standardizes info files to THIS layout.
+# It is plain text and human-editable — open it in any editor to adjust the
+# structure or wording; the generator fills the {{TOKENS}} below.
+#
+# Rules:
+#   • Everything above the "=====" line is guidance and is NOT written into
+#     a recording's info file. Only the skeleton below the line is emitted.
+#   • {{TOKENS}} are replaced with values; omit a whole line if its value is
+#     unknown (don't emit "Lineage: unknown" unless useful).
+#   • Dates are ISO: YYYY-MM-DD (partial ok: YYYY-MM or YYYY).
+#   • {{LOCATION}} is composed by joining city / state / country with ", ",
+#     SKIPPING any blank part — never emit an empty field or orphan comma.
+#     US: "New York, NY, US". Ex-US (state null): "London, UK", "Osaka, Japan".
+#   • Source codes: SBD | AUD | MTX | FM | TV | Other.
+#   • Setlist is grouped by Set/Disc, tracks zero-padded and numbered — TITLE
+#     ONLY. Do NOT append track times OR songwriters to the setlist line: both
+#     risk being parsed into the title. Songwriter is structured data — it goes
+#     in each track's Songwriter field in the DB; durations live in the audio
+#     files / DB.
+#   • AI comments split into two classes — keep them separate:
+#       1. VERIFY items (transient/operational: "confirm titles by ear",
+#          "AI-parsed from tags") → go ONLY to the recording's Notes field in
+#          the app DB, never into this text file. They can be cleared once
+#          handled.
+#       2. PROVENANCE (lasting facts worth keeping: an unresolvable date
+#          dispute, broadcast/remaster context, source anomalies) → the Notes
+#          block below. This file is long-lived archival record; keep it clean.
+#     Never silently bake an uncertain value into a field.
+########################################################################
+=====
+{{ARTIST}}
+{{DATE}}
+{{VENUE}}
+{{LOCATION}}
+{{SOURCE}}
+
+Source: {{SOURCE_DETAIL}}
+Lineage: {{LINEAGE}}
+Taper / Transfer: {{TAPER}}
+
+Personnel:
+{{PERSONNEL}}
+
+Setlist:
+
+{{SET_LABEL}}
+01. {{TITLE}}
+02. ...
+
+Total Runtime: {{RUNTIME}}
+
+Notes:
+{{NOTES}}
+
+----------------------------------------------------------------------
+Flux Audio — standardized info file. Do not sell; trade freely.
+Metadata verified {{DATE_GENERATED}}.
+Sources: {{SOURCES}}

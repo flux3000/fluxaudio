@@ -56,6 +56,11 @@ class Recording(db.Model):
     rating     = db.Column(db.Integer, nullable=True)
 
     notes      = db.Column(db.Text, nullable=True)
+
+    # Raw JSON of the most recent AI research pass (latest run only, overwritten
+    # each time) — an audit trail of the proposals/sources. See utils/ai_assist.
+    ai_research_json = db.Column(db.Text, nullable=True)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
                            onupdate=lambda: datetime.now(timezone.utc))

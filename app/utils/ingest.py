@@ -262,6 +262,11 @@ def read_flac_tags(audio_files):
                     if tag_key in tags and field not in ("title", "track_number", "track_total"):
                         container[field] = tags[tag_key][0]
 
+            # Full raw Vorbis comments (lowercased keys, single values unwrapped)
+            # so the UI can show the same JSON as the recording view's File Tags.
+            raw = {k.lower(): (v[0] if isinstance(v, list) and len(v) == 1 else v)
+                   for k, v in tags.items()}
+
             # Track-level
             track_entry = {
                 "index":        f["index"],
@@ -270,6 +275,7 @@ def read_flac_tags(audio_files):
                 "title":        tags.get("TITLE",       [None])[0],
                 "track_number": tags.get("TRACKNUMBER", [None])[0],
                 "duration":     int(audio.info.length) if audio.info else None,
+                "raw":          raw,
             }
             tracks.append(track_entry)
 
@@ -431,6 +437,14 @@ _US_STATE_CODES = set(_US_STATES.keys())                                   # {"C
 _US_STATE_NAMES = {v["name"].lower(): k for k, v in _US_STATES.items()}   # {"california":"CA",...}
 _COUNTRIES      = _gc.get_countries()
 _COUNTRY_NAMES  = {v["name"].lower() for v in _COUNTRIES.values()}
+# Common country spellings the gazetteer stores under a different canonical
+# name, mapped to the short form we store.
+_COUNTRY_ALIASES = {
+    "us": "US", "u.s.": "US", "u.s.a.": "US", "usa": "US",
+    "united states": "US", "united states of america": "US", "america": "US",
+    "uk": "UK", "u.k.": "UK", "united kingdom": "UK",
+    "great britain": "UK", "britain": "UK", "england": "UK",
+}
 
 _CURRENT_YEAR   = datetime.date.today().year
 
@@ -618,53 +632,56 @@ def _parse_date(line):
 
 def _parse_location(line):
     """
-    Try to extract (city, state, country) from a line.
-    Validates city against geonamescache; state/country against known codes.
-    Returns (city, state, country) — any element may be None if not found.
+    Extract (city, state, country) from a location line, positionally.
+
+    Recognises the country and/or US state from the END of the line, then the
+    remaining last comma-part is the city (any earlier parts are venue text and
+    are ignored). Handles:
+        "New York, NY"                  -> ("New York", "NY", "US")
+        "New York, NY, USA"             -> ("New York", "NY", "US")
+        "Fillmore East, New York, NY"   -> ("New York", "NY", "US")   (drops venue)
+        "Osaka, Japan"                  -> ("Osaka", None, "Japan")
+        "Ann Arbor MI"                  -> ("Ann Arbor", "MI", "US")   (no comma)
+    Returns (None, None, None) when no state/country is recognised — i.e. the
+    line is not a location. City is NOT validated against the gazetteer, so
+    multi-word cities are never truncated (the old "New York"->"York" bug).
     """
     line = line.strip()
+    if not line:
+        return None, None, None
 
-    # Split on the LAST comma to handle "Music Hall, San Francisco, CA"
-    if "," in line:
-        left, region_raw = line.rsplit(",", 1)
-        region_raw = region_raw.strip()
-        city_raw   = left.strip()
-    else:
-        # No comma — last word might be a bare state code: "Ann Arbor MI"
-        words = line.split()
-        if len(words) < 2:
-            return None, None, None
-        region_raw = words[-1]
-        city_raw   = " ".join(words[:-1])
+    parts = [p.strip() for p in line.split(",") if p.strip()]
 
-    # Validate region (US state or country)
-    region_up  = region_raw.upper()
-    region_low = region_raw.lower()
-    state   = None
-    country = None
+    # No comma but "City ST" / "City Country" — peel the trailing region token.
+    if len(parts) == 1 and " " in parts[0]:
+        head, tail = parts[0].rsplit(" ", 1)
+        if (tail.upper() in _US_STATE_CODES or tail.lower() in _US_STATE_NAMES
+                or tail.lower() in _COUNTRY_NAMES or tail.lower() in _COUNTRY_ALIASES):
+            parts = [head.strip(), tail.strip()]
 
-    if region_up in _US_STATE_CODES:
-        state, country = region_up, "US"
-    elif region_low in _US_STATE_NAMES:
-        state, country = _US_STATE_NAMES[region_low], "US"
-    elif region_low in _COUNTRY_NAMES:
-        country = region_raw.title()
-    else:
-        return None, None, None     # unrecognised region → not a location line
+    state = country = None
 
-    # Extract city — try last 1, 2, then 3 words of city_raw against known cities
-    city_words = city_raw.split()
-    city = None
-    for n in (1, 2, 3):
-        if len(city_words) >= n:
-            candidate = " ".join(city_words[-n:])
-            if candidate.lower() in _CITY_NAMES:
-                city = candidate.title()
-                break
-    if city is None:
-        # Region validated but city unknown (small/unusual) — accept last word
-        city = city_words[-1].title() if city_words else None
+    # Country from the last part (known alias, or a gazetteer country name).
+    if parts:
+        ll = parts[-1].lower()
+        if ll in _COUNTRY_ALIASES:
+            country = _COUNTRY_ALIASES[ll]; parts.pop()
+        elif ll in _COUNTRY_NAMES:
+            country = parts[-1].title(); parts.pop()
 
+    # US state from the (new) last part — 2-letter code or full name.
+    if parts:
+        last = parts[-1]
+        if last.upper() in _US_STATE_CODES:
+            state, country = last.upper(), "US"; parts.pop()
+        elif last.lower() in _US_STATE_NAMES:
+            state, country = _US_STATE_NAMES[last.lower()], "US"; parts.pop()
+
+    # Not a location line unless we recognised a state or country.
+    if state is None and country is None:
+        return None, None, None
+
+    city = parts[-1].title() if parts else None
     return city, state, country
 
 

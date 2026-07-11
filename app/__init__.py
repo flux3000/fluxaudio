@@ -31,6 +31,7 @@ def create_app(config_class=Config):
     from app.api.venues       import bp as venues_bp
     from app.api.events       import bp as events_bp
     from app.api.debug        import bp as debug_bp
+    from app.api.preferences  import bp as preferences_bp
 
     app.register_blueprint(auth_bp,         url_prefix="/api/auth")
     app.register_blueprint(artists_bp,      url_prefix="/api/artists")
@@ -42,6 +43,7 @@ def create_app(config_class=Config):
     app.register_blueprint(venues_bp,       url_prefix="/api/venues")
     app.register_blueprint(events_bp,       url_prefix="/api/events")
     app.register_blueprint(debug_bp,        url_prefix="/api/debug")
+    app.register_blueprint(preferences_bp,  url_prefix="/api/preferences")
 
     # ── Dev mode: auto-login as first admin ───────────────────
     if app.config.get("DEV_MODE"):

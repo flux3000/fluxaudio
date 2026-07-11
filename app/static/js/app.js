@@ -194,7 +194,6 @@ const App = (() => {
   const userAvatar  = document.getElementById('user-avatar')
   const userName    = document.getElementById('user-name')
   const navLibrary       = document.getElementById('nav-library')
-  const navIncoming      = document.getElementById('nav-incoming')
   const navBatch         = document.getElementById('nav-batch')
   const navIngest        = document.getElementById('nav-ingest')
   const navVenues        = document.getElementById('nav-venues')
@@ -452,7 +451,6 @@ const App = (() => {
 
   function setActiveNav(active) {
     navLibrary.classList.toggle('active',           active === 'library')
-    navIncoming?.classList.toggle('active',          active === 'incoming')
     navBatch?.classList.toggle('active',             active === 'batch')
     navIngest.classList.toggle('active',            active === 'ingest')
     navVenues?.classList.toggle('active',           active === 'venues')
@@ -1005,6 +1003,12 @@ const App = (() => {
               </div>
             </div>
 
+            <!-- AI Assist pane — saved AI research output -->
+            <div class="slide-pane" id="sp-ai">
+              <div class="slide-pane-header">AI Assist</div>
+              <div class="slide-pane-scroll">${aiResultsReadonlyHtml(rec.ai_research)}</div>
+            </div>
+
             <!-- Debug pane (DEV_MODE only) -->
             <div class="slide-pane" id="sp-debug">
               <div class="slide-pane-header">Debug <span class="dbg-badge dbg-badge-dev">DEV</span></div>
@@ -1017,6 +1021,7 @@ const App = (() => {
           <div class="slide-tabs">
             <button class="slide-tab" data-pane="info">Info File</button>
             <button class="slide-tab" data-pane="filetags">File Tags</button>
+            <button class="slide-tab" data-pane="ai">AI Assist</button>
             <button class="slide-tab" data-pane="spectrogram">Spectrogram</button>
             ${window.fluxDebug ? `<button class="slide-tab slide-tab--dev" data-pane="debug">Debug</button>` : ''}
           </div>
@@ -1133,78 +1138,19 @@ const App = (() => {
       row.dataset.flags = (t.flags || []).join(',')
       applySkipFilter()
     }
-    function closeTrackQuickEdit() {
-      const m = document.getElementById('track-qmenu')
-      if (m) { try { m._saveNote?.() } catch (_) {} m.remove() }
-      document.removeEventListener('mousedown', _qmenuOutside)
-      document.removeEventListener('keydown', _qmenuEsc)
-    }
-    function _qmenuOutside(e) {
-      const m = document.getElementById('track-qmenu')
-      if (m && !m.contains(e.target)) closeTrackQuickEdit()
-    }
-    function _qmenuEsc(e) { if (e.key === 'Escape') closeTrackQuickEdit() }
-    function openTrackQuickEdit(track, clientX, clientY) {
-      closeTrackQuickEdit()
-      const menu = document.createElement('div')
-      menu.className = 'track-qmenu'
-      menu.id = 'track-qmenu'
-      const flagPills = TRACK_FLAGS.map(f => {
-        const active = (track.flags || []).includes(f.key)
-        return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" type="button">${f.label}</button>`
-      }).join('')
-      menu.innerHTML = `
-        <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
-        <div class="track-qmenu-label">Flags</div>
-        <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>
-        <div class="track-qmenu-label">Note</div>
-        <textarea class="track-qmenu-note" placeholder="Add a note…">${esc(track.notes || '')}</textarea>`
-      document.body.appendChild(menu)
-
-      // Position at cursor, clamped to the viewport
-      const r = menu.getBoundingClientRect()
-      const x = Math.max(8, Math.min(clientX, window.innerWidth  - r.width  - 8))
-      const y = Math.max(8, Math.min(clientY, window.innerHeight - r.height - 8))
-      menu.style.left = x + 'px'
-      menu.style.top  = y + 'px'
-
-      // Flags — toggle saves immediately
-      menu.querySelectorAll('.flag-pill').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          btn.classList.toggle('active')
-          const flags = [...menu.querySelectorAll('.flag-pill.active')].map(b => b.dataset.flag)
-          track.flags = flags
-          try { await API.tracks.update(track.id, { flags }) } catch (e) { console.error(e) }
-          refreshTrackRow(track)
-        })
-      })
-
-      // Note — save on blur / Enter (Shift+Enter for a newline)
-      const noteEl = menu.querySelector('.track-qmenu-note')
-      const saveNote = async () => {
-        const value = noteEl.value.trim() || null
-        if (value === (track.notes || null)) return
-        track.notes = value
-        try { await API.tracks.update(track.id, { notes: value }) } catch (e) { console.error(e) }
-        refreshTrackRow(track)
-      }
-      menu._saveNote = saveNote
-      noteEl.addEventListener('keydown', e => {
-        e.stopPropagation()
-        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveNote().then(closeTrackQuickEdit) }
-      })
-
-      setTimeout(() => {
-        document.addEventListener('mousedown', _qmenuOutside)
-        document.addEventListener('keydown', _qmenuEsc)
-      }, 0)
-    }
     if (canEditLibrary()) {
       mainContent.querySelectorAll('.track-row[data-track-id]').forEach(row => {
         row.addEventListener('contextmenu', ev => {
           ev.preventDefault()
           const track = rec.tracks.find(t => t.id === parseInt(row.dataset.trackId))
-          if (track) openTrackQuickEdit(track, ev.clientX, ev.clientY)
+          if (!track) return
+          openTrackMenu(track, ev.clientX, ev.clientY, {
+            onChange: async (t) => {
+              try { await API.tracks.update(t.id, { flags: t.flags, songwriter: t.songwriter, notes: t.notes }) }
+              catch (e) { console.error(e) }
+              refreshTrackRow(t)
+            },
+          })
         })
       })
     }
@@ -1801,81 +1747,6 @@ const App = (() => {
     }
   }
 
-  // ── Incoming queue ──────────────────────────────────────────────────────────
-
-  async function renderIncomingView() {
-    setActiveNav('incoming')
-    setActiveArtist(null)
-    setLoading()
-
-    let folders = []
-    try {
-      folders = await API.ingest.incoming()
-    } catch (e) {
-      setMainHTML(`<div class="empty-state"><div style="color:var(--red)">Failed to load incoming: ${esc(e.message)}</div></div>`)
-      return
-    }
-
-    if (!folders.length) {
-      setMainHTML(`
-        <div class="action-bar">
-          <span style="font-size:13px; font-weight:500; color:var(--t0)">Incoming</span>
-        </div>
-        <div class="empty-state">
-          <div class="empty-icon">↓</div>
-          <div>No recordings in <code>_incoming/</code></div>
-          <div style="font-size:11px; color:var(--t2); margin-top:6px">Drop folders here to queue them for ingest.</div>
-        </div>`)
-      return
-    }
-
-    const rows = folders.map(f => {
-      const issueChips = (f.issues || []).map(issue =>
-        `<span class="incoming-issue incoming-issue-${esc(issue.severity)}">${esc(issue.msg)}</span>`
-      ).join('')
-
-      return `
-      <div class="incoming-row" data-path="${esc(f.path)}">
-        <div class="incoming-info">
-          <div class="incoming-name">${esc(f.name)}</div>
-          ${issueChips ? `<div class="incoming-issues">${issueChips}</div>` : ''}
-        </div>
-        <div class="incoming-meta">
-          <span class="incoming-stat">${f.audio_count} track${f.audio_count !== 1 ? 's' : ''}</span>
-          <span class="incoming-stat">${f.size_mb} MB</span>
-        </div>
-        <button class="btn btn-primary btn-sm incoming-ingest-btn" data-path="${esc(f.path)}">Ingest →</button>
-      </div>`
-    }).join('')
-
-    setMainHTML(`
-      <div class="action-bar">
-        <span style="font-size:13px; font-weight:500; color:var(--t0)">Incoming</span>
-        <span style="margin-left:8px; font-size:11px; color:var(--t2)">${folders.length} folder${folders.length !== 1 ? 's' : ''}</span>
-        <button class="btn btn-ghost btn-sm" id="btn-refresh-incoming" style="margin-left:auto">↺ Refresh</button>
-      </div>
-      <div class="incoming-list">${rows}</div>`)
-
-    // Refresh button
-    document.getElementById('btn-refresh-incoming').addEventListener('click', renderIncomingView)
-
-    // Ingest buttons — jump straight to scan/review, bypassing folder picker
-    mainContent.querySelectorAll('.incoming-ingest-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const path = btn.dataset.path
-        // Reset wizard state then jump to scan
-        ingest.step       = 'folder'
-        ingest.scan       = null
-        ingest.folderPath = path
-        ingest.form       = {}
-        ingest.tracks     = []
-        window.location.hash = '#/ingest'
-        // Brief tick so the hash change fires renderIngestView, then run scan
-        setTimeout(() => runScan(path), 50)
-      })
-    })
-  }
-
   function renderIngestView() {
     setActiveNav('ingest')
     setActiveArtist(null)
@@ -1976,6 +1847,409 @@ const App = (() => {
     </div>`
   }
 
+  // Band-based generic message — the specific factors live in the Info Quality
+  // Review panel, not here (many are just parse noise).
+  const HEALTH_MSG = {
+    green:  'Looks complete',
+    yellow: 'Minor data discrepancies — recommend manual review',
+    red:    'Significant gaps — manual review needed',
+  }
+
+  // AI Assist tab body: the health score folded in (current + band message),
+  // a Run button, and a container that fills with clean results after a run.
+  function aiTabBody(health) {
+    const score = health?.score ?? '—'
+    const band  = health?.band || 'yellow'
+    return `
+      <div class="ai-tab-score">
+        <span class="ai-tab-score-num ai-tab-score-num--${band}" id="ai-score">${score}</span>
+        <span class="ai-tab-score-msg" id="ai-score-msg">${esc(HEALTH_MSG[band] || '')}</span>
+      </div>
+      <div class="ai-tab-run">
+        <button class="btn btn-primary btn-sm health-ai-btn" id="btn-ai-assist">✨ Run AI research</button>
+        <div class="ai-tab-hint">Researches the web to verify and fill metadata. Nothing is saved until you apply and confirm.</div>
+      </div>
+      <div class="ai-results" id="ai-results"></div>`
+  }
+
+  // File Tags JSON (raw Vorbis per track) for the scan — same shape/formatting as
+  // the recording view's File Tags pane.
+  function scanFileTagsJson() {
+    const tracks = ingest.scan?.suggestions?.from_tags?.tracks || []
+    const obj = {}
+    tracks.forEach(t => {
+      const key = `${String(t.track_number || '').padStart(2, '0')} · ${t.title || ''}`
+      obj[key] = t.raw || {}
+    })
+    return JSON.stringify(obj, null, 2)
+  }
+
+  // ── AI Assist ─────────────────────────────────────────────────────────────
+  // Read the form's current metadata to send to the research pass.
+  function collectCurrentMeta() {
+    const g = id => (document.getElementById(id)?.value || '').trim()
+    const y = g('f-year'), m = g('f-month'), d = g('f-day')
+    const date = y
+      ? `${y}${m ? '-' + String(m).padStart(2, '0') : ''}${(m && d) ? '-' + String(d).padStart(2, '0') : ''}`
+      : ''
+    return {
+      artist:  g('f-artist'), date, venue: g('f-venue-name'),
+      city:    g('f-city'),   state: g('f-state'), country: g('f-country'),
+      source:  g('f-source'), lineage: g('f-lineage'), event: g('f-event-name'),
+      tracks:  (ingest.tracks || []).map(t => ({
+        number: t.track_number, title: t.title, duration: t.duration,
+      })),
+    }
+  }
+
+  // Read the current value of a proposal's target field (for revert).
+  function getFormField(field) {
+    const g = id => document.getElementById(id)?.value || ''
+    switch (field) {
+      case 'artist':  return g('f-artist')
+      case 'venue':   return g('f-venue-name')
+      case 'city':    return g('f-city')
+      case 'state':   return g('f-state')
+      case 'country': return g('f-country')
+      case 'event':   return g('f-event-name')
+      case 'source':  return g('f-source')
+      case 'date': {
+        const y = g('f-year'), m = g('f-month'), d = g('f-day')
+        return y ? `${y}${m ? '-' + String(m).padStart(2, '0') : ''}${(m && d) ? '-' + String(d).padStart(2, '0') : ''}` : ''
+      }
+    }
+    return ''
+  }
+
+  // Write a value into the form field(s) for a proposal, highlighting the input.
+  function setFormField(field, value) {
+    const set = (id, v) => {
+      const el = document.getElementById(id)
+      if (el) { el.value = v; el.classList.toggle('ai-applied', v !== '' && v != null) }
+    }
+    switch (field) {
+      case 'artist':  set('f-artist', value);      ingest.form.artist_name = value; break
+      case 'venue':   set('f-venue-name', value);  ingest.form.venue_name  = value; break
+      case 'city':    set('f-city', value);        ingest.form.city        = value; break
+      case 'state':   set('f-state', value);       ingest.form.state       = value; break
+      case 'country': set('f-country', value);     ingest.form.country     = value; break
+      case 'event':   set('f-event-name', value);  ingest.form.event_name  = value; break
+      case 'source': {
+        const el = document.getElementById('f-source')
+        if (el && [...el.options].some(o => o.value === value)) {
+          el.value = value; el.classList.add('ai-applied')
+        }
+        ingest.form.source = value; break
+      }
+      case 'date': {
+        const p = String(value).split('-')
+        set('f-year', p[0] || '')
+        set('f-month', p[1] ? parseInt(p[1]) : '')
+        set('f-day',   p[2] ? parseInt(p[2]) : '')
+        ingest.form.start_year  = p[0] || ''
+        ingest.form.start_month = p[1] ? parseInt(p[1]) : ''
+        ingest.form.start_day   = p[2] ? parseInt(p[2]) : ''
+        break
+      }
+    }
+  }
+
+  // Apply ⇆ revert a single proposal; tracks prior value per field for revert.
+  function toggleApplyProposal(p, btn) {
+    ingest.aiApplied = ingest.aiApplied || {}
+    if (p.field in ingest.aiApplied) {
+      setFormField(p.field, ingest.aiApplied[p.field])
+      delete ingest.aiApplied[p.field]
+      if (btn) { btn.textContent = 'Apply'; btn.classList.remove('applied') }
+    } else {
+      ingest.aiApplied[p.field] = getFormField(p.field)
+      setFormField(p.field, p.proposed)
+      if (btn) { btn.textContent = 'Revert'; btn.classList.add('applied') }
+    }
+  }
+
+  // Render a standardized LCR info-file text from the live form + tracks + AI
+  // provenance notes — the "Proposed" side of the compare and the confirm regen.
+  function buildInfoFileText() {
+    const g = id => (document.getElementById(id)?.value || '').trim()
+    const y = g('f-year'), m = g('f-month'), d = g('f-day')
+    const date = y ? `${y}${m ? '-' + String(m).padStart(2, '0') : ''}${(m && d) ? '-' + String(d).padStart(2, '0') : ''}` : ''
+    const loc  = [g('f-city'), g('f-state'), g('f-country')].filter(Boolean).join(', ')
+    const L = []
+    if (g('f-artist'))     L.push(g('f-artist'))
+    if (date)              L.push(date)
+    if (g('f-venue-name')) L.push(g('f-venue-name'))
+    if (loc)               L.push(loc)
+    if (g('f-source'))     L.push(g('f-source'))
+    if (g('f-modifier') || g('f-lineage') || g('f-event-name')) L.push('')
+    if (g('f-modifier'))   L.push('Source: ' + g('f-modifier'))
+    if (g('f-lineage'))    L.push('Lineage: ' + g('f-lineage'))
+    if (g('f-event-name')) L.push('Event: ' + g('f-event-name'))
+    L.push('', 'Setlist:', '')
+    let lastSet = null
+    ;(ingest.tracks || []).forEach((t, i) => {
+      if (t.set && t.set !== lastSet) { L.push(t.set); lastSet = t.set }
+      L.push(`${String(t.track_number || i + 1).padStart(2, '0')}. ${t.title || ''}`.trimEnd())
+    })
+    const prov = ingest.aiResult?.provenance_notes || []
+    if (prov.length) { L.push('', 'Notes:'); prov.forEach(n => L.push(n)) }
+    return L.join('\n')
+  }
+
+  // Tidy the model's reasoning: drop any leaked tool-call syntax, and break
+  // numbered findings ("1. … 2. …") onto their own lines for readability.
+  function formatAiThinking(text) {
+    if (!text) return ''
+    let t = String(text).split(/<\/?thinking>|<parameter\b/i)[0]
+    t = t.replace(/\s+/g, ' ').trim()
+    t = t.replace(/\s(\d{1,2}\.)\s/g, '\n$1 ')
+    return t
+  }
+
+  // Apply the AI's researched setlist onto the track rows (human-triggered).
+  function applyAiTrackTitles(titles) {
+    ;(titles || []).forEach(tt => {
+      const idx = (ingest.tracks || []).findIndex(t => String(t.track_number) === String(tt.number))
+      if (idx >= 0 && tt.title) {
+        ingest.tracks[idx].title = tt.title
+        const inp = mainContent.querySelector(`.t-title[data-idx="${idx}"]`)
+        if (inp) inp.value = tt.title
+      }
+    })
+    reScore()
+  }
+
+  // ── Reusable track context menu (right-click): flags + songwriter + note ──────
+  // Shared by the recording view, Edit, and Add. opts.onChange(track) fires after any
+  // change; the caller persists (API for saved recordings, local state for ingest)
+  // and refreshes the row. The menu mutates track.flags/songwriter/notes in place.
+  function _closeTrackMenu() {
+    const m = document.getElementById('track-qmenu')
+    if (m) { try { m._commit?.() } catch (_) {} m.remove() }
+    document.removeEventListener('mousedown', _trackMenuOutside)
+    document.removeEventListener('keydown', _trackMenuEsc)
+  }
+  function _trackMenuOutside(e) {
+    const m = document.getElementById('track-qmenu')
+    if (m && !m.contains(e.target)) _closeTrackMenu()
+  }
+  function _trackMenuEsc(e) { if (e.key === 'Escape') _closeTrackMenu() }
+
+  function openTrackMenu(track, clientX, clientY, opts = {}) {
+    _closeTrackMenu()
+    const onChange = opts.onChange || (() => {})
+    const menu = document.createElement('div')
+    menu.className = 'track-qmenu'
+    menu.id = 'track-qmenu'
+    const flagPills = TRACK_FLAGS.map(f => {
+      const active = (track.flags || []).includes(f.key)
+      return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" type="button">${f.label}</button>`
+    }).join('')
+    menu.innerHTML = `
+      <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
+      <div class="track-qmenu-label">Flags</div>
+      <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>
+      <div class="track-qmenu-label">Songwriter</div>
+      <input class="track-qmenu-songwriter" type="text" placeholder="Songwriter…" value="${esc(track.songwriter || '')}" />
+      <div class="track-qmenu-label">Note</div>
+      <textarea class="track-qmenu-note" placeholder="Add a note…">${esc(track.notes || '')}</textarea>`
+    document.body.appendChild(menu)
+
+    // Position at cursor, clamped to the viewport
+    const r = menu.getBoundingClientRect()
+    menu.style.left = Math.max(8, Math.min(clientX, window.innerWidth  - r.width  - 8)) + 'px'
+    menu.style.top  = Math.max(8, Math.min(clientY, window.innerHeight - r.height - 8)) + 'px'
+
+    // Flags — toggle notifies immediately
+    menu.querySelectorAll('.flag-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        btn.classList.toggle('active')
+        track.flags = [...menu.querySelectorAll('.flag-pill.active')].map(b => b.dataset.flag)
+        onChange(track)
+      })
+    })
+
+    // Songwriter + Note — commit on Enter / on close
+    const swEl   = menu.querySelector('.track-qmenu-songwriter')
+    const noteEl = menu.querySelector('.track-qmenu-note')
+    const commit = () => {
+      const sw   = swEl.value.trim() || null
+      const note = noteEl.value.trim() || null
+      let changed = false
+      if (sw !== (track.songwriter || null)) { track.songwriter = sw; changed = true }
+      if (note !== (track.notes || null))     { track.notes = note;    changed = true }
+      if (changed) onChange(track)
+    }
+    menu._commit = commit
+    swEl.addEventListener('keydown', e => {
+      e.stopPropagation()
+      if (e.key === 'Enter') { e.preventDefault(); commit() }
+    })
+    noteEl.addEventListener('keydown', e => {
+      e.stopPropagation()
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); _closeTrackMenu() }
+    })
+
+    setTimeout(() => {
+      document.addEventListener('mousedown', _trackMenuOutside)
+      document.addEventListener('keydown', _trackMenuEsc)
+    }, 0)
+  }
+
+  // Read-only render of a saved AI research blob (recording view AI Assist tab).
+  // Same look as the interactive version, minus the Apply controls.
+  function aiResultsReadonlyHtml(r) {
+    if (!r) return '<div class="info-panel-empty">No AI research saved for this recording.</div>'
+    const props = (r.proposals || []).map(p => `
+      <div class="ai-res-row">
+        <span class="ai-res-field">${esc(p.field)}</span>
+        <span class="ai-res-value">${esc(p.proposed)}
+          <span class="ai-res-conf">${esc(p.confidence || '')}</span>${p.url ? ` <a class="ai-link" href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ''}</span>
+      </div>`).join('')
+    const tt = r.track_titles || []
+    const trackSection = tt.length
+      ? `<div class="ai-res-section"><div class="ai-res-title">Track Listing</div><div class="ai-tt-list">${tt.map(t =>
+          `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div></div>` : ''
+    const notes = (title, items) => items && items.length
+      ? `<div class="ai-res-section"><div class="ai-res-title">${title}</div>${items.map(v => `<p class="ai-res-note">${esc(v)}</p>`).join('')}</div>` : ''
+    const sources = (r.sources || []).length
+      ? `<div class="ai-res-section"><div class="ai-res-title">Sources</div>${r.sources.map(s => `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''
+    return `
+      <div class="ai-results">
+        <div class="ai-res-section">
+          <div class="ai-res-title">Metadata Review</div>
+          ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
+          ${props || '<p class="ai-res-empty">No field changes proposed.</p>'}
+        </div>
+        ${trackSection}
+        ${notes('Verify', r.verify_items)}
+        ${notes('Provenance', r.provenance_notes)}
+        ${sources}
+      </div>`
+  }
+
+  // Clean, succinct AI results in the AI Assist tab — prose + simple lists, no
+  // tables or colour chips. Links are neutral + theme-aware (.ai-link).
+  function renderAiResults(r) {
+    const body = document.getElementById('ai-results')
+    if (!body) return
+
+    const props = (r.proposals || []).map((p, i) => `
+      <div class="ai-res-row">
+        <span class="ai-res-field">${esc(p.field)}</span>
+        <span class="ai-res-value">${esc(p.proposed)}
+          <span class="ai-res-conf">${esc(p.confidence)}</span>${p.url ? ` <a class="ai-link" href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ''}</span>
+        <button class="btn btn-ghost btn-xs ai-apply-btn" data-idx="${i}">Apply</button>
+      </div>`).join('')
+
+    const tt = r.track_titles || []
+    const trackSection = tt.length
+      ? `<div class="ai-res-section">
+           <div class="ai-res-title">Track Listing <button class="btn btn-ghost btn-xs" id="ai-apply-tracks">Apply to tracks</button></div>
+           <div class="ai-tt-list">${tt.map(t =>
+             `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div>
+         </div>` : ''
+
+    const notes = (title, items) => items && items.length
+      ? `<div class="ai-res-section"><div class="ai-res-title">${title}</div>${items.map(v => `<p class="ai-res-note">${esc(v)}</p>`).join('')}</div>` : ''
+    const sources = (r.sources || []).length
+      ? `<div class="ai-res-section"><div class="ai-res-title">Sources</div>${r.sources.map(s => `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''
+
+    body.innerHTML = `
+      <div class="ai-res-section">
+        <div class="ai-res-title">Metadata Review</div>
+        ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
+        ${props || '<p class="ai-res-empty">No field changes proposed.</p>'}
+      </div>
+      ${trackSection}
+      ${notes('Verify', r.verify_items)}
+      ${notes('Provenance', r.provenance_notes)}
+      ${sources}`
+
+    body.querySelectorAll('.ai-apply-btn').forEach(b =>
+      b.addEventListener('click', () => { toggleApplyProposal(r.proposals[parseInt(b.dataset.idx)], b); reScore() }))
+    document.getElementById('ai-apply-tracks')?.addEventListener('click', () => applyAiTrackTitles(tt))
+    // Auto-apply high-confidence scalar proposals (server already filtered).
+    ;(r.proposals || []).forEach((p, i) => {
+      if (p.confidence === 'high') toggleApplyProposal(p, body.querySelector(`.ai-apply-btn[data-idx="${i}"]`))
+    })
+    reScore()
+  }
+
+  // Re-score the current form state and update the AI tab's score header.
+  async function reScore() {
+    if (!ingest.scan) return
+    const g = id => (document.getElementById(id)?.value || '').trim()
+    const y = g('f-year'), m = g('f-month'), d = g('f-day')
+    const date = y ? `${y}${m ? '-' + String(m).padStart(2, '0') : ''}${(m && d) ? '-' + String(d).padStart(2, '0') : ''}` : ''
+    const clone = JSON.parse(JSON.stringify(ingest.scan))
+    const t = clone.suggestions.from_tags, inf = clone.suggestions.from_info_file
+    const both = (k, v) => { t[k] = v; inf[k] = v }
+    both('artist', g('f-artist')); both('venue', g('f-venue-name'))
+    both('city', g('f-city')); both('state', g('f-state')); both('country', g('f-country'))
+    both('source', g('f-source')); both('lineage', g('f-lineage'))
+    t.concert_date = date
+    inf.year = parseInt(y) || null; inf.month = parseInt(m) || null; inf.day = parseInt(d) || null
+    inf.tracks = (ingest.tracks || []).map((tk, i) => ({ number: tk.track_number || i + 1, title: tk.title || '' }))
+    try {
+      const h = await API.ingest.health(clone)
+      ingest.scan.health = h
+      const scoreEl = document.getElementById('ai-score')
+      const msgEl   = document.getElementById('ai-score-msg')
+      if (scoreEl) {
+        const base = ingest._aiBaseScore
+        scoreEl.textContent = (base != null && h.score !== base) ? `${base} → ${h.score}` : h.score
+        scoreEl.className = 'ai-tab-score-num ai-tab-score-num--' + h.band
+      }
+      if (msgEl) msgEl.textContent = HEALTH_MSG[h.band] || ''
+    } catch (_) {}
+  }
+
+  // Poll a background AI job until it finishes. The synchronous call is too slow
+  // (30-90s) for the webview's fetch timeout, so we start a job and poll for it.
+  function pollAiJob(jobId, t0) {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    return (async function loop() {
+      while (true) {
+        await sleep(2000)
+        const el = document.getElementById('ai-elapsed')
+        if (el) el.textContent = `${Math.round((Date.now() - t0) / 1000)}s`
+        let s
+        try { s = await API.ingest.aiAssistStatus(jobId) }
+        catch (e) { if (/unknown job/.test(e.message)) throw new Error('Job was lost (did the app restart?)'); throw e }
+        if (s.status === 'done')  return s.result
+        if (s.status === 'error') throw new Error(s.error)
+        if (Date.now() - t0 > 5 * 60 * 1000) throw new Error('AI research timed out after 5 minutes')
+      }
+    })()
+  }
+
+  async function startAiAssist() {
+    const btn  = document.getElementById('btn-ai-assist')
+    const body = document.getElementById('ai-results')
+    if (!body) return
+    ingest._aiBaseScore = ingest.scan?.health?.score ?? null
+    if (btn) { btn.disabled = true; btn.textContent = '… researching' }
+    body.innerHTML = `<div class="ai-loading"><div class="loading-spinner"></div><div>Researching the web — this can take a minute or two… <span id="ai-elapsed">0s</span></div></div>`
+    const t0 = Date.now()
+    try {
+      const { job_id } = await API.ingest.aiAssist({ folder_path: ingest.folderPath, current: collectCurrentMeta() })
+      const result = await pollAiJob(job_id, t0)
+      ingest.aiResult = result
+      renderAiResults(result)
+    } catch (e) {
+      const secs = Math.round((Date.now() - t0) / 1000)
+      console.error('AI Assist error after', secs, 's:', e)
+      if (/no_api_key/.test(e.message)) {
+        body.innerHTML = `<p class="ai-res-note">No Anthropic API key set — add one in Settings (⚙).</p>`
+      } else {
+        body.innerHTML = `<p class="ai-res-note" style="color:var(--red)">AI Assist failed after ${secs}s: ${esc(e.message)}</p>`
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '✨ Run AI research' }
+    }
+  }
+
   function renderIngestReview() {
     const tags = ingest.scan.suggestions.from_tags
     const info = ingest.scan.suggestions.from_info_file
@@ -2038,18 +2312,19 @@ const App = (() => {
         tagDay   = parseInt(p[2]) || null
       }
       f.artist_name     = titleCase(pick(tags, info, 'artist')) || ''
-      f.sort_name       = ''
       f.start_year      = tagYear  || info.year  || ''
       f.start_month     = tagMonth || info.month || ''
       f.start_day       = tagDay   || info.day   || ''
       f.venue_name      = pick(tags, info, 'venue') || ''
       f.venue_id        = null
-      f.city            = info.city    || tags.city    || ''
-      f.state           = info.state   || tags.state   || ''
-      f.country         = info.country || tags.country || ''
+      // FLAC tags take priority; info file fills only what tags didn't supply.
+      f.city            = tags.city    || info.city    || ''
+      f.state           = tags.state   || info.state   || ''
+      f.country         = tags.country || info.country || ''
       f.source          = pick(tags, info, 'source') || ''
       f.source_modifier = ''
       f.quality         = ''
+      f.rating          = ''
       f.lineage         = tags?.lineage || ''
       f.notes           = ''
       f.end_year        = ''
@@ -2168,7 +2443,7 @@ const App = (() => {
           <td><input type="text" class="t-title" data-idx="${i}" value="${esc(t.title)}" /></td>
           <td class="dur">${fmtDur(t.duration)}</td>
           <td class="et-expand-cell">
-            <button class="it-expand-btn" data-idx="${i}" type="button" title="Track details">⋯</button>
+            <button class="it-expand-btn" data-idx="${i}" type="button" title="Track details">+</button>
           </td>
         </tr>
         <tr class="it-detail-row" id="it-detail-${i}" style="display:none">
@@ -2199,27 +2474,22 @@ const App = (() => {
     }).join('')
 
     setMainHTML(`
+      <div class="ingest-review-outer">
+      <div class="ingest-review-topbar">
+        <h2 class="ingest-topbar-title">Add Recording: <span class="rev-header-folder">${esc(ingest.folderPath?.split('/').pop() || '')}</span></h2>
+      </div>
       <div class="ingest-review-shell">
 
         <!-- Left: metadata form + track list -->
         <div class="ingest-review-form">
-          <div class="ingest-step-header" style="padding:8px 20px 6px; flex-shrink:0">
-            <h2>Add Recording: <span class="rev-header-folder">${esc(ingest.folderPath?.split('/').pop() || '')}</span></h2>
-          </div>
           <div class="ingest-review-form-body">
 
             <!-- Artist with autocomplete -->
-            <div class="ingest-field-grid" style="grid-template-columns:2fr 1fr; gap:10px">
-              <div class="ingest-field">
-                <label>Artist</label>
-                <div class="artist-picker-wrap">
-                  <input type="text" id="f-artist" value="${esc(f.artist_name)}" autocomplete="off" placeholder="Search or type artist name…" />
-                  <div class="artist-dropdown" id="f-artist-dropdown" style="display:none"></div>
-                </div>
-              </div>
-              <div class="ingest-field">
-                <label>Sort name <span style="color:var(--t3); font-weight:400">(if new)</span></label>
-                <input type="text" id="f-sort-name" value="${esc(f.sort_name || '')}" placeholder="Last, First" />
+            <div class="ingest-field">
+              <label>Artist</label>
+              <div class="artist-picker-wrap">
+                <input type="text" id="f-artist" value="${esc(f.artist_name)}" autocomplete="off" placeholder="Search or type artist name…" />
+                <div class="artist-dropdown" id="f-artist-dropdown" style="display:none"></div>
               </div>
             </div>
 
@@ -2259,14 +2529,14 @@ const App = (() => {
             <div class="ingest-field" style="margin-top:6px">
               <label>Festival / Event <span style="font-weight:400; opacity:0.6">(optional)</span></label>
               <div class="event-picker-wrap">
-                <input type="text" id="f-event-name" value="${esc(f.event_name || '')}" autocomplete="off" placeholder="e.g. Bonnaroo 2009" />
+                <input type="text" id="f-event-name" value="${esc(f.event_name || '')}" autocomplete="off" />
                 <input type="hidden" id="f-event-id" value="${esc(String(f.event_id || ''))}" />
                 <div class="event-dropdown" id="f-event-dropdown" style="display:none"></div>
               </div>
             </div>
 
-            <!-- Source / Detail / Quality -->
-            <div class="ingest-field-grid" style="grid-template-columns:72px 1fr 66px; gap:6px; margin-top:8px">
+            <!-- Source / Detail / Lineage / Quality / Rating — matches Edit form -->
+            <div class="ingest-field-grid" style="grid-template-columns:76px 104px minmax(120px,1.5fr) 58px 72px; gap:10px; margin-top:8px">
               <div class="ingest-field">
                 <label>Source</label>
                 <select id="f-source">
@@ -2277,36 +2547,28 @@ const App = (() => {
                 </select>
               </div>
               <div class="ingest-field">
-                <label>Source detail</label>
+                <label>Source Detail</label>
                 <input type="text" id="f-modifier" value="${esc(f.source_modifier)}" />
+              </div>
+              <div class="ingest-field">
+                <label>Lineage</label>
+                <input type="text" id="f-lineage" value="${esc(f.lineage)}" />
               </div>
               <div class="ingest-field">
                 <label>Quality</label>
                 <input type="text" id="f-quality" value="${esc(f.quality)}" />
               </div>
+              <div class="ingest-field">
+                <label>Rating <span style="color:var(--t3);font-size:10px">0–100</span></label>
+                <input type="number" id="f-rating" min="0" max="100" style="width:100%"
+                       value="${f.rating != null && f.rating !== '' ? f.rating : ''}" placeholder="—" />
+              </div>
             </div>
-
-            <div class="ingest-field" style="margin-top:6px">
-              <label>Lineage</label>
-              <textarea id="f-lineage" style="min-height:40px">${esc(f.lineage)}</textarea>
-            </div>
-
-            <div class="ingest-field" style="margin-top:6px">
-              <label>Notes</label>
-              <textarea id="f-notes" style="min-height:50px">${esc(f.notes)}</textarea>
-            </div>
-
-            <label class="official-release-check" style="margin-top:8px">
-              <input type="checkbox" id="f-is-official" ${f.is_official ? 'checked' : ''} />
-              <span>Official release</span>
-              <span class="official-release-note">Cascades to all tracks</span>
-            </label>
 
             <!-- Track table -->
             <div class="rev-section-title" style="margin-top:16px; padding-top:12px; border-top:1px solid var(--bd-1)">
               Tracks <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t2)">(${ingest.tracks.length})</span>
             </div>
-            ${mismatchBanner}
             <div style="overflow:auto; margin-bottom:4px">
               <table class="track-review-table">
                 <thead>
@@ -2321,6 +2583,17 @@ const App = (() => {
                 <tbody>${trackRows || '<tr><td colspan="5" style="color:var(--t2);padding:12px">No tracks found</td></tr>'}</tbody>
               </table>
             </div>
+
+            <div class="ingest-field" style="margin-top:12px">
+              <label>Notes</label>
+              <textarea id="f-notes" style="min-height:80px">${esc(f.notes)}</textarea>
+            </div>
+
+            <label style="display:flex; align-items:center; gap:8px; color:var(--t3); font-size:11px; margin-top:8px; cursor:pointer">
+              <input type="checkbox" id="f-is-official" ${f.is_official ? 'checked' : ''} />
+              <span>Official release</span>
+              <span style="color:var(--t3); font-style:italic">— marks recording and all tracks as officially released</span>
+            </label>
 
           </div>
           <div class="ingest-actions" style="padding:10px 20px; border-top:1px solid var(--bd-0)">
@@ -2337,46 +2610,30 @@ const App = (() => {
         <!-- Resize handle -->
         <div class="rev-resize-handle" id="rev-divider"></div>
 
-        <!-- Right: collapsible reference panels (FLAC Tags → Parsed → Info file) -->
+        <!-- Right: vertical-tab reference panel (Info File / File Tags / AI Assist) -->
         <div class="ingest-review-raw">
-
-          <!-- Panel 1: FLAC Tags -->
-          <div class="rev-panel">
-            <div class="rev-panel-header">
-              <button class="rev-panel-toggle" data-panel="panel-flac">▾</button>
-              <span>FLAC Tags</span>
-              <span class="rev-panel-badge">read-only</span>
+          <div class="slide-panel-body">
+            <div class="slide-pane active" id="isp-info">
+              <div class="slide-pane-header">Info File</div>
+              <div class="slide-pane-scroll"><div class="rev-raw-section">${infoText}</div></div>
             </div>
-            <div class="rev-panel-body" id="panel-flac">
-              <div class="rev-raw-section">${rawTagRows}</div>
-              ${rawTracksSection}
+            <div class="slide-pane" id="isp-filetags">
+              <div class="slide-pane-header">File Tags <span class="filetags-hint">(Vorbis, on disk)</span></div>
+              <div class="slide-pane-scroll"><pre class="filetags-json">${esc(scanFileTagsJson())}</pre></div>
             </div>
-          </div>
-
-          <!-- Panel 2: Parsed from info file -->
-          <div class="rev-panel">
-            <div class="rev-panel-header rev-panel-header--highlight">
-              <button class="rev-panel-toggle" data-panel="panel-parsed">▾</button>
-              <span>Parsed from info file</span>
-            </div>
-            <div class="rev-panel-body" id="panel-parsed">
-              ${parsedPanelBody}
+            <div class="slide-pane" id="isp-ai">
+              <div class="slide-pane-header">AI Assist</div>
+              <div class="slide-pane-scroll">${aiTabBody(ingest.scan.health)}</div>
             </div>
           </div>
-
-          <!-- Panel 3: Info file text (takes remaining height) -->
-          <div class="rev-panel rev-panel-grow">
-            <div class="rev-panel-header">
-              <button class="rev-panel-toggle" data-panel="panel-info">▾</button>
-              <span>Info file</span>
-            </div>
-            <div class="rev-panel-body rev-info-scroll" id="panel-info">
-              <div class="rev-raw-section">${infoText}</div>
-            </div>
+          <div class="slide-tabs">
+            <button class="slide-tab active" data-ipane="isp-info">Info File</button>
+            <button class="slide-tab" data-ipane="isp-filetags">File Tags</button>
+            <button class="slide-tab" data-ipane="isp-ai">AI Assist</button>
           </div>
-
         </div>
 
+      </div>
       </div>`)
 
     // Parsed info file — apply buttons
@@ -2513,6 +2770,7 @@ const App = (() => {
         const open = row.style.display !== 'none'
         row.style.display = open ? 'none' : ''
         btn.classList.toggle('active', !open)
+        btn.textContent = open ? '+' : '−'
       })
     })
 
@@ -2762,11 +3020,21 @@ const App = (() => {
       renderIngestStep()
     })
 
+    document.getElementById('btn-ai-assist')?.addEventListener('click', startAiAssist)
+
+    // Right-column vertical tabs (Info File / File Tags / AI Assist)
+    mainContent.querySelectorAll('.ingest-review-raw .slide-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const paneId = tab.dataset.ipane
+        mainContent.querySelectorAll('.ingest-review-raw .slide-tab').forEach(t => t.classList.toggle('active', t === tab))
+        mainContent.querySelectorAll('.ingest-review-raw .slide-pane').forEach(p => p.classList.toggle('active', p.id === paneId))
+      })
+    })
+
     document.getElementById('btn-confirm').addEventListener('click', () => {
       // Collect metadata
       const f = ingest.form
       f.artist_name     = document.getElementById('f-artist').value.trim()
-      f.sort_name       = document.getElementById('f-sort-name').value.trim() || null
       f.start_year      = parseInt(document.getElementById('f-year').value)      || null
       f.start_month     = parseInt(document.getElementById('f-month').value)     || null
       f.start_day       = parseInt(document.getElementById('f-day').value)       || null
@@ -2784,6 +3052,7 @@ const App = (() => {
       f.source          = document.getElementById('f-source').value
       f.source_modifier = document.getElementById('f-modifier').value.trim()
       f.quality         = document.getElementById('f-quality').value.trim()
+      f.rating          = document.getElementById('f-rating').value.trim()
       f.lineage         = document.getElementById('f-lineage').value.trim()
       f.notes           = document.getElementById('f-notes').value.trim()
 
@@ -3025,6 +3294,8 @@ const App = (() => {
         tracks: ingest.tracks,
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
+        // Option B: persist the latest AI research blob (audit trail) on the recording.
+        ai_research_json: ingest.aiResult ? JSON.stringify(ingest.aiResult) : null,
       }
 
       try {
@@ -3103,7 +3374,7 @@ const App = (() => {
           <td class="num">${String(t.track_number || '').padStart(2,'0')}</td>
           <td><input class="et-title" data-id="${t.id}" type="text" value="${esc(t.title)}" /></td>
           <td class="dur">${fmtDuration(t.duration)}</td>
-          <td class="et-expand-cell"><button class="et-expand-btn" data-id="${t.id}" type="button" title="Track details">⋯</button></td>
+          <td class="et-expand-cell"><button class="et-expand-btn" data-id="${t.id}" type="button" title="Track details">+</button></td>
         </tr>
         <tr class="et-detail-row" id="et-detail-${t.id}" style="display:none">
           <td colspan="5">
@@ -3209,7 +3480,7 @@ const App = (() => {
           <!-- Recording fields — all on one row -->
           <div class="rev-section-title" style="margin-bottom:10px">Recording</div>
 
-          <div class="ingest-field-grid" style="grid-template-columns:76px 120px 2fr 60px; gap:10px; margin-bottom:10px">
+          <div class="ingest-field-grid" style="grid-template-columns:76px 104px minmax(120px,1.5fr) 58px 72px; gap:10px; margin-bottom:10px">
             <div class="ingest-field">
               <label>Source</label>
               <select id="e-source">
@@ -3234,7 +3505,7 @@ const App = (() => {
             <div class="ingest-field">
               <label>Rating <span style="color:var(--t3);font-size:10px">0–100</span></label>
               <input type="number" id="e-rating" min="0" max="100"
-                     style="width:72px"
+                     style="width:100%"
                      value="${rec.rating != null ? rec.rating : ''}"
                      placeholder="—" />
             </div>
@@ -3325,6 +3596,7 @@ const App = (() => {
         const open = detailRow.style.display !== 'none'
         detailRow.style.display = open ? 'none' : ''
         btn.classList.toggle('active', !open)
+        btn.textContent = open ? '+' : '−'
       })
     })
 
@@ -4024,9 +4296,6 @@ const App = (() => {
       if (id) renderArtistView(id)
       else    renderLibraryView()
 
-    } else if (hash === '#/incoming') {
-      renderIncomingView()
-
     } else if (hash === '#/batch') {
       renderBatchImportView()
 
@@ -4107,6 +4376,69 @@ const App = (() => {
     state.user = null
     showLogin()
   })
+
+  // ── Settings modal ───────────────────────────────────────────────────────────
+
+  async function openSettingsModal() {
+    let prefs = {}
+    try { prefs = await API.preferences.get() } catch (_) {}
+    const keySet   = prefs.has_api_key
+    const noKeychain = prefs.keychain_available === false
+    const model    = prefs.ai_model || 'claude-sonnet-5'
+    const behavior = prefs.ingest_file_behavior || 'copy'
+
+    const overlay = document.createElement('div')
+    overlay.className = 'modal-overlay'
+    overlay.innerHTML = `
+      <div class="modal-card settings-modal">
+        <div class="modal-header"><h3>Settings</h3>
+          <button class="btn-icon" id="settings-close">✕</button></div>
+        <div class="modal-body">
+          <label class="settings-label">Anthropic API key <span class="settings-hint">(BYOK — stored in your OS keychain)</span></label>
+          <div class="settings-key-row">
+            <input type="password" id="settings-key" placeholder="${keySet ? '•••••••••• (key saved)' : 'sk-ant-…'}" autocomplete="off" />
+            ${keySet ? '<button class="btn btn-ghost btn-sm" id="settings-clear-key">Clear</button>' : ''}
+          </div>
+          ${noKeychain ? '<div class="settings-warn">⚠ OS keychain unavailable on this system — key cannot be saved.</div>' : ''}
+
+          <label class="settings-label" style="margin-top:14px">AI model</label>
+          <select id="settings-model">
+            <option value="claude-sonnet-5" ${model === 'claude-sonnet-5' ? 'selected' : ''}>Sonnet 5 (default — stronger research)</option>
+            <option value="claude-haiku-4-5" ${model === 'claude-haiku-4-5' ? 'selected' : ''}>Haiku 4.5 (lightweight)</option>
+          </select>
+
+          <label class="settings-label" style="margin-top:14px">Ingest file handling</label>
+          <select id="settings-behavior">
+            <option value="copy" ${behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
+            <option value="move" ${behavior === 'move' ? 'selected' : ''}>Move into library</option>
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost btn-sm" id="settings-cancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="settings-save">Save</button>
+        </div>
+      </div>`
+    document.body.appendChild(overlay)
+
+    const close = () => overlay.remove()
+    overlay.addEventListener('click', e => { if (e.target === overlay) close() })
+    overlay.querySelector('#settings-close').addEventListener('click', close)
+    overlay.querySelector('#settings-cancel').addEventListener('click', close)
+    overlay.querySelector('#settings-clear-key')?.addEventListener('click', async () => {
+      try { await API.preferences.update({ clear_api_key: true }); close() } catch (e) { alert(e.message) }
+    })
+    overlay.querySelector('#settings-save').addEventListener('click', async () => {
+      const payload = {
+        ai_model:             overlay.querySelector('#settings-model').value,
+        ingest_file_behavior: overlay.querySelector('#settings-behavior').value,
+      }
+      const key = overlay.querySelector('#settings-key').value.trim()
+      if (key) payload.api_key = key
+      try { await API.preferences.update(payload); close() } catch (e) { alert(e.message) }
+    })
+  }
+
+  document.getElementById('settings-btn')?.addEventListener('click', openSettingsModal)
 
   // ── Hash routing ───────────────────────────────────────────────────────────
 

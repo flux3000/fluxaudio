@@ -30,8 +30,95 @@ from app.models.track import Track
 from app.models.user_preference import UserPreference
 from app.utils.ingest import move_to_library
 from app.utils.folder_naming import build_folder_name
+from app.utils.ai_assist import run_ai_assist, AiAssistError
+from app.utils.prefs import get_api_key, get_pref
+from app.utils.health import compute_health
 
 bp = Blueprint("ingest", __name__)
+
+
+@bp.route("/health", methods=["POST"])
+@login_required
+def health():
+    """
+    POST /api/ingest/health
+    Thin wrapper over compute_health(scan). The client sends a scan-shaped
+    payload (original for the initial score, or proposal-overlaid for the
+    projected post-AI score) and gets back {score, band, factors}.
+    """
+    return jsonify(compute_health(request.get_json() or {}))
+
+
+# In-memory AI-research jobs. The research call is far too slow (30-90s) to hold
+# a synchronous HTTP request open — the webview aborts the fetch at ~60s. So we run
+# it in a background thread and let the client poll for the result.
+_AI_JOBS = {}  # job_id -> {"status": running|done|error, "result"/"error", "t0"}
+
+
+def _run_ai_job(job_id, folder_path, current, api_key, model):
+    import time as _time
+    import traceback as _tb
+    t0 = _time.time()
+    try:
+        result = run_ai_assist(folder_path, current, api_key, model)
+        _AI_JOBS[job_id] = {"status": "done", "result": result}
+        print("[ai-assist] job %s ok in %.1fs" % (job_id[:8], _time.time() - t0), flush=True)
+    except AiAssistError as e:
+        _AI_JOBS[job_id] = {"status": "error", "error": str(e)}
+        print("[ai-assist] job %s failed after %.1fs: %s" % (job_id[:8], _time.time() - t0, e), flush=True)
+    except Exception as e:  # noqa: BLE001
+        _tb.print_exc()
+        _AI_JOBS[job_id] = {"status": "error", "error": "Unexpected error: %s" % e}
+
+
+@bp.route("/ai-assist", methods=["POST"])
+@login_required
+def ai_assist():
+    """
+    POST /api/ingest/ai-assist
+    Kick off an AI research job (background thread) and return a job id
+    immediately. Poll GET /api/ingest/ai-assist/<job_id> for the result.
+
+    Body: { folder_path, current: {...} }
+    """
+    import threading
+    import uuid
+
+    data        = request.get_json() or {}
+    folder_path = (data.get("folder_path") or "").strip()
+    if not folder_path or not os.path.isdir(folder_path):
+        return jsonify({"error": "Invalid or inaccessible folder path"}), 400
+
+    api_key = get_api_key(current_user.id)
+    if not api_key:
+        # 428 → frontend routes the user to add their key in Settings.
+        return jsonify({"error": "no_api_key"}), 428
+    model = get_pref(current_user.id, "ai_model") or "claude-sonnet-5"
+
+    job_id = uuid.uuid4().hex
+    _AI_JOBS[job_id] = {"status": "running"}
+    # Key/model are resolved here (request context); the thread needs no DB access.
+    threading.Thread(
+        target=_run_ai_job,
+        args=(job_id, folder_path, data.get("current") or {}, api_key, model),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/ai-assist/<job_id>", methods=["GET"])
+@login_required
+def ai_assist_status(job_id):
+    """Poll an AI research job. Returns running, or done+result / error (one-shot)."""
+    job = _AI_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    if job["status"] == "running":
+        return jsonify({"status": "running"})
+    _AI_JOBS.pop(job_id, None)  # deliver terminal state once, then discard
+    if job["status"] == "error":
+        return jsonify({"status": "error", "error": job["error"]})
+    return jsonify({"status": "done", "result": job["result"]})
 
 
 @bp.route("/confirm", methods=["POST"])
@@ -226,18 +313,24 @@ def confirm_ingest():
 
     # ── 7. Create Recording ───────────────────────────────────────────────────
     rec_is_official = bool(data.get("is_official", False))
+    try:
+        rating_val = int(data["rating"]) if data.get("rating") not in (None, "") else None
+    except (ValueError, TypeError):
+        rating_val = None
     rec = Recording(
         performance_id       = performance.id,
         source               = data.get("source"),
         source_modifier      = data.get("source_modifier"),
         lineage              = data.get("lineage"),
         quality              = data.get("quality"),
+        rating               = rating_val,
         is_complete          = data.get("is_complete", True),
         is_official          = rec_is_official,
         folder_path          = new_folder_path,
         original_folder_name = os.path.basename(source_folder),
         info_file_content    = data.get("info_file_content"),
         notes                = data.get("notes"),
+        ai_research_json      = data.get("ai_research_json"),
     )
     db.session.add(rec)
     db.session.flush()
@@ -694,32 +787,6 @@ def batch_scan():
     })
 
 
-@bp.route("/incoming", methods=["GET"])
-@login_required
-def list_incoming():
-    """
-    GET /api/ingest/incoming
-    Returns subfolders of LIBRARY_ROOT/_incoming/ with audio file count, size, and issues.
-    """
-    library_root = current_app.config["LIBRARY_ROOT"]
-    incoming_dir = os.path.join(str(library_root), "_incoming")
-
-    if not os.path.isdir(incoming_dir):
-        return jsonify([])
-
-    results = []
-    for entry in sorted(os.scandir(incoming_dir), key=lambda e: e.name.lower()):
-        if not entry.is_dir():
-            continue
-
-        audio_count, size_mb, issues = _audit_incoming_folder(entry.path)
-
-        results.append({
-            "name":        entry.name,
-            "path":        entry.path,
-            "audio_count": audio_count,
-            "size_mb":     size_mb,
-            "issues":      issues,
-        })
-
-    return jsonify(results)
+# NOTE: the standalone _incoming/ queue was removed — per-recording health is now
+# surfaced in the Add Recording review step (see compute_health). _audit_incoming_folder
+# is retained (used by batch-scan's filesystem audit).

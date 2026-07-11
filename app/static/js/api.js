@@ -89,10 +89,18 @@ const API = (() => {
       update: (id, data) => put(`/api/events/${id}`, data),
     },
 
+    // ── Preferences ──────────────────────────────────────────────────────────
+    preferences: {
+      get:    ()     => get('/api/preferences'),
+      update: (data) => put('/api/preferences', data),
+    },
+
     // ── Ingest ───────────────────────────────────────────────────────────────
     ingest: {
       confirm:    (data)       => post('/api/ingest/confirm', data),
-      incoming:   ()           => get('/api/ingest/incoming'),
+      aiAssist:       (payload) => post('/api/ingest/ai-assist', payload),
+      aiAssistStatus: (jobId)   => get(`/api/ingest/ai-assist/${jobId}`),
+      health:         (scan)    => post('/api/ingest/health', scan),
       batchScan:  (source_dir) => post('/api/ingest/batch-scan', { source_dir }),
     },
   }
