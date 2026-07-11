@@ -66,9 +66,10 @@ def get_venue(venue_id):
         "performance_count": len(v.performances),
         "performances": [
             {
-                "id":        p.id,
-                "performer": p.artist.name,
-                "date":      format_partial_date(p.start_year, p.start_month, p.start_day),
+                "id":           p.id,
+                "performer":    p.performer.name,
+                "performer_id": p.performer_id,
+                "date":         format_partial_date(p.start_year, p.start_month, p.start_day),
             }
             for p in perfs
         ],
@@ -105,3 +106,19 @@ def update_venue(venue_id):
             setattr(v, field, data[field])
     db.session.commit()
     return jsonify({"id": v.id})
+
+
+@bp.route("/<int:venue_id>", methods=["DELETE"])
+@login_required
+def delete_venue(venue_id):
+    """Delete a venue. Refuses while performances still reference it."""
+    v = db.session.get(Venue, venue_id)
+    if not v:
+        return jsonify({"error": "Not found"}), 404
+    n = len(v.performances)
+    if n:
+        return jsonify({"error": f"Venue has {n} performance(s) — reassign or "
+                                 "delete those recordings first."}), 409
+    db.session.delete(v)
+    db.session.commit()
+    return jsonify({"ok": True})

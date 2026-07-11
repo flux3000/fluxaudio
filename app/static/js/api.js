@@ -40,6 +40,10 @@ const API = (() => {
       list:   ()         => get('/api/artists/'),
       get:    (id)       => get(`/api/artists/${id}`),
       create: (data)     => post('/api/artists/', data),
+      update: (id, data) => put(`/api/artists/${id}`, data),
+      remove: (id)       => request('DELETE', `/api/artists/${id}`),
+      addPerformer:    (id, data)   => post(`/api/artists/${id}/performers`, data),
+      removePerformer: (id, perfId) => request('DELETE', `/api/artists/${id}/performers/${perfId}`),
     },
 
     // ── Collections ───────────────────────────────────────────────────────────
@@ -62,6 +66,7 @@ const API = (() => {
       recordings:    (id)        => get(`/api/performers/${id}/recordings`),
       create:        (data)      => post('/api/performers/', data),
       update:        (id, data)  => put(`/api/performers/${id}`, data),
+      remove:        (id)        => request('DELETE', `/api/performers/${id}`),
     },
 
     // ── Performances ─────────────────────────────────────────────────────────
@@ -94,6 +99,7 @@ const API = (() => {
       get:    (id)       => get(`/api/venues/${id}`),
       create: (data)     => post('/api/venues/', data),
       update: (id, data) => put(`/api/venues/${id}`, data),
+      remove: (id)       => request('DELETE', `/api/venues/${id}`),
     },
 
     // ── Events ───────────────────────────────────────────────────────────────

@@ -384,12 +384,15 @@ const App = (() => {
       const field = document.getElementById(ids.field)
       const input = document.getElementById(ids.memberInput)
       if (!field || !input) return
+      // The input is nested inside .artist-picker-wrap, so insert chips before the
+      // wrap (a direct child of field) — inserting before the input itself throws.
+      const ref = input.closest('.artist-picker-wrap') || input
       field.querySelectorAll('.member-chip').forEach(c => c.remove())
       ;(store.members || []).forEach((m, i) => {
         const chip = document.createElement('span')
         chip.className = 'member-chip'
         chip.innerHTML = `${esc(m.name)} <span class="member-chip-x" data-idx="${i}">×</span>`
-        field.insertBefore(chip, input)
+        field.insertBefore(chip, ref)
       })
       field.querySelectorAll('.member-chip-x').forEach(x =>
         x.addEventListener('click', () => { store.members.splice(parseInt(x.dataset.idx), 1); renderChips() }))
@@ -402,7 +405,8 @@ const App = (() => {
       store.members.push(id ? { id, name } : { name })
       renderChips()
     }
-    // Performer picked (existing → load its members; new → seed one from the name).
+    // Performer picked (existing → load its members; new → no members by default,
+    // Artists are optional and only added for special collaborations).
     async function onPerformerPick({ id, name }) {
       const el = document.getElementById(ids.performerInput)
       if (el) el.value = name
@@ -410,9 +414,9 @@ const App = (() => {
       store.performer_id   = id || null
       if (id) {
         try { const p = await API.performers.get(id); store.members = (p.members || []).map(m => ({ id: m.id, name: m.name })) }
-        catch (_) { store.members = [{ name }] }
-      } else if (!(store.members || []).length) {
-        store.members = [{ name }]
+        catch (_) { store.members = [] }
+      } else {
+        store.members = []
       }
       renderChips()
     }
@@ -443,9 +447,9 @@ const App = (() => {
         const p = await API.performers.get(exact.id)
         f.members = (p.members || []).map(m => ({ id: m.id, name: m.name }))
       } else {
-        f.members = (f.members && f.members.length) ? f.members : [{ name }]
+        f.members = f.members || []
       }
-    } catch (_) { f.members = f.members || [{ name }] }
+    } catch (_) { f.members = f.members || [] }
     widget.renderChips()
   }
 
@@ -590,6 +594,15 @@ const App = (() => {
     _renderDimRecords(dim)
   }
 
+  // Invalidate one or more dimension caches and silently re-render any open ones.
+  // Call after edits that can prune/create performers, venues, or artists.
+  function invalidateDims(...dims) {
+    dims.forEach(d => {
+      _dimCache[d] = null
+      if (state.expandedDims.has(d)) _renderDimRecords(d)
+    })
+  }
+
   // Header "+ Create new" action per dimension.
   function createInDim(dim) {
     if (dim === 'collections')     window.location.hash = '#/collection/new'
@@ -618,10 +631,9 @@ const App = (() => {
     if (!nav) return
     _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = null
     nav.innerHTML = `
+      <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recording</a>
       <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
       ${_dimSection('collections', null, 'Collections', true)}
-      <a class="nav-item nav-top" data-nav="ingest" href="#/ingest"><span class="nav-icon">+</span> Add Recording</a>
-      <a class="nav-item nav-sub" data-nav="batch" href="#/batch">Batch Import</a>
       ${_dimSection('venues', '◎', 'Venues')}
       ${_dimSection('performers', '✦', 'Performers')}
       ${_dimSection('artists', '♪', 'Artists')}`
@@ -776,7 +788,8 @@ const App = (() => {
     })
   }
 
-  function renderCollectionCreate() {
+  // New collection (create only — editing happens in place on the collection page).
+  async function renderCollectionForm() {
     setActiveNav('collections'); setActiveArtist(null)
     setMainHTML(`
       <div class="artist-header"><h1>New collection</h1></div>
@@ -789,14 +802,14 @@ const App = (() => {
           <label>Description <span style="color:var(--t3); font-weight:400">(optional)</span></label>
           <textarea id="col-desc" style="min-height:70px"></textarea>
         </div>
-        <div style="display:flex; gap:8px">
-          <button class="btn btn-primary btn-sm" id="col-create">Create</button>
+        <div style="display:flex; gap:8px; align-items:center">
+          <button class="btn btn-primary btn-sm" id="col-save">Create</button>
           <button class="btn btn-ghost btn-sm" id="col-cancel">Cancel</button>
         </div>
       </div>`)
     document.getElementById('col-name').focus()
     document.getElementById('col-cancel').addEventListener('click', () => { window.location.hash = '#/' })
-    document.getElementById('col-create').addEventListener('click', async () => {
+    document.getElementById('col-save').addEventListener('click', async () => {
       const name = document.getElementById('col-name').value.trim()
       if (!name) { alert('Name is required'); return }
       try {
@@ -810,37 +823,162 @@ const App = (() => {
     })
   }
 
+  // Collection page — editable name/description in place + recording catalog.
   async function renderCollectionView(id) {
     setActiveNav('collections'); setActiveArtist(null); setLoading()
     let c
     try { c = await API.collections.get(id) }
     catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Collection not found</div></div>`); return }
     const rows = (c.recordings || []).map(r => flatRowHtml(r, true)).join('')
+    const descText = c.description && c.description.trim()
     setMainHTML(`
-      <div class="artist-header">
-        <h1>${esc(c.name)}</h1>
-        <div class="subtitle">${c.recordings.length} recording${c.recordings.length !== 1 ? 's' : ''}${c.description ? ' · ' + esc(c.description) : ''}</div>
-      </div>
-      <div class="rec-table">${rows || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>`)
+      <div class="performer-page">
+        <div class="performer-head">
+          <div class="pp-name-row">
+            <h1 class="pp-name pp-editable" id="col-name" title="Click to edit">${esc(c.name)}</h1>
+            <button class="btn btn-ghost btn-sm pp-delete" id="col-delete" title="Delete collection">Delete</button>
+          </div>
+          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="col-desc" title="Click to edit">${descText ? esc(c.description) : 'Add a description…'}</div>
+          <div class="subtitle">${c.recordings.length} recording${c.recordings.length !== 1 ? 's' : ''}</div>
+        </div>
+        <div class="rec-table">${rows || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>
+      </div>`)
     wireRecordingRows(mainContent)
+
+    const refreshSidebar = () => { _dimCache.collections = null; if (state.expandedDims.has('collections')) _renderDimRecords('collections') }
+    async function saveField(patch) {
+      try { await API.collections.update(id, patch); refreshSidebar() }
+      catch (e) { alert('Save failed: ' + e.message) }
+    }
+    makeInlineEditable(document.getElementById('col-name'), {
+      get: () => c.name,
+      onSave: async v => { v = v.trim(); if (!v || v === c.name) return; c.name = v; await saveField({ name: v }) },
+    })
+    makeInlineEditable(document.getElementById('col-desc'), {
+      multiline: true, placeholder: 'Add a description…',
+      get: () => c.description || '',
+      onSave: async v => { v = v.trim(); c.description = v; await saveField({ description: v || null }) },
+    })
+
+    document.getElementById('col-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete collection "${c.name}"? Recordings are not affected.`)) return
+      try { await API.collections.remove(id); refreshSidebar(); window.location.hash = '#/collections' }
+      catch (e) { alert(e.message) }
+    })
   }
 
-  // Person (Artist) → the performers they're a member of.
+  // Artist (person) page — editable info + Performer associations + appearances,
+  // grouped by Performer alphabetically. Mirrors the Performer page.
   async function renderPersonView(id) {
     setActiveNav('artists'); setActiveArtist(null); setLoading()
     let a
     try { a = await API.artists.get(id) }
-    catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Not found</div></div>`); return }
-    const rows = (a.performers || []).map(p => `
-      <div class="artist-index-row" data-id="${p.id}"><span class="artist-index-name">${esc(p.name)}</span></div>`).join('')
+    catch (e) {
+      invalidateDims('artists')   // heal the sidebar if this person was removed
+      setMainHTML(`<div class="empty-state"><div class="empty-title">This artist no longer exists</div></div>`)
+      return
+    }
+    // Performers the person is a member of (already sorted by the API).
+    let performers = (a.performers || []).map(p => ({ id: p.id, name: p.name }))
+
+    // Fetch each act's recordings so we can group appearances by performer.
+    let perfRecs = []
+    try {
+      perfRecs = await Promise.all(performers.map(p =>
+        API.performers.recordings(p.id).then(rs => ({ performer: p, performances: rs.filter(x => (x.recordings || []).length) }))))
+    } catch (_) {}
+
+    const totalRecordings = perfRecs.reduce((n, g) => n + g.performances.reduce((m, p) => m + p.recordings.length, 0), 0)
+
+    // One <section> per performer (alpha), each with a header + flat recording rows.
+    const groupsHtml = perfRecs.map(g => {
+      const ordered = g.performances.slice().sort((x, y) =>
+        (x.start_year || 0) - (y.start_year || 0) ||
+        (x.start_month || 0) - (y.start_month || 0) ||
+        (x.start_day || 0) - (y.start_day || 0))
+      const rows = ordered.map(p =>
+        p.recordings.map(r => flatRowHtml({
+          id: r.id, performer: p.performer_name,
+          start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
+          venue: p.venue_name, city: p.city, state: p.state, country: p.country,
+          source: r.source, source_modifier: r.source_modifier, quality: r.quality,
+          rating: r.rating, is_complete: r.is_complete,
+          track_count: r.track_count, duration_sec: r.duration_sec,
+        }, false)).join('')).join('')
+      if (!rows) return ''
+      return `<div class="pp-group">
+        <div class="pp-group-head"><a href="#/performer/${g.performer.id}">${esc(g.performer.name)}</a></div>
+        <div class="rec-table">${rows}</div>
+      </div>`
+    }).join('')
+
+    const descText = a.bio && a.bio.trim()
     setMainHTML(`
-      <div class="artist-header">
-        <h1>${esc(a.name)}</h1>
-        <div class="subtitle">Artist · member of ${a.performers.length} performer${a.performers.length !== 1 ? 's' : ''}</div>
-      </div>
-      <div class="artist-index-list">${rows || '<div class="empty-state" style="min-height:120px"><div>Not a member of any performer yet</div></div>'}</div>`)
-    mainContent.querySelectorAll('.artist-index-row').forEach(el =>
-      el.addEventListener('click', () => { window.location.hash = `#/artist/${el.dataset.id}` }))
+      <div class="performer-page">
+        <div class="performer-head">
+          <div class="pp-name-row">
+            <h1 class="pp-name pp-editable" id="pn-name" title="Click to edit">${esc(a.name)}</h1>
+            <button class="btn btn-ghost btn-sm pp-delete" id="pn-delete" title="Delete artist">Delete</button>
+          </div>
+          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pn-desc" title="Click to edit">${descText ? esc(a.bio) : 'Add a bio…'}</div>
+
+          <div class="pp-artists-block">
+            <div class="pp-artists-label">Performers</div>
+            <div class="pp-artists" id="pn-performers"></div>
+          </div>
+
+          <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performers.length} performer${performers.length !== 1 ? 's' : ''}</div>
+        </div>
+        ${groupsHtml || '<div class="empty-state" style="min-height:160px"><div class="empty-title">No appearances yet</div></div>'}
+      </div>`)
+
+    wireRecordingRows(mainContent)
+
+    const refreshSidebar = () => invalidateDims('artists', 'performers')
+    async function saveField(patch) {
+      try { await API.artists.update(id, patch); refreshSidebar() }
+      catch (e) { alert('Save failed: ' + e.message) }
+    }
+    makeInlineEditable(document.getElementById('pn-name'), {
+      get: () => a.name,
+      onSave: async v => { v = v.trim(); if (!v || v === a.name) return; a.name = v; await saveField({ name: v }) },
+    })
+    makeInlineEditable(document.getElementById('pn-desc'), {
+      multiline: true, placeholder: 'Add a bio…',
+      get: () => a.bio || '',
+      onSave: async v => { v = v.trim(); a.bio = v; await saveField({ bio: v || null }) },
+    })
+
+    // ── Editable Performer associations ─────────────────────────────────────
+    function renderPerformers() {
+      const box = document.getElementById('pn-performers')
+      box.innerHTML =
+        performers.map((p, i) => `<span class="member-chip">${esc(p.name)} <span class="member-chip-x" data-i="${i}" title="Remove from this act">×</span></span>`).join('') +
+        `<span class="artist-picker-wrap pp-add-wrap">
+           <input type="text" class="member-input pp-add-input" autocomplete="off" placeholder="Add to a performer…" />
+           <div class="artist-dropdown" id="pn-add-dd" style="display:none"></div>
+         </span>`
+      box.querySelectorAll('.member-chip-x').forEach(x =>
+        x.addEventListener('click', async () => {
+          const p = performers[parseInt(x.dataset.i)]
+          try { await API.artists.removePerformer(id, p.id); invalidateDims('performers') } catch (e) { alert(e.message); return }
+          renderPersonView(id)   // reload so the grouped appearances update
+        }))
+      const input = box.querySelector('.pp-add-input')
+      wirePickerDropdown(input, document.getElementById('pn-add-dd'), API.performers.search,
+        async ({ id: pid, name }) => {
+          try { await API.artists.addPerformer(id, pid ? { performer_id: pid } : { performer_name: name }); invalidateDims('performers') }
+          catch (e) { alert(e.message); return }
+          renderPersonView(id)
+        }, 'Create new performer')
+    }
+    renderPerformers()
+
+    document.getElementById('pn-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete artist "${a.name}"? This can't be undone.`)) return
+      try { await API.artists.remove(id); refreshSidebar(); window.location.hash = '#/' }
+      catch (e) { alert(e.message) }
+    })
   }
 
   // ── Views ──────────────────────────────────────────────────────────────────
@@ -897,29 +1035,35 @@ const App = (() => {
     wireRecordingRows(mainContent)
   }
 
-  /** Artist recordings — the main catalog browser */
-  async function renderArtistView(artistId) {
+  /** Performer page — editable info + member Artists + recording catalog. */
+  async function renderArtistView(performerId) {
     setActiveNav('library')
-    setActiveArtist(artistId)
+    setActiveArtist(performerId)
     setLoading()
 
-    let artist, performances
+    let performer, performances
     try {
-      [artist, performances] = await Promise.all([
-        API.performers.get(artistId),
-        API.performers.recordings(artistId),
+      [performer, performances] = await Promise.all([
+        API.performers.get(performerId),
+        API.performers.recordings(performerId),
       ])
     } catch (e) {
-      setMainHTML(`<div class="empty-state"><div class="empty-title">Failed to load</div></div>`)
+      // Likely a performer that was pruned after reassignment — heal the stale
+      // sidebar so the phantom entry disappears.
+      invalidateDims('performers')
+      setMainHTML(`<div class="empty-state"><div class="empty-title">This performer no longer exists</div><div class="empty-sub">It may have been removed after its recordings were reassigned.</div></div>`)
       return
     }
 
-    state.selectedArtist = artist
-    performances = performances.filter(p => (p.recordings || []).length > 0)
-    const totalRecordings = performances.reduce((n, p) => n + p.recordings.length, 0)
+    state.selectedArtist = performer
+    // Local, mutable copy of the roster — edited in place, persisted on each change.
+    let members = (performer.members || []).map(m => ({ id: m.id, name: m.name }))
+
+    const withRecs = performances.filter(p => (p.recordings || []).length > 0)
+    const totalRecordings = withRecs.reduce((n, p) => n + p.recordings.length, 0)
 
     // Flat one row per recording, oldest→newest. No year headers (one performer).
-    const ordered = performances.slice().sort((a, b) =>
+    const ordered = withRecs.slice().sort((a, b) =>
       (a.start_year || 0) - (b.start_year || 0) ||
       (a.start_month || 0) - (b.start_month || 0) ||
       (a.start_day || 0) - (b.start_day || 0))
@@ -934,15 +1078,112 @@ const App = (() => {
       }, false)).join('')
     ).join('')
 
+    const descText = performer.bio && performer.bio.trim()
     setMainHTML(`
-      <div class="artist-header">
-        <h1>${esc(artist.name)}</h1>
-        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performances.length} performance${performances.length !== 1 ? 's' : ''}${
-          (artist.members || []).length ? ' · ' + esc(artist.members.map(m => m.name).join(', ')) : ''}</div>
-      </div>
-      <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>`)
+      <div class="performer-page">
+        <div class="performer-head">
+          <div class="pp-name-row">
+            <h1 class="pp-name pp-editable" id="pp-name" title="Click to edit">${esc(performer.name)}</h1>
+            <button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>
+          </div>
+          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
+
+          <div class="pp-artists-block">
+            <div class="pp-artists-label">Artists</div>
+            <div class="pp-artists" id="pp-artists"></div>
+          </div>
+
+          <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${withRecs.length} performance${withRecs.length !== 1 ? 's' : ''}</div>
+        </div>
+        <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
+      </div>`)
 
     wireRecordingRows(mainContent)
+
+    const refreshSidebar = () => { _dimCache.performers = null; if (state.expandedDims.has('performers')) _renderDimRecords('performers') }
+
+    // ── Inline-editable name / description ──────────────────────────────────
+    async function saveField(patch) {
+      try { await API.performers.update(performerId, patch); refreshSidebar() }
+      catch (e) { alert('Save failed: ' + e.message) }
+    }
+    makeInlineEditable(document.getElementById('pp-name'), {
+      get: () => performer.name,
+      onSave: async v => {
+        v = v.trim(); if (!v || v === performer.name) return
+        performer.name = v; state.selectedArtist.name = v
+        await saveField({ name: v })
+      },
+    })
+    makeInlineEditable(document.getElementById('pp-desc'), {
+      multiline: true, placeholder: 'Add a description…',
+      get: () => performer.bio || '',
+      onSave: async v => {
+        v = v.trim(); performer.bio = v
+        await saveField({ bio: v || null })
+      },
+    })
+
+    // ── Editable Artists (members) ──────────────────────────────────────────
+    async function persistMembers() { await saveField({ members: members.map(m => m.name) }) }
+
+    function renderArtists() {
+      const box = document.getElementById('pp-artists')
+      box.innerHTML =
+        members.map((m, i) => `<span class="member-chip">${esc(m.name)} <span class="member-chip-x" data-i="${i}" title="Remove">×</span></span>`).join('') +
+        `<span class="artist-picker-wrap pp-add-wrap">
+           <input type="text" class="member-input pp-add-input" autocomplete="off" placeholder="Add an artist…" />
+           <div class="artist-dropdown" id="pp-add-dd" style="display:none"></div>
+         </span>`
+      box.querySelectorAll('.member-chip-x').forEach(x =>
+        x.addEventListener('click', async () => { members.splice(parseInt(x.dataset.i), 1); await persistMembers(); renderArtists() }))
+      const input = box.querySelector('.pp-add-input')
+      wirePickerDropdown(input, document.getElementById('pp-add-dd'), API.artists.search,
+        async ({ name }) => {
+          name = (name || '').trim()
+          if (name && !members.some(m => m.name.toLowerCase() === name.toLowerCase())) {
+            members.push({ name }); await persistMembers()   // set_performer_members creates new people as needed
+          }
+          renderArtists()
+        }, 'Create new artist')
+    }
+    renderArtists()
+
+    document.getElementById('pp-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete performer "${performer.name}"? This can't be undone.`)) return
+      try { await API.performers.remove(performerId); refreshSidebar(); window.location.hash = '#/' }
+      catch (e) { alert(e.message) }
+    })
+  }
+
+  // Turn an element into a click-to-edit field. opts: {get, onSave, multiline, placeholder}.
+  function makeInlineEditable(el, opts) {
+    if (!el) return
+    el.addEventListener('click', () => {
+      if (el.querySelector('input, textarea')) return   // already editing
+      const cur = opts.get()
+      const field = document.createElement(opts.multiline ? 'textarea' : 'input')
+      field.className = 'pp-inline-input'
+      field.value = cur
+      if (opts.multiline) field.rows = 3
+      el.replaceChildren(field)
+      field.focus(); field.select?.()
+      let done = false
+      const commit = async (save) => {
+        if (done) return; done = true
+        const val = field.value
+        if (save) await opts.onSave(val)
+        const shown = (opts.get() || '').trim()
+        el.textContent = shown || (opts.placeholder || '')
+        el.classList.toggle('pp-empty', !shown)
+      }
+      field.addEventListener('blur', () => commit(true))
+      field.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); commit(false) }
+        else if (e.key === 'Enter' && !opts.multiline) { e.preventDefault(); field.blur() }
+        else if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); field.blur() }
+      })
+    })
   }
 
   /** Recording detail — split panel: tracks + info file */
@@ -1438,7 +1679,9 @@ const App = (() => {
       btn.textContent = 'Deleting…'
       try {
         await API.recordings.delete(recordingId)
-        // Navigate back to artist or library root
+        // Deleting a recording can prune its performer / venue / artists.
+        invalidateDims('performers', 'venues', 'artists')
+        // Navigate back to artist or library root (unless the performer was pruned)
         const backHash = state.selectedArtist ? `#/artist/${state.selectedArtist.id}` : '#/'
         window.location.hash = backHash
       } catch (err) {
@@ -1611,7 +1854,7 @@ const App = (() => {
   }
 
   async function renderBatchImportView() {
-    setActiveNav('batch')
+    setActiveNav('ingest')   // Batch is reached from Add Recording; keep it lit
     if (!batch.results) { renderBatchPickerView(); return }
     renderBatchResultsView()
   }
@@ -1992,6 +2235,9 @@ const App = (() => {
 
     setMainHTML(`
       <div class="ingest-view">
+        <div class="ingest-topbar">
+          <button class="btn btn-ghost btn-sm" id="btn-goto-batch" title="Import many folders at once">⇪ Batch Import</button>
+        </div>
         <div class="ingest-step-header">
           <h2>Add Recording</h2>
           ${stepDots('folder')}
@@ -2003,6 +2249,8 @@ const App = (() => {
         </div>
         <div id="scan-status"></div>
       </div>`)
+
+    document.getElementById('btn-goto-batch').addEventListener('click', () => { window.location.hash = '#/batch' })
 
     document.getElementById('folder-picker').addEventListener('click', async () => {
       let path = null
@@ -2364,8 +2612,7 @@ const App = (() => {
       const scoreEl = document.getElementById('iq-score')
       const msgEl   = document.getElementById('iq-msg')
       if (scoreEl) {
-        const base = ingest._aiBaseScore
-        scoreEl.textContent = (base != null && h.score !== base) ? `${base} → ${h.score}` : h.score
+        scoreEl.textContent = h.score
         scoreEl.className = 'iq-score iq-score--' + h.band
       }
       if (msgEl) msgEl.textContent = HEALTH_MSG[h.band] || ''
@@ -2429,7 +2676,6 @@ const App = (() => {
     const body = ensureAiPane()
     if (!body) return
     switchIngestPane('isp-ai', document.querySelector('.ingest-review-raw .slide-tab--ai'))
-    ingest._aiBaseScore = ingest.scan?.health?.score ?? null
     if (btn) { btn.disabled = true; btn.textContent = '… researching' }
     body.innerHTML = `<div class="ai-loading"><div class="loading-spinner"></div><div>Researching the web — this can take a minute or two… <span id="ai-elapsed">0s</span></div></div>`
     const t0 = Date.now()
@@ -2650,21 +2896,23 @@ const App = (() => {
         <tr class="it-detail-row" id="it-detail-${i}" style="display:none">
           <td colspan="5">
             <div class="et-detail-body">
-              <div class="et-detail-optional-label">Optional track details</div>
-              <div class="et-detail-field">
-                <label>Songwriter</label>
-                <input type="text" class="t-songwriter" data-idx="${i}" value="${esc(t.songwriter || '')}" placeholder="" />
+              <div class="et-detail-label">Track details</div>
+              <div class="et-detail-grid2">
+                <div class="et-detail-field">
+                  <label>Track notes</label>
+                  <textarea class="t-track-notes" data-idx="${i}" style="min-height:32px">${esc(t.notes || '')}</textarea>
+                </div>
+                <div class="et-detail-field">
+                  <label>Songwriter</label>
+                  <input type="text" class="t-songwriter" data-idx="${i}" value="${esc(t.songwriter || '')}" placeholder="" />
+                </div>
               </div>
               <div class="et-detail-field" style="margin-top:6px">
                 <label>Flags</label>
                 <div class="flag-pill-row">${flagPills}</div>
               </div>
               <div class="et-detail-field" style="margin-top:6px">
-                <label>Track notes</label>
-                <textarea class="t-track-notes" data-idx="${i}" style="min-height:32px">${esc(t.notes || '')}</textarea>
-              </div>
-              <div class="et-detail-field" style="margin-top:6px">
-                <label class="check-label" title="Mark this track as an official release">
+                <label class="check-label check-inline" title="Mark this track as an official release">
                   <input type="checkbox" class="t-official" data-idx="${i}" ${t.is_official ? 'checked' : ''} />
                   <span>Official release</span>
                 </label>
@@ -2695,10 +2943,10 @@ const App = (() => {
             </div>
 
             <div class="ingest-field" style="margin-top:6px">
-              <label>Members <span style="color:var(--t3); font-weight:400">— the Artists in this act</span></label>
+              <label>Artists <span style="color:var(--t3); font-weight:400">— the people in this act</span></label>
               <div class="members-field" id="f-members-field">
                 <div class="artist-picker-wrap" style="flex:1; min-width:120px">
-                  <input type="text" id="f-member-input" class="member-input" autocomplete="off" placeholder="Add a member…" />
+                  <input type="text" id="f-member-input" class="member-input" autocomplete="off" placeholder="Add an artist…" />
                   <div class="artist-dropdown" id="f-member-dropdown" style="display:none"></div>
                 </div>
               </div>
@@ -2719,13 +2967,23 @@ const App = (() => {
               <div class="ingest-field"><label>Day</label><input type="number" id="f-end-day" value="${esc(f.end_day)}" min="1" max="31" /></div>
             </div>
 
-            <!-- Venue -->
-            <div class="ingest-field" style="margin-top:8px">
-              <label>Venue</label>
-              <div class="venue-picker-wrap">
-                <input type="text" id="f-venue-name" value="${esc(f.venue_name)}" autocomplete="off" placeholder="Search or type venue name…" />
-                <input type="hidden" id="f-venue-id" value="${esc(String(f.venue_id || ''))}" />
-                <div class="venue-dropdown" id="f-venue-dropdown" style="display:none"></div>
+            <!-- Venue + Festival/Event on one row -->
+            <div class="ingest-field-grid" style="grid-template-columns:1fr 1fr; gap:8px; margin-top:8px">
+              <div class="ingest-field">
+                <label>Venue</label>
+                <div class="venue-picker-wrap">
+                  <input type="text" id="f-venue-name" value="${esc(f.venue_name)}" autocomplete="off" placeholder="Search or type venue name…" />
+                  <input type="hidden" id="f-venue-id" value="${esc(String(f.venue_id || ''))}" />
+                  <div class="venue-dropdown" id="f-venue-dropdown" style="display:none"></div>
+                </div>
+              </div>
+              <div class="ingest-field">
+                <label>Festival / Event <span style="font-weight:400; opacity:0.6">(optional)</span></label>
+                <div class="event-picker-wrap">
+                  <input type="text" id="f-event-name" value="${esc(f.event_name || '')}" autocomplete="off" />
+                  <input type="hidden" id="f-event-id" value="${esc(String(f.event_id || ''))}" />
+                  <div class="event-dropdown" id="f-event-dropdown" style="display:none"></div>
+                </div>
               </div>
             </div>
 
@@ -2734,16 +2992,6 @@ const App = (() => {
               <div class="ingest-field"><label>City</label><input type="text" id="f-city" value="${esc(f.city)}" /></div>
               <div class="ingest-field"><label>St</label><input type="text" id="f-state" value="${esc(f.state)}" maxlength="6" /></div>
               <div class="ingest-field"><label>Country</label><input type="text" id="f-country" value="${esc(f.country)}" /></div>
-            </div>
-
-            <!-- Event (festival) — optional -->
-            <div class="ingest-field" style="margin-top:6px">
-              <label>Festival / Event <span style="font-weight:400; opacity:0.6">(optional)</span></label>
-              <div class="event-picker-wrap">
-                <input type="text" id="f-event-name" value="${esc(f.event_name || '')}" autocomplete="off" />
-                <input type="hidden" id="f-event-id" value="${esc(String(f.event_id || ''))}" />
-                <div class="event-dropdown" id="f-event-dropdown" style="display:none"></div>
-              </div>
             </div>
 
             <!-- Source / Detail / Lineage / Quality / Rating — matches Edit form -->
@@ -3590,21 +3838,23 @@ const App = (() => {
         <tr class="et-detail-row" id="et-detail-${t.id}" style="display:none">
           <td colspan="5">
             <div class="et-detail-body">
-              <div class="et-detail-optional-label">Optional track details</div>
-              <div class="et-detail-field">
-                <label>Songwriter</label>
-                <input type="text" class="et-songwriter" data-id="${t.id}" value="${esc(t.songwriter || '')}" placeholder="" />
+              <div class="et-detail-label">Track details</div>
+              <div class="et-detail-grid2">
+                <div class="et-detail-field">
+                  <label>Track notes</label>
+                  <textarea class="et-track-notes" data-id="${t.id}" style="min-height:36px">${esc(t.notes || '')}</textarea>
+                </div>
+                <div class="et-detail-field">
+                  <label>Songwriter</label>
+                  <input type="text" class="et-songwriter" data-id="${t.id}" value="${esc(t.songwriter || '')}" placeholder="" />
+                </div>
               </div>
               <div class="et-detail-field" style="margin-top:6px">
                 <label>Flags</label>
                 <div class="flag-pill-row">${flagPills}</div>
               </div>
               <div class="et-detail-field" style="margin-top:6px">
-                <label>Track notes</label>
-                <textarea class="et-track-notes" data-id="${t.id}" style="min-height:36px">${esc(t.notes || '')}</textarea>
-              </div>
-              <div class="et-detail-field" style="margin-top:6px">
-                <label class="check-label" title="Mark this track as an official release">
+                <label class="check-label check-inline" title="Mark this track as an official release">
                   <input type="checkbox" class="et-official" data-id="${t.id}" ${t.is_official ? 'checked' : ''} />
                   <span>Official release</span>
                 </label>
@@ -3677,10 +3927,10 @@ const App = (() => {
 
           <!-- Members (the Artists in the act) -->
           <div class="ingest-field" style="margin-bottom:16px">
-            <label>Members <span style="color:var(--t3); font-weight:400">— the Artists in this act</span></label>
+            <label>Artists <span style="color:var(--t3); font-weight:400">— the people in this act</span></label>
             <div class="members-field" id="e-members-field">
               <div class="artist-picker-wrap" style="flex:1; min-width:120px">
-                <input type="text" id="e-member-input" class="member-input" autocomplete="off" placeholder="Add a member…" />
+                <input type="text" id="e-member-input" class="member-input" autocomplete="off" placeholder="Add an artist…" />
                 <div class="artist-dropdown" id="e-member-dropdown" style="display:none"></div>
               </div>
             </div>
@@ -4004,6 +4254,9 @@ const App = (() => {
           )
         )
 
+        // Reassignment can prune the old performer / create a new one, and roster
+        // edits can add or orphan Artists — refresh those sidebar lists.
+        invalidateDims('performers', 'artists')
         renderRecordingView(recordingId)
       } catch (e) {
         errEl.textContent = 'Save failed: ' + e.message
@@ -4193,6 +4446,7 @@ const App = (() => {
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:28px">
             <button class="btn btn-primary btn-sm" id="vd-save">Save</button>
             <span id="vd-msg" style="font-size:11px; color:var(--t2)"></span>
+            <button class="btn btn-ghost btn-sm" id="vd-delete" style="margin-left:auto; color:var(--red)">Delete</button>
           </div>
 
           ${v.performance_count > 0 ? `
@@ -4201,7 +4455,7 @@ const App = (() => {
             ${v.performances.map(p => `
               <div style="display:flex; align-items:center; gap:12px; padding:5px 0; border-bottom:1px solid var(--bd-0); font-size:12px">
                 <span style="color:var(--t2); font-family:var(--font-mono); min-width:80px">${esc(p.date)}</span>
-                <a href="#/artist/" style="color:var(--t0); text-decoration:none; flex:1">${esc(p.performer)}</a>
+                <a href="#/artist/${p.performer_id}" style="color:var(--t0); text-decoration:none; flex:1">${esc(p.performer)}</a>
               </div>`).join('')}
           </div>` : `<div style="font-size:12px; color:var(--t2)">No performances linked yet</div>`}
         </div>`
@@ -4233,6 +4487,24 @@ const App = (() => {
         } finally {
           saveBtn.disabled = false
           saveBtn.textContent = 'Save'
+        }
+      })
+
+      document.getElementById('vd-delete').addEventListener('click', async () => {
+        if (!confirm(`Delete venue "${v.name}"? This can't be undone.`)) return
+        const msgEl = document.getElementById('vd-msg')
+        try {
+          await API.venues.remove(id)
+          allVenues = await API.venues.list()
+          activeId  = null
+          renderList(allVenues)
+          document.getElementById('venues-detail-panel').innerHTML =
+            '<div class="venue-detail-empty">Select a venue to view or edit</div>'
+          _dimCache.venues = null
+          if (state.expandedDims.has('venues')) _renderDimRecords('venues')
+        } catch (e) {
+          msgEl.style.color = 'var(--red)'
+          msgEl.textContent = e.message
         }
       })
     }
@@ -4327,6 +4599,13 @@ const App = (() => {
       if (id) renderArtistView(id)
       else    renderLibraryView()
 
+    } else if (hash.startsWith('#/performer/')) {
+      // The performer page is edit-in-place, so #/performer/<id> and any legacy
+      // /edit suffix both land on the same view.
+      const id = parseInt(hash.split('/')[2])
+      if (id) renderArtistView(id)
+      else    renderLibraryView()
+
     } else if (hash === '#/batch') {
       renderBatchImportView()
 
@@ -4345,6 +4624,7 @@ const App = (() => {
       renderArtistsIndexPage()
 
     } else if (hash.startsWith('#/person/')) {
+      // Edit-in-place, so #/person/<id> and any legacy /edit both land on the view.
       const id = parseInt(hash.split('/')[2])
       if (id) renderPersonView(id)
       else    renderLibraryView()
@@ -4353,9 +4633,10 @@ const App = (() => {
       renderCollectionsIndex()
 
     } else if (hash === '#/collection/new') {
-      renderCollectionCreate()
+      renderCollectionForm()
 
     } else if (hash.startsWith('#/collection/')) {
+      // Edit-in-place, so #/collection/<id> and any legacy /edit both land on the view.
       const id = parseInt(hash.split('/')[2])
       if (id) renderCollectionView(id)
       else    renderCollectionsIndex()

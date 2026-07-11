@@ -5,17 +5,27 @@ against the seeded temp DB.
 (2026-07-11 remodel: Performer = act; Artist = person; Membership = M2M.)
 """
 
+import pytest
+
 from app.extensions import db as _db
 from app.models.recording import Recording
 from app.models.performance import Performance
 from app.models.performer import Performer
 from app.models.artist import Artist, Membership
+from app.models.venue import Venue
 from app.models.track import Track
 from app.models.track_analysis import TrackAnalysis
 from app.models.play_log import PlayLog
 from app.utils.serialize import recording_summary
 from app.utils.ingest import build_recording_tags
 from app.utils.pruning import prune_after_recording_delete, prune_performer_if_orphaned
+
+
+@pytest.fixture()
+def api(app):
+    """A test client with auth disabled — exercises the JSON CRUD endpoints."""
+    app.config["LOGIN_DISABLED"] = True
+    return app.test_client()
 
 
 def test_recording_summary_shape(app, seeded_ids):
@@ -89,3 +99,46 @@ def test_prune_keeps_person_who_is_in_another_act(app, db, seeded_ids):
     assert result["artists"] == []                          # person kept
     assert _db.session.get(Artist, artist_id) is not None
     assert _db.session.get(Performer, other.id) is not None
+
+
+# ── CRUD endpoint guards (delete refuses while referenced) ─────────────────────
+
+def test_delete_performer_refuses_with_recordings(api, seeded_ids):
+    r = api.delete(f"/api/performers/{seeded_ids['performer_id']}")
+    assert r.status_code == 409
+    assert "performance" in r.get_json()["error"]
+    assert _db.session.get(Performer, seeded_ids["performer_id"]) is not None
+
+
+def test_delete_venue_refuses_with_performances(api, seeded_ids):
+    perf = _db.session.get(Performance, seeded_ids["performance_id"])
+    r = api.delete(f"/api/venues/{perf.venue_id}")
+    assert r.status_code == 409
+    assert _db.session.get(Venue, perf.venue_id) is not None
+
+
+def test_delete_artist_refuses_while_member(api, seeded_ids):
+    r = api.delete(f"/api/artists/{seeded_ids['artist_id']}")
+    assert r.status_code == 409
+    assert "member" in r.get_json()["error"]
+
+
+def test_artist_edit_and_delete_when_orphan(api):
+    created = api.post("/api/artists/", json={"name": "Sandip Burman"}).get_json()
+    aid = created["id"]
+    # Edit
+    assert api.put(f"/api/artists/{aid}", json={"sort_name": "Burman, Sandip"}).status_code == 200
+    assert _db.session.get(Artist, aid).sort_name == "Burman, Sandip"
+    # Delete (no memberships) succeeds
+    assert api.delete(f"/api/artists/{aid}").status_code == 200
+    assert _db.session.get(Artist, aid) is None
+
+
+def test_performer_and_venue_delete_when_empty(api):
+    pid = api.post("/api/performers/", json={"name": "Temp Act"}).get_json()["id"]
+    assert api.delete(f"/api/performers/{pid}").status_code == 200
+    assert _db.session.get(Performer, pid) is None
+
+    vid = api.post("/api/venues/", json={"name": "Temp Hall"}).get_json()["id"]
+    assert api.delete(f"/api/venues/{vid}").status_code == 200
+    assert _db.session.get(Venue, vid) is None

@@ -24,77 +24,71 @@ def _flac(n):
     return [{"filename": f"Track {i:02d}.flac"} for i in range(1, n + 1)]
 
 
+def _full_core(**over):
+    """A fully-populated set of core fields (all 8 present, full date)."""
+    base = {"artist": "X", "concert_date": "1980-05-08", "venue": "Fillmore",
+            "city": "New York", "state": "NY", "country": "US",
+            "source": "SBD", "lineage": "SBD>DAT"}
+    base.update(over)
+    return base
+
+
 def test_health_clean_show_is_green():
-    # Complete tags, agreeing info, clean 17/17, all FLAC — Billy-Joel-like.
-    tags = {"artist": "Billy Joel", "concert_date": "1993-07-01", "venue": "Logan Hall",
-            "city": "London", "country": "UK", "source": "AUD", "lineage": "AUD>CDR",
-            "tracks": [{"track_number": i, "title": f"S{i}"} for i in range(1, 18)]}
+    # All 8 core fields populated + every track has a real title → 100.
+    tags = _full_core(artist="Billy Joel", concert_date="1993-07-01",
+                      tracks=[{"track_number": i, "title": f"Song {i}"} for i in range(1, 18)])
     info = {"artist": "Billy Joel", "year": 1993, "month": 7, "day": 1, "venue": "Logan Hall",
-            "city": "London", "country": "UK",
-            "tracks": [{"number": i, "title": f"S{i}"} for i in range(1, 18)]}
+            "city": "London", "state": "", "country": "UK",
+            "tracks": [{"number": i, "title": f"Song {i}"} for i in range(1, 18)]}
     h = compute_health(_scan(tags, info, _flac(17)))
     assert h["band"] == "green"
-    assert h["score"] >= 85
+    assert h["score"] == 100
 
 
-def test_health_flags_track_count_mismatch():
-    # 16-song setlist vs 14 files (ABB) — must surface a Tracks reconcile factor.
-    tags = {"artist": "Allman Brothers Band", "concert_date": "1973-07-28",
-            "venue": "Racecourse", "city": "Watkins Glen", "country": "US",
-            "source": "SBD", "tracks": [{"track_number": i, "title": ""} for i in range(1, 15)]}
-    info = {"artist": "Allman Brothers Band", "year": 1973, "month": 7, "day": 28,
-            "venue": "Racecourse", "city": "Watkins Glen", "country": "US",
-            "tracks": [{"number": i, "title": f"S{i}"} for i in range(1, 17)]}
-    h = compute_health(_scan(tags, info, _flac(14)))
-    msgs = " ".join(f["msg"] for f in h["factors"])
-    assert "16" in msgs and "14" in msgs  # names the mismatch
-    assert h["band"] in ("yellow", "red")
+def test_health_placeholder_titles_do_not_count():
+    # THE core bug: "Track 01"-style titles are NOT real titles. All 8 core fields
+    # present but 0/10 real titles → 8 of 18 fields ≈ 44 → red, not green.
+    tags = _full_core(artist="Bela Fleck",
+                      tracks=[{"track_number": i, "title": f"Track {i:02d}"} for i in range(1, 11)])
+    info = dict(tags, year=1980, month=5, day=8, tracks=[])
+    h = compute_health(_scan(tags, info, _flac(10)))
+    assert h["band"] == "red"
+    assert h["score"] < 60
+    assert any("lack a real title" in f["msg"] for f in h["factors"])
 
 
-def test_health_missing_text_file_still_green_if_tags_complete():
-    # No info file must NOT tank the score when tags carry everything.
-    tags = {"artist": "X", "concert_date": "1980-05-08", "venue": "Fillmore",
-            "city": "New York", "country": "US", "source": "SBD", "lineage": "SBD>DAT",
-            "tracks": [{"track_number": i, "title": f"S{i}"} for i in range(1, 6)]}
-    h = compute_health(_scan(tags, info=None, audio=_flac(5), info_content=None))
-    # Single-source (tags only) costs 8; everything else full → still green-ish
-    assert h["score"] >= 80
-    assert any("Single metadata source" in f["msg"] for f in h["factors"])
+def test_health_partial_tracks_named():
+    # 8 core + 5/10 real titles → 13 of 18 ≈ 72 → yellow.
+    titles = [f"Song {i}" if i <= 5 else f"Track {i:02d}" for i in range(1, 11)]
+    tags = _full_core(tracks=[{"track_number": i, "title": titles[i - 1]} for i in range(1, 11)])
+    h = compute_health(_scan(tags, tags, _flac(10)))
+    assert h["band"] == "yellow"
+    assert any("5 of 10 tracks lack a real title" in f["msg"] for f in h["factors"])
 
 
-def test_health_source_disagreement_flagged():
-    tags = {"artist": "X", "concert_date": "1980-05-08", "venue": "Fillmore East",
-            "city": "New York", "country": "US"}
-    info = {"artist": "X", "year": 1980, "month": 5, "day": 8, "venue": "Capitol Theatre",
-            "city": "Passaic", "country": "US", "tracks": []}
-    h = compute_health(_scan(tags, info, _flac(4)))
-    assert any(f["dimension"] == "Source agreement" and "disagree" in f["msg"]
-               for f in h["factors"])
+def test_health_missing_core_field_detracts():
+    # Drop Lineage from an otherwise-perfect show → one field lost.
+    tags = _full_core(lineage="", tracks=[{"track_number": 1, "title": "Intro"}])
+    full = _full_core(tracks=[{"track_number": 1, "title": "Intro"}])
+    h_missing = compute_health(_scan(tags, tags, _flac(1)))
+    h_full    = compute_health(_scan(full, full, _flac(1)))
+    assert h_full["score"] > h_missing["score"]
+    assert any(f["msg"] == "No lineage" for f in h_missing["factors"])
 
 
-def test_health_lossy_audio_not_ai_recoverable():
-    tags = {"artist": "X", "concert_date": "1980-05-08", "venue": "V",
-            "city": "NY", "country": "US", "source": "AUD", "lineage": "L",
-            "tracks": [{"track_number": 1, "title": "a"}]}
-    h = compute_health(_scan(tags, tags, [{"filename": "Track 01.mp3"}]))
-    lossy = [f for f in h["factors"] if f["dimension"] == "Audio integrity"]
-    assert lossy and lossy[0]["ai_recoverable"] is False
+def test_health_date_precision_graded():
+    year_only = _full_core(concert_date="1980", tracks=[{"track_number": 1, "title": "Intro"}])
+    y = dict(year_only); y.pop("concert_date"); y["year"] = 1980
+    full = _full_core(tracks=[{"track_number": 1, "title": "Intro"}])
+    h_year = compute_health(_scan(year_only, y, _flac(1)))
+    h_full = compute_health(_scan(full, full, _flac(1)))
+    assert h_year["score"] < h_full["score"]
+    assert any("Year only" in f["msg"] for f in h_year["factors"])
 
 
 def test_health_no_audio_is_zero():
     h = compute_health(_scan({}, {}, audio=[]))
     assert h["score"] == 0 and h["band"] == "red"
-
-
-def test_health_no_track_titles_never_green():
-    # Everything else perfect, but zero track titles → must not be green (gated).
-    tags = {"artist": "Bela Fleck", "concert_date": "1999-06-20", "venue": "KOTO Radio",
-            "city": "Telluride", "state": "CO", "country": "US", "source": "FM", "lineage": "FM>DAT",
-            "tracks": [{"track_number": i, "title": ""} for i in range(1, 11)]}
-    info = dict(tags, year=1999, month=6, day=20, tracks=[])
-    h = compute_health(_scan(tags, info, _flac(10)))
-    assert h["band"] != "green"
-    assert any(f.get("gate") and "track titles" in f["msg"].lower() for f in h["factors"])
 
 
 def test_parse_location_multiword_city_not_truncated():

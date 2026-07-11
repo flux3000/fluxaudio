@@ -12,6 +12,7 @@ from sqlalchemy import func
 
 from app.extensions import db
 from app.models.performer import Performer
+from app.models.artist import Artist
 from app.models.performance import Performance
 from app.models.recording import Recording
 from app.utils.serialize import recording_summary
@@ -169,7 +170,9 @@ def create_performer():
     p = Performer(name=name, sort_name=data.get("sort_name"), bio=data.get("bio"))
     db.session.add(p)
     db.session.flush()
-    set_performer_members(p, data.get("members") or [name])
+    # Artists are optional — only set members if the caller supplied any.
+    if data.get("members"):
+        set_performer_members(p, data["members"])
     db.session.commit()
     return jsonify({"id": p.id, "name": p.name}), 201
 
@@ -188,3 +191,27 @@ def update_performer(performer_id):
         set_performer_members(p, data["members"])
     db.session.commit()
     return jsonify({"id": p.id})
+
+
+@bp.route("/<int:performer_id>", methods=["DELETE"])
+@login_required
+def delete_performer(performer_id):
+    """Delete a performer. Refuses if it still has performances/recordings —
+    reassign or delete those first. Member Artists left orphaned are pruned."""
+    p = db.session.get(Performer, performer_id)
+    if not p:
+        return jsonify({"error": "Not found"}), 404
+    n_perf = db.session.query(Performance).filter_by(performer_id=performer_id).count()
+    if n_perf:
+        return jsonify({"error": f"Performer has {n_perf} performance(s) — "
+                                 "delete or reassign its recordings first."}), 409
+    member_ids = [a.id for a in p.artists]
+    db.session.delete(p)          # memberships cascade
+    db.session.flush()
+    # Prune any member Artist that now belongs to no performer.
+    for aid in member_ids:
+        a = db.session.get(Artist, aid)
+        if a and not a.memberships:
+            db.session.delete(a)
+    db.session.commit()
+    return jsonify({"ok": True})

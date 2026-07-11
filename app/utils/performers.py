@@ -1,10 +1,12 @@
 """
 utils/performers.py — resolve/create Performers (acts) and their member Artists.
 
-Shared by ingest, the Add/Edit forms, and performance reassignment. A Performer
-must always have >=1 member; a brand-new Performer auto-seeds one member matching
-its own name (e.g. "Grateful Dead" the act gets Artist "Grateful Dead"), which the
-user enriches with real people later.
+Shared by ingest, the Add/Edit forms, and performance reassignment.
+
+The Performer (the billed act) is the core entity. Member Artists (people) are
+OPTIONAL — a Performer may have zero members. Members are only added in special
+cases: a one-off collaboration of otherwise-distinct artists, or deliberate
+personnel archiving. Nothing is auto-seeded from the performer's name.
 """
 
 from sqlalchemy import func
@@ -29,8 +31,8 @@ def resolve_or_create_artist(name):
 def set_performer_members(performer, member_names):
     """
     Replace a performer's membership with the given ordered artist names
-    (resolve/create each person). Always keeps >=1 member — falls back to the
-    performer's own name when the list is empty.
+    (resolve/create each person). An empty list clears all members — a Performer
+    with zero Artists is valid.
     """
     names, seen = [], set()
     for n in (member_names or []):
@@ -38,8 +40,6 @@ def set_performer_members(performer, member_names):
         if n and n.lower() not in seen:
             seen.add(n.lower())
             names.append(n)
-    if not names:
-        names = [performer.name]
 
     db.session.query(Membership).filter_by(performer_id=performer.id).delete(
         synchronize_session=False)
@@ -53,8 +53,9 @@ def set_performer_members(performer, member_names):
 def resolve_or_create_performer(name, member_names=None):
     """
     Find a Performer by name (case-insensitive) or create it. On create, seed
-    members from member_names (or a single member matching the name if none).
-    Does NOT change an existing performer's members — use set_performer_members.
+    members from member_names if provided (otherwise the Performer starts with no
+    Artists). Does NOT change an existing performer's members — use
+    set_performer_members.
     """
     name = (name or "").strip()
     performer = db.session.query(Performer).filter(
@@ -64,5 +65,6 @@ def resolve_or_create_performer(name, member_names=None):
     performer = Performer(name=name)
     db.session.add(performer)
     db.session.flush()
-    set_performer_members(performer, member_names or [name])
+    if member_names:
+        set_performer_members(performer, member_names)
     return performer

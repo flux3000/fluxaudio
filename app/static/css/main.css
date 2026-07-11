@@ -411,10 +411,72 @@ body {
   margin-bottom: 4px;
 }
 
+/* Title + inline action button (e.g. collection Edit) on one line */
+.artist-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.artist-header-row h1 { margin-bottom: 4px; }
+
 .artist-header .subtitle {
   font-size: 12px;
   color: var(--t1);
 }
+
+/* ── Performer page: editable info + member artists + catalog ────────────────── */
+.performer-head {
+  padding: 28px 28px 18px;
+  border-bottom: 1px solid var(--bd-0);
+}
+.pp-name-row { display: flex; align-items: center; gap: 12px; }
+.pp-name {
+  font-size: 22px; font-weight: 500; color: var(--t0); margin: 0;
+  flex: 1; min-width: 0;
+}
+.pp-delete { margin-left: auto; color: var(--red); flex-shrink: 0; }
+
+/* Click-to-edit affordance */
+.pp-editable { padding: 2px 6px; border-radius: var(--r-sm); cursor: text; }
+.pp-name.pp-editable, .pp-desc.pp-editable { margin-left: -6px; }
+.pp-editable:hover { background: var(--bg-1); }
+
+.pp-desc {
+  font-size: 13px; color: var(--t1); line-height: 1.5;
+  margin-top: 8px; max-width: 640px; white-space: pre-wrap;
+}
+.pp-desc.pp-empty { color: var(--t3); font-style: italic; }
+
+.pp-artists-block { margin-top: 16px; }
+.pp-artists-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--t2); margin-bottom: 7px;
+}
+.pp-artists { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pp-add-wrap { position: relative; flex: 0 0 auto; }
+.pp-add-input {
+  font-size: 12px; padding: 3px 7px; width: 150px;
+  background: var(--bg-2); border: 1px solid var(--bd-1);
+  color: var(--t0); border-radius: var(--r-sm);
+}
+.performer-head .subtitle { font-size: 12px; color: var(--t2); margin-top: 16px; }
+
+/* Grouped appearances on the Artist page — one block per performer */
+.pp-group { margin-top: 6px; }
+.pp-group-head {
+  font-size: 13px; font-weight: 600; color: var(--t1);
+  padding: 12px 28px 4px;
+}
+.pp-group-head a { color: var(--t1); text-decoration: none; }
+.pp-group-head a:hover { color: var(--accent); }
+
+/* The in-place editor input/textarea */
+.pp-inline-input {
+  font: inherit; color: var(--t0); box-sizing: border-box; width: 100%;
+  background: var(--bg-2); border: 1px solid var(--accent);
+  border-radius: var(--r-sm); padding: 2px 6px;
+}
+textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size: 13px; }
 
 .year-group { margin: 0; }
 
@@ -2288,6 +2350,23 @@ input[type="range"].progress-bar {
 .member-chip-x:hover { color: var(--red); }
 
 /* ── Sidebar nav (all-caps top-level; expandable dimensions) ──────────────────── */
+
+/* Prominent "Add Recording" button pinned at the top of the column */
+.nav-add-btn {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  margin: 4px 12px 10px; padding: 8px 12px;
+  background: var(--bg-2); color: var(--t0);
+  border: 1px solid var(--bd-1); border-radius: var(--r-sm);
+  font-size: 12px; font-weight: 500; letter-spacing: 0.02em;
+  text-decoration: none; cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.nav-add-btn:hover { background: var(--bg-3); border-color: var(--accent); color: var(--t0); }
+.nav-add-plus { font-size: 15px; line-height: 1; color: var(--accent); }
+
+/* Add Recording page top bar (Batch Import shortcut) */
+.ingest-topbar { display: flex; margin-bottom: 14px; }
+
 .nav-item.nav-top, .nav-item.nav-sub {
   text-transform: uppercase;
   font-size: 11px;
@@ -2801,13 +2880,21 @@ input[type="range"].progress-bar {
   border-top: 1px solid var(--bd-0);
   border-bottom: 1px solid var(--bd-1);
 }
-.et-detail-optional-label {
+.et-detail-label {
   font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--t2); margin-bottom: 8px;
   padding-bottom: 6px; border-bottom: 1px dashed var(--bd-1);
 }
+/* Top row: Track notes (left) + Songwriter (right), each half width */
+.et-detail-grid2 {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start;
+}
 .et-detail-field label {
   display: block; font-size: 10px; color: var(--t2); margin-bottom: 3px;
+}
+/* Keep the checkbox and its label together on one line */
+.et-detail-field .check-inline {
+  display: inline-flex; align-items: center; gap: 6px;
 }
 .et-detail-field input,
 .et-detail-field textarea {
