@@ -19,9 +19,9 @@ from app.extensions import db
 class Performance(db.Model):
     __tablename__ = "performance"
 
-    id        = db.Column(db.Integer, primary_key=True)
-    artist_id = db.Column(db.Integer, db.ForeignKey("artist.id"), nullable=False)
-    venue_id  = db.Column(db.Integer, db.ForeignKey("venue.id"),  nullable=True)
+    id           = db.Column(db.Integer, primary_key=True)
+    performer_id = db.Column(db.Integer, db.ForeignKey("performer.id"), nullable=False)
+    venue_id     = db.Column(db.Integer, db.ForeignKey("venue.id"),  nullable=True)
     event_id  = db.Column(db.Integer, db.ForeignKey("event.id"),  nullable=True)
 
     # Optional title for named performances (e.g. "The Last Waltz")
@@ -49,7 +49,7 @@ class Performance(db.Model):
                            onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
-    artist     = db.relationship("Artist",     back_populates="performances")
+    performer  = db.relationship("Performer",  back_populates="performances")
     venue      = db.relationship("Venue",      back_populates="performances")
     event      = db.relationship("Event",      back_populates="performances")
     recordings = db.relationship("Recording",  back_populates="performance",
@@ -58,4 +58,4 @@ class Performance(db.Model):
     def __repr__(self):
         date = f"{self.start_year}-{self.start_month:02d}-{self.start_day:02d}" \
                if all([self.start_year, self.start_month, self.start_day]) else "unknown date"
-        return f"<Performance {self.artist_id} @ {date}>"
+        return f"<Performance {self.performer_id} @ {date}>"

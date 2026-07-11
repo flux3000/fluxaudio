@@ -2,21 +2,20 @@
 tests/test_db_logic.py — serializer, tag builder, and cascade-prune behavior
 against the seeded temp DB.
 
-Terminology (post 2026-07-09 rename): Artist = performing credit;
-CanonicalArtist = grouping node; ArtistCanonical = junction.
+(2026-07-11 remodel: Performer = act; Artist = person; Membership = M2M.)
 """
 
 from app.extensions import db as _db
 from app.models.recording import Recording
 from app.models.performance import Performance
-from app.models.artist import Artist, ArtistCanonical
-from app.models.canonical_artist import CanonicalArtist
+from app.models.performer import Performer
+from app.models.artist import Artist, Membership
 from app.models.track import Track
 from app.models.track_analysis import TrackAnalysis
 from app.models.play_log import PlayLog
 from app.utils.serialize import recording_summary
 from app.utils.ingest import build_recording_tags
-from app.utils.pruning import prune_after_recording_delete, prune_artist_if_orphaned
+from app.utils.pruning import prune_after_recording_delete, prune_performer_if_orphaned
 
 
 def test_recording_summary_shape(app, seeded_ids):
@@ -42,10 +41,10 @@ def test_build_recording_tags(app, seeded_ids):
 
 
 def test_prune_after_delete_removes_full_chain(app, db, seeded_ids):
-    rec_id = seeded_ids["recording_id"]
-    perf_id = seeded_ids["performance_id"]
-    artist_id = seeded_ids["performer_id"]      # performing Artist id
-    canonical_id = seeded_ids["canonical_id"]
+    rec_id       = seeded_ids["recording_id"]
+    perf_id      = seeded_ids["performance_id"]
+    performer_id = seeded_ids["performer_id"]
+    artist_id    = seeded_ids["artist_id"]      # the sole member (person)
     track_ids = [t.id for t in Track.query.filter_by(recording_id=rec_id).all()]
 
     # Simulate delete_recording's child cleanup, then prune.
@@ -60,33 +59,33 @@ def test_prune_after_delete_removes_full_chain(app, db, seeded_ids):
     pruned = prune_after_recording_delete(perf_id)
     db.session.commit()
 
-    assert pruned == {"performances": [perf_id], "performers": [artist_id],
-                      "artists": [canonical_id]}
-    # Everything is gone, including the dependent analysis/play_log rows.
+    assert pruned == {"performances": [perf_id], "performers": [performer_id],
+                      "artists": [artist_id]}
     assert _db.session.get(Performance, perf_id) is None
-    assert _db.session.get(Artist, artist_id) is None
-    assert _db.session.get(CanonicalArtist, canonical_id) is None
+    assert _db.session.get(Performer, performer_id) is None
+    assert _db.session.get(Artist, artist_id) is None      # orphaned person removed
     assert TrackAnalysis.query.count() == 0
     assert PlayLog.query.count() == 0
 
 
-def test_prune_keeps_canonical_with_other_artists(app, db, seeded_ids):
-    canonical_id = seeded_ids["canonical_id"]
-    artist_id = seeded_ids["performer_id"]
+def test_prune_keeps_person_who_is_in_another_act(app, db, seeded_ids):
+    performer_id = seeded_ids["performer_id"]
+    artist_id    = seeded_ids["artist_id"]
 
-    # Add a second performing artist under the same canonical so it survives.
-    a2 = Artist(name="Bill Evans Trio")
-    db.session.add(a2); db.session.flush()
-    db.session.add(ArtistCanonical(artist_id=a2.id, canonical_artist_id=canonical_id, order=0))
+    # Put the same person in a second performer, so they survive the prune.
+    other = Performer(name="Bill Evans Trio")
+    db.session.add(other); db.session.flush()
+    db.session.add(Membership(performer_id=other.id, artist_id=artist_id, order=0))
     db.session.flush()
 
-    # Orphan the original artist (remove its performance) and prune it.
-    db.session.query(Performance).filter_by(artist_id=artist_id).delete(
+    # Orphan the original performer (remove its performance) and prune it.
+    db.session.query(Performance).filter_by(performer_id=performer_id).delete(
         synchronize_session=False)
     db.session.flush()
-    result = prune_artist_if_orphaned(artist_id)
+    result = prune_performer_if_orphaned(performer_id)
     db.session.commit()
 
-    assert result["performers"] == [artist_id]
-    assert result["artists"] == []                 # canonical kept
-    assert _db.session.get(CanonicalArtist, canonical_id) is not None
+    assert result["performers"] == [performer_id]
+    assert result["artists"] == []                          # person kept
+    assert _db.session.get(Artist, artist_id) is not None
+    assert _db.session.get(Performer, other.id) is not None

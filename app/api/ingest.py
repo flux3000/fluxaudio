@@ -19,8 +19,9 @@ from sqlalchemy import func
 _AUDIO_EXTS = {'.flac', '.mp3', '.wav', '.aiff', '.aif', '.m4a', '.ogg', '.ape', '.wv'}
 
 from app.extensions import db
-from app.models.artist import Artist, ArtistCanonical
-from app.models.canonical_artist import CanonicalArtist
+from app.models.performer import Performer
+from app.models.artist import Artist, Membership
+from app.utils.performers import resolve_or_create_performer, set_performer_members
 from app.models.venue import Venue
 from app.models.event import Event
 from app.models.performance import Performance
@@ -175,34 +176,15 @@ def confirm_ingest():
     end_month   = data.get("end_month")
     end_day     = data.get("end_day")
 
-    # ── 1. Find or create CanonicalArtist (grouping node) ─────────────────────
-    sort_name_in = (data.get("sort_name") or "").strip() or None
-    canonical = db.session.query(CanonicalArtist).filter(
-        func.lower(CanonicalArtist.name) == artist_name.lower()
-    ).first()
-    if not canonical:
-        # sort_name only applies at creation time — an existing canonical's
-        # sort_name is edited via the Artists admin page, not silently
-        # overwritten by a later ingest.
-        canonical = CanonicalArtist(name=artist_name, sort_name=sort_name_in)
-        db.session.add(canonical)
-        db.session.flush()
-
-    # ── 2. Find or create Artist (performing credit, 1:1 with canonical) ──────
-    artist = (
-        db.session.query(Artist)
-        .join(ArtistCanonical, ArtistCanonical.artist_id == Artist.id)
-        .filter(ArtistCanonical.canonical_artist_id == canonical.id)
-        .first()
-    )
-    if not artist:
-        artist = Artist(name=artist_name)
-        db.session.add(artist)
-        db.session.flush()
-        db.session.add(ArtistCanonical(
-            artist_id=artist.id, canonical_artist_id=canonical.id, order=0
-        ))
-        db.session.flush()
+    # ── 1. Find or create Performer (the act) + its member Artists ────────────
+    # `members` is an ordered list of Artist (person) names. A new Performer
+    # auto-seeds a single member matching its name; if members are supplied they
+    # set the roster (applies to an existing Performer too — members belong to
+    # the act, not the show).
+    member_names = data.get("members") or []
+    performer = resolve_or_create_performer(artist_name)
+    if member_names:
+        set_performer_members(performer, member_names)
 
     # ── 3. Find or create Venue (optional) ────────────────────────────────────
     venue = None
@@ -246,7 +228,7 @@ def confirm_ingest():
 
     # ── 4. Find or create Performance ─────────────────────────────────────────
     perf_q = db.session.query(Performance).filter(
-        Performance.artist_id   == artist.id,
+        Performance.performer_id == performer.id,
         Performance.start_year  == start_year,
         Performance.start_month == start_month,
         Performance.start_day   == start_day,
@@ -257,7 +239,7 @@ def confirm_ingest():
     performance = perf_q.first()
     if not performance:
         performance = Performance(
-            artist_id    = artist.id,
+            performer_id = performer.id,
             venue_id     = venue.id  if venue  else None,
             event_id     = event.id  if event  else None,
             start_year   = start_year,
@@ -330,7 +312,6 @@ def confirm_ingest():
         original_folder_name = os.path.basename(source_folder),
         info_file_content    = data.get("info_file_content"),
         notes                = data.get("notes"),
-        ai_research_json      = data.get("ai_research_json"),
     )
     db.session.add(rec)
     db.session.flush()
@@ -374,7 +355,7 @@ def confirm_ingest():
 
     return jsonify({
         "recording_id":  rec.id,
-        "artist_id":     artist.id,
+        "performer_id":  performer.id,
         "folder_name":   folder_name,
         "event_id":      event.id if event else None,
     }), 201
@@ -524,7 +505,7 @@ def batch_scan():
         return jsonify({"error": f"Directory not found: {source_dir!r}"}), 400
 
     # Known artist names for fuzzy artist matching
-    known_performers = [a.name for a in db.session.query(Artist.name).all()]
+    known_performers = [p.name for p in db.session.query(Performer.name).all()]
 
     # Already-ingested folder paths (relative or basename match)
     ingested_paths = {

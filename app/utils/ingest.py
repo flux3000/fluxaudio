@@ -329,7 +329,7 @@ def build_recording_tags(recording):
                       if source_str else recording.source_modifier)
 
     # ── Artist / album labels ─────────────────────────────────────────────────
-    artist_name = perf.artist.name if (perf and perf.artist) else None
+    artist_name = perf.performer.name if (perf and perf.performer) else None
     album_parts = [p for p in [artist_name, concert_date, venue_name] if p]
     album_str   = " - ".join(album_parts) if album_parts else None
 

@@ -189,15 +189,9 @@ const App = (() => {
   // ── DOM refs ───────────────────────────────────────────────────────────────
   const loginScreen = document.getElementById('login-screen')
   const appShell    = document.getElementById('app-shell')
-  const artistList  = document.getElementById('artist-list')
   const mainContent = document.getElementById('main-content')
   const userAvatar  = document.getElementById('user-avatar')
   const userName    = document.getElementById('user-name')
-  const navLibrary       = document.getElementById('nav-library')
-  const navBatch         = document.getElementById('nav-batch')
-  const navIngest        = document.getElementById('nav-ingest')
-  const navVenues        = document.getElementById('nav-venues')
-  const navArtistsIndex  = document.getElementById('nav-artists-index')
 
   // ── Theme toggle ───────────────────────────────────────────────────────────
   ;(function () {
@@ -350,43 +344,109 @@ const App = (() => {
     return role === 'admin' || role === 'archivist'
   }
 
-  // Shared artist-name autocomplete wiring — used by both the ingest form and
-  // the Edit Recording reassignment field. Sets the input value on pick.
-  function wireArtistAutocomplete(nameEl, dropEl, { createLabel = 'New artist' } = {}) {
-    if (!nameEl || !dropEl) return
+
+  // Generic autocomplete over {id,name} results with an optional "create" row.
+  // onPick receives {id|null, name}. Used for the Performer and Member pickers.
+  function wirePickerDropdown(inputEl, dropEl, searchFn, onPick, createLabel) {
+    if (!inputEl || !dropEl) return
     let debounce = null
     const close = () => { dropEl.style.display = 'none'; dropEl.innerHTML = '' }
-
-    function show(names, q) {
-      const rows = names.map(n =>
-        `<div class="artist-result" data-name="${esc(n)}">${esc(n)}</div>`).join('')
-      const exact = names.some(n => n.toLowerCase() === q.toLowerCase())
+    async function run() {
+      const q = inputEl.value.trim()
+      if (q.length < 2) { close(); return }
+      let results = []
+      try { results = await searchFn(q) } catch (_) {}
+      const rows = results.map(r =>
+        `<div class="artist-result" data-id="${r.id}" data-name="${esc(r.name)}">${esc(r.name)}</div>`).join('')
+      const exact = results.some(r => r.name.toLowerCase() === q.toLowerCase())
       const createRow = (!exact && q)
-        ? `<div class="artist-result artist-result-new" data-name="${esc(q)}">+ ${esc(createLabel)}: "${esc(q)}"</div>`
-        : ''
+        ? `<div class="artist-result artist-result-new" data-id="" data-name="${esc(q)}">+ ${esc(createLabel)}: "${esc(q)}"</div>` : ''
       dropEl.innerHTML = rows + createRow
       dropEl.style.display = (rows || createRow) ? 'block' : 'none'
       dropEl.querySelectorAll('.artist-result').forEach(el => {
         el.addEventListener('mousedown', e => {
           e.preventDefault()
-          nameEl.value = el.dataset.name
+          onPick({ id: el.dataset.id ? parseInt(el.dataset.id) : null, name: el.dataset.name })
           close()
         })
       })
     }
+    inputEl.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(run, 220) })
+    inputEl.addEventListener('blur',  () => setTimeout(close, 200))
+    inputEl.addEventListener('focus', () => { if (inputEl.value.trim().length >= 2) run() })
+  }
 
-    nameEl.addEventListener('input', () => {
-      const q = nameEl.value.trim()
-      clearTimeout(debounce)
-      if (q.length < 2) { close(); return }
-      debounce = setTimeout(async () => {
-        try { show(await API.artists.search(q), q) } catch (_) { close() }
-      }, 220)
-    })
-    nameEl.addEventListener('blur',  () => setTimeout(close, 200))
-    nameEl.addEventListener('focus', () => {
-      if (nameEl.value.trim().length >= 2) nameEl.dispatchEvent(new Event('input'))
-    })
+  // ── Reusable Performer + Members widget ──────────────────────────────────────
+  // Bound to a `store` object holding `.members` (+ .performer_name/.performer_id).
+  // Used by both the Add and Edit forms. `ids` = the DOM element ids.
+  function createMembersWidget(store, ids) {
+    function renderChips() {
+      const field = document.getElementById(ids.field)
+      const input = document.getElementById(ids.memberInput)
+      if (!field || !input) return
+      field.querySelectorAll('.member-chip').forEach(c => c.remove())
+      ;(store.members || []).forEach((m, i) => {
+        const chip = document.createElement('span')
+        chip.className = 'member-chip'
+        chip.innerHTML = `${esc(m.name)} <span class="member-chip-x" data-idx="${i}">×</span>`
+        field.insertBefore(chip, input)
+      })
+      field.querySelectorAll('.member-chip-x').forEach(x =>
+        x.addEventListener('click', () => { store.members.splice(parseInt(x.dataset.idx), 1); renderChips() }))
+    }
+    function addMember(name, id) {
+      name = (name || '').trim()
+      if (!name) return
+      store.members = store.members || []
+      if (store.members.some(m => m.name.toLowerCase() === name.toLowerCase())) return
+      store.members.push(id ? { id, name } : { name })
+      renderChips()
+    }
+    // Performer picked (existing → load its members; new → seed one from the name).
+    async function onPerformerPick({ id, name }) {
+      const el = document.getElementById(ids.performerInput)
+      if (el) el.value = name
+      store.performer_name = name
+      store.performer_id   = id || null
+      if (id) {
+        try { const p = await API.performers.get(id); store.members = (p.members || []).map(m => ({ id: m.id, name: m.name })) }
+        catch (_) { store.members = [{ name }] }
+      } else if (!(store.members || []).length) {
+        store.members = [{ name }]
+      }
+      renderChips()
+    }
+    function mount() {
+      wirePickerDropdown(document.getElementById(ids.performerInput), document.getElementById(ids.performerDropdown),
+        API.performers.search, onPerformerPick, 'Create new performer')
+      const mInput = document.getElementById(ids.memberInput)
+      wirePickerDropdown(mInput, document.getElementById(ids.memberDropdown), API.artists.search,
+        ({ id, name }) => { addMember(name, id); if (mInput) mInput.value = '' }, 'Add new artist')
+      mInput?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addMember(mInput.value); mInput.value = '' } })
+      renderChips()
+    }
+    return { renderChips, addMember, onPerformerPick, mount }
+  }
+
+  // Add flow: preload members if the scanned performer already exists.
+  async function initAddPerformerMembers(widget) {
+    const f = ingest.form
+    const name = (f.artist_name || '').trim()
+    if (f._membersInit) { widget.renderChips(); return }
+    f._membersInit = true
+    if (!name) { f.members = f.members || []; widget.renderChips(); return }
+    try {
+      const matches = await API.performers.search(name)
+      const exact = matches.find(m => m.name.toLowerCase() === name.toLowerCase())
+      if (exact) {
+        f.performer_id = exact.id
+        const p = await API.performers.get(exact.id)
+        f.members = (p.members || []).map(m => ({ id: m.id, name: m.name }))
+      } else {
+        f.members = (f.members && f.members.length) ? f.members : [{ name }]
+      }
+    } catch (_) { f.members = f.members || [{ name }] }
+    widget.renderChips()
   }
 
   function setMainHTML(html) {
@@ -450,81 +510,337 @@ const App = (() => {
   // ── Nav helpers ────────────────────────────────────────────────────────────
 
   function setActiveNav(active) {
-    navLibrary.classList.toggle('active',           active === 'library')
-    navBatch?.classList.toggle('active',             active === 'batch')
-    navIngest.classList.toggle('active',            active === 'ingest')
-    navVenues?.classList.toggle('active',           active === 'venues')
-    navArtistsIndex?.classList.toggle('active',     active === 'artists-index')
+    state._activeNav = active
+    const nav = document.getElementById('sidebar-nav')
+    if (nav) nav.querySelectorAll('[data-nav]').forEach(el =>
+      el.classList.toggle('active', el.dataset.nav === active))
   }
 
   function setActiveArtist(id) {
-    document.querySelectorAll('.artist-item').forEach(el => {
-      el.classList.toggle('active', parseInt(el.dataset.artistId) === id)
+    document.querySelectorAll('#sidebar-nav .nav-record[data-dim="performers"]').forEach(el =>
+      el.classList.toggle('active', parseInt(el.dataset.id) === id))
+  }
+
+  // ── Sidebar nav (all top-level in small caps; dimensions expandable) ──────────
+
+  state.expandedDims = state.expandedDims || new Set()
+  const _dimCache = {}
+
+  function _dimSection(dim, icon, label, sub) {
+    const open = state.expandedDims.has(dim)
+    const singular = label.replace(/s$/, '')
+    return `
+      <div class="nav-section">
+        <div class="nav-item ${sub ? 'nav-sub' : 'nav-top'} nav-expand nav-dim" data-dim="${dim}">
+          ${icon ? `<span class="nav-icon">${icon}</span>` : ''}
+          <span class="nav-dim-label truncate">${label}</span>
+          <span class="nav-dim-actions">
+            <span class="nav-action" data-act="new" title="Create new ${esc(singular)}">＋</span>
+            <span class="nav-action" data-act="refresh" title="Refresh list">↻</span>
+          </span>
+          <span class="nav-caret ${open ? 'open' : ''}">▸</span>
+        </div>
+        <div class="nav-records ${sub ? 'nav-records--sub' : ''}" id="nav-records-${dim}" style="display:${open ? '' : 'none'}"></div>
+      </div>`
+  }
+
+  async function _loadDim(dim) {
+    if (_dimCache[dim]) return _dimCache[dim]
+    let rows = []
+    try {
+      if (dim === 'venues')            rows = await API.venues.list()
+      else if (dim === 'performers')   rows = await API.performers.list()
+      else if (dim === 'artists')      rows = await API.artists.list()
+      else if (dim === 'collections')  rows = await API.collections.list()
+    } catch (_) {}
+    _dimCache[dim] = rows
+    return rows
+  }
+
+  async function _renderDimRecords(dim) {
+    const box = document.getElementById(`nav-records-${dim}`)
+    if (!box) return
+    const rows = await _loadDim(dim)
+    const target = { venues: 'venue', performers: 'artist', artists: 'person', collections: 'collection' }[dim]
+    if (!rows.length) { box.innerHTML = `<div class="nav-record nav-record--empty">None yet</div>`; return }
+    box.innerHTML = rows.map(r => `
+      <div class="nav-record" data-dim="${dim}" data-id="${r.id}">
+        <span class="truncate">${esc(r.name)}</span>${r.recording_count ? `<span class="nav-record-count">${r.recording_count}</span>` : ''}
+      </div>`).join('')
+    box.querySelectorAll('.nav-record[data-id]').forEach(el =>
+      el.addEventListener('click', () => { window.location.hash = `#/${target}/${el.dataset.id}` }))
+  }
+
+  function _toggleDim(dim, forceOpen) {
+    const row  = document.querySelector(`.nav-dim[data-dim="${dim}"]`)
+    const box  = document.getElementById(`nav-records-${dim}`)
+    const caret = row?.querySelector('.nav-caret')
+    const open = state.expandedDims.has(dim)
+    if (open && !forceOpen) {
+      state.expandedDims.delete(dim); if (box) box.style.display = 'none'; caret?.classList.remove('open')
+    } else {
+      state.expandedDims.add(dim); if (box) box.style.display = ''; caret?.classList.add('open')
+      _renderDimRecords(dim)
+    }
+  }
+
+  function _refreshDim(dim) {
+    _dimCache[dim] = null
+    _toggleDim(dim, true)   // ensure open, then re-render from DB
+    _renderDimRecords(dim)
+  }
+
+  // Header "+ Create new" action per dimension.
+  function createInDim(dim) {
+    if (dim === 'collections')     window.location.hash = '#/collection/new'
+    else if (dim === 'venues')     window.location.hash = '#/venues'
+    else if (dim === 'performers') _promptCreate('performer')
+    else if (dim === 'artists')    _promptCreate('artist')
+  }
+  async function _promptCreate(kind) {
+    const name = prompt(`New ${kind} name:`)
+    if (!name || !name.trim()) return
+    try {
+      if (kind === 'performer') {
+        const p = await API.performers.create({ name: name.trim() })
+        _dimCache.performers = null; if (state.expandedDims.has('performers')) _renderDimRecords('performers')
+        window.location.hash = `#/artist/${p.id}`
+      } else {
+        const a = await API.artists.create({ name: name.trim() })
+        _dimCache.artists = null; if (state.expandedDims.has('artists')) _renderDimRecords('artists')
+        window.location.hash = `#/person/${a.id}`
+      }
+    } catch (e) { alert('Failed: ' + e.message) }
+  }
+
+  async function renderSidebar() {
+    const nav = document.getElementById('sidebar-nav')
+    if (!nav) return
+    _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = null
+    nav.innerHTML = `
+      <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
+      ${_dimSection('collections', null, 'Collections', true)}
+      <a class="nav-item nav-top" data-nav="ingest" href="#/ingest"><span class="nav-icon">+</span> Add Recording</a>
+      <a class="nav-item nav-sub" data-nav="batch" href="#/batch">Batch Import</a>
+      ${_dimSection('venues', '◎', 'Venues')}
+      ${_dimSection('performers', '✦', 'Performers')}
+      ${_dimSection('artists', '♪', 'Artists')}`
+    nav.querySelectorAll('.nav-expand').forEach(el => {
+      el.addEventListener('click', e => {
+        if (e.target.closest('.nav-action')) return
+        _toggleDim(el.dataset.dim)
+      })
+    })
+    nav.querySelectorAll('.nav-action').forEach(el => {
+      el.addEventListener('click', e => {
+        e.stopPropagation()
+        const dim = el.closest('.nav-dim').dataset.dim
+        if (el.dataset.act === 'refresh') _refreshDim(dim)
+        else createInDim(dim)
+      })
+    })
+    state.expandedDims.forEach(dim => _renderDimRecords(dim))
+    setActiveNav(state._activeNav)
+  }
+
+  // Back-compat alias — call sites still say loadArtistList().
+  const loadArtistList = renderSidebar
+
+  // ── Shared compact recording row (one line, all show info) ───────────────────
+  function flatRowHtml(r, showPerformer) {
+    const date    = fmtDate(r.start_year, r.start_month, r.start_day)
+    const loc     = fmtLocation(r.city, r.state, r.country)
+    const quality = r.quality || ''
+    const rating  = r.rating != null ? `<span class="rating-badge rating-badge--sm">${r.rating}</span>` : ''
+    const runtime = fmtRuntime(r.duration_sec)
+    const inc     = r.is_complete ? '' : '<span class="rec-inc" title="Incomplete recording">inc</span>'
+    return `
+      <div class="rec-row rec-row--flat ${showPerformer ? 'with-performer' : ''}" data-rec-id="${r.id}">
+        ${showPerformer ? `<span class="rec-performer-cell truncate">${esc(r.performer || '')}</span>` : ''}
+        <span class="rec-date truncate">${esc(date)}</span>
+        <span class="rec-venue truncate">${esc(r.venue || '(unknown venue)')}</span>
+        <span class="rec-location truncate">${esc(loc)}</span>
+        <span>${sourceBadge(r.source)}</span>
+        <span class="quality ${qualityClass(quality)}">${esc(quality)}</span>
+        <span class="rec-rating">${rating}</span>
+        <span class="rec-runtime">${runtime}</span>
+        <span class="rec-tracks">${r.track_count}t${inc ? ' ' + inc : ''}</span>
+        <button class="rec-play-btn" data-rec-id="${r.id}" title="Play">▶</button>
+      </div>`
+  }
+
+  function wireRecordingRows(container) {
+    container.querySelectorAll('.rec-row').forEach(el => {
+      el.addEventListener('click', e => {
+        if (e.target.closest('.rec-play-btn')) return
+        window.location.hash = `#/recording/${el.dataset.recId}`
+      })
+      el.addEventListener('contextmenu', e => {
+        e.preventDefault()
+        openAddToCollectionMenu(parseInt(el.dataset.recId), e.clientX, e.clientY)
+      })
+    })
+    container.querySelectorAll('.rec-play-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation()
+        playRecording(parseInt(btn.dataset.recId), 0, null)
+      })
     })
   }
 
-  // ── Artist sidebar ─────────────────────────────────────────────────────────
-
-  // Which canonical artists are expanded to show sub-artists — persists across
-  // re-renders (batch ingest, admin edits) for the duration of the session.
-  state.expandedArtists = state.expandedArtists || new Set()
-
-  async function loadArtistList() {
-    try {
-      state.artists = await API.artists.list()
-    } catch (e) {
-      artistList.innerHTML = `<div style="padding:12px 16px; color:var(--t2); font-size:12px;">Failed to load</div>`
-      return
+  // Add a recording to a collection (or create one). onAdded({id, name}) fires on success.
+  async function openAddToCollectionMenu(recId, x, y, onAdded) {
+    document.getElementById('collection-menu')?.remove()
+    let cols = []
+    try { cols = await API.collections.list() } catch (_) {}
+    const menu = document.createElement('div')
+    menu.className = 'track-qmenu'; menu.id = 'collection-menu'
+    menu.innerHTML = `
+      <div class="track-qmenu-label">Add to collection</div>
+      ${cols.map(c => `<div class="col-menu-item" data-id="${c.id}" data-name="${esc(c.name)}">${esc(c.name)}</div>`).join('')
+        || '<div class="col-menu-empty">No collections yet</div>'}
+      <div class="col-menu-item col-menu-new">+ Create collection…</div>`
+    document.body.appendChild(menu)
+    const r = menu.getBoundingClientRect()
+    menu.style.left = Math.max(8, Math.min(x, window.innerWidth  - r.width  - 8)) + 'px'
+    menu.style.top  = Math.max(8, Math.min(y, window.innerHeight - r.height - 8)) + 'px'
+    const close = () => menu.remove()
+    async function addTo(colId, name) {
+      try { await API.collections.addRecording(colId, recId); onAdded && onAdded({ id: colId, name }) }
+      catch (e) { alert('Failed: ' + e.message) }
+      close()
     }
+    menu.querySelectorAll('.col-menu-item[data-id]').forEach(el =>
+      el.addEventListener('click', () => addTo(parseInt(el.dataset.id), el.dataset.name)))
+    menu.querySelector('.col-menu-new').addEventListener('click', async () => {
+      const name = prompt('New collection name:')
+      if (!name || !name.trim()) { close(); return }
+      try { const c = await API.collections.create({ name: name.trim() }); await addTo(c.id, name.trim()) }
+      catch (e) { alert('Failed: ' + e.message); close() }
+    })
+    setTimeout(() => document.addEventListener('mousedown', function h(e) {
+      if (!menu.contains(e.target)) { close(); document.removeEventListener('mousedown', h) }
+    }), 0)
+  }
 
-    if (!state.artists.length) {
-      artistList.innerHTML = `<div style="padding:12px 16px; color:var(--t2); font-size:12px;">No artists yet</div>`
-      return
-    }
+  // Collection tags on the recording detail (styled like flag pills).
+  function collectionTagHtml(c) {
+    return `<span class="collection-tag" data-id="${c.id}">${esc(c.name)}<span class="collection-tag-x" title="Remove from collection">×</span></span>`
+  }
+  function wireCollectionTag(tagEl, recId) {
+    tagEl.querySelector('.collection-tag-x')?.addEventListener('click', async () => {
+      try { await API.collections.removeRecording(parseInt(tagEl.dataset.id), recId); tagEl.remove() }
+      catch (e) { alert('Failed: ' + e.message) }
+    })
+  }
+  function wireRecCollectionArea(recId) {
+    const box = document.getElementById('rec-collections')
+    if (!box) return
+    box.querySelectorAll('.collection-tag').forEach(t => wireCollectionTag(t, recId))
+    document.getElementById('btn-add-collection')?.addEventListener('click', e => {
+      openAddToCollectionMenu(recId, e.clientX, e.clientY, ({ id, name }) => {
+        if (box.querySelector(`.collection-tag[data-id="${id}"]`)) return
+        const span = document.createElement('span')
+        span.className = 'collection-tag'; span.dataset.id = id
+        span.innerHTML = `${esc(name)}<span class="collection-tag-x" title="Remove from collection">×</span>`
+        box.insertBefore(span, document.getElementById('btn-add-collection'))
+        wireCollectionTag(span, recId)
+      })
+    })
+  }
 
-    artistList.innerHTML = state.artists.map(a => {
-      const subArtists = a.sub_artists || []
-      const hasSubs    = subArtists.length > 0
-      const expanded   = hasSubs && state.expandedArtists.has(a.id)
-      const caret      = hasSubs
-        ? `<span class="artist-expand-caret ${expanded ? 'expanded' : ''}" data-artist-id="${a.id}">▸</span>`
-        : `<span class="artist-expand-caret artist-expand-caret--spacer"></span>`
-      const subRows = expanded
-        ? subArtists.map(name => `
-            <div class="artist-item artist-subitem" data-artist-id="${a.id}">
-              <span class="artist-expand-caret artist-expand-caret--spacer"></span>
-              <span class="artist-name truncate">${esc(name)}</span>
-            </div>`).join('')
-        : ''
-      return `
-        <div class="artist-item" data-artist-id="${a.id}">
-          ${caret}
-          <span class="artist-name truncate">${esc(a.name)}</span>
-          <span class="artist-count">${a.recording_count || ''}</span>
+  // ── Collections views ────────────────────────────────────────────────────────
+  async function renderCollectionsIndex() {
+    setActiveNav('collections'); setActiveArtist(null); setLoading()
+    let cols = []
+    try { cols = await API.collections.list() } catch (_) {}
+    const rows = cols.map(c => `
+      <div class="artist-index-row" data-id="${c.id}">
+        <span class="artist-index-name">${esc(c.name)}</span>
+        <span class="artist-index-members">${esc(c.description || '')}</span>
+        <span class="artist-index-count">${c.recording_count} rec</span>
+      </div>`).join('')
+    setMainHTML(`
+      <div class="action-bar">
+        <span style="font-size:13px; font-weight:500; color:var(--t0)">Collections</span>
+        <button class="btn btn-ghost btn-sm" id="btn-new-collection" style="margin-left:auto">+ New collection</button>
+      </div>
+      <div class="artist-index-list">${rows || '<div class="empty-state" style="min-height:120px"><div>No collections yet</div></div>'}</div>`)
+    mainContent.querySelectorAll('.artist-index-row').forEach(el =>
+      el.addEventListener('click', () => { window.location.hash = `#/collection/${el.dataset.id}` }))
+    document.getElementById('btn-new-collection').addEventListener('click', async () => {
+      const name = prompt('New collection name:')
+      if (!name || !name.trim()) return
+      try { const c = await API.collections.create({ name: name.trim() }); window.location.hash = `#/collection/${c.id}` }
+      catch (e) { alert('Failed: ' + e.message) }
+    })
+  }
+
+  function renderCollectionCreate() {
+    setActiveNav('collections'); setActiveArtist(null)
+    setMainHTML(`
+      <div class="artist-header"><h1>New collection</h1></div>
+      <div style="max-width:480px; padding:0 20px">
+        <div class="ingest-field" style="margin-bottom:12px">
+          <label>Name</label>
+          <input type="text" id="col-name" placeholder="Collection name" />
         </div>
-        ${subRows}`
-    }).join('')
-
-    // Expand/collapse caret — toggles without navigating
-    artistList.querySelectorAll('.artist-expand-caret:not(.artist-expand-caret--spacer)').forEach(el => {
-      el.addEventListener('click', (ev) => {
-        ev.stopPropagation()
-        const id = parseInt(el.dataset.artistId)
-        if (state.expandedArtists.has(id)) state.expandedArtists.delete(id)
-        else state.expandedArtists.add(id)
-        loadArtistList()
-      })
+        <div class="ingest-field" style="margin-bottom:16px">
+          <label>Description <span style="color:var(--t3); font-weight:400">(optional)</span></label>
+          <textarea id="col-desc" style="min-height:70px"></textarea>
+        </div>
+        <div style="display:flex; gap:8px">
+          <button class="btn btn-primary btn-sm" id="col-create">Create</button>
+          <button class="btn btn-ghost btn-sm" id="col-cancel">Cancel</button>
+        </div>
+      </div>`)
+    document.getElementById('col-name').focus()
+    document.getElementById('col-cancel').addEventListener('click', () => { window.location.hash = '#/' })
+    document.getElementById('col-create').addEventListener('click', async () => {
+      const name = document.getElementById('col-name').value.trim()
+      if (!name) { alert('Name is required'); return }
+      try {
+        const c = await API.collections.create({
+          name, description: document.getElementById('col-desc').value.trim() || null,
+        })
+        _dimCache.collections = null
+        if (state.expandedDims.has('collections')) _renderDimRecords('collections')
+        window.location.hash = `#/collection/${c.id}`
+      } catch (e) { alert('Failed: ' + e.message) }
     })
+  }
 
-    // Root and sub-artist rows both navigate to the canonical artist's
-    // catalog page — that page already aggregates recordings from every
-    // linked performer, sub-artists included.
-    artistList.querySelectorAll('.artist-item').forEach(el => {
-      el.addEventListener('click', () => {
-        const id = parseInt(el.dataset.artistId)
-        window.location.hash = `#/artist/${id}`
-      })
-    })
+  async function renderCollectionView(id) {
+    setActiveNav('collections'); setActiveArtist(null); setLoading()
+    let c
+    try { c = await API.collections.get(id) }
+    catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Collection not found</div></div>`); return }
+    const rows = (c.recordings || []).map(r => flatRowHtml(r, true)).join('')
+    setMainHTML(`
+      <div class="artist-header">
+        <h1>${esc(c.name)}</h1>
+        <div class="subtitle">${c.recordings.length} recording${c.recordings.length !== 1 ? 's' : ''}${c.description ? ' · ' + esc(c.description) : ''}</div>
+      </div>
+      <div class="rec-table">${rows || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>`)
+    wireRecordingRows(mainContent)
+  }
+
+  // Person (Artist) → the performers they're a member of.
+  async function renderPersonView(id) {
+    setActiveNav('artists'); setActiveArtist(null); setLoading()
+    let a
+    try { a = await API.artists.get(id) }
+    catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Not found</div></div>`); return }
+    const rows = (a.performers || []).map(p => `
+      <div class="artist-index-row" data-id="${p.id}"><span class="artist-index-name">${esc(p.name)}</span></div>`).join('')
+    setMainHTML(`
+      <div class="artist-header">
+        <h1>${esc(a.name)}</h1>
+        <div class="subtitle">Artist · member of ${a.performers.length} performer${a.performers.length !== 1 ? 's' : ''}</div>
+      </div>
+      <div class="artist-index-list">${rows || '<div class="empty-state" style="min-height:120px"><div>Not a member of any performer yet</div></div>'}</div>`)
+    mainContent.querySelectorAll('.artist-index-row').forEach(el =>
+      el.addEventListener('click', () => { window.location.hash = `#/artist/${el.dataset.id}` }))
   }
 
   // ── Views ──────────────────────────────────────────────────────────────────
@@ -538,7 +854,7 @@ const App = (() => {
 
     let allArtists
     try {
-      allArtists = await API.artists.allRecordings()
+      allArtists = await API.performers.allRecordings()
     } catch (e) {
       setMainHTML(`<div class="empty-state"><div class="empty-title">Failed to load library</div></div>`)
       return
@@ -555,73 +871,30 @@ const App = (() => {
     }
 
     const totalRecordings = allArtists.reduce((n, a) => n + a.recording_count, 0)
-    const totalPerfs      = allArtists.reduce((n, a) => n + a.performance_count, 0)
 
-    const artistBlocks = allArtists.map(artist => {
-      const perfRows = artist.performances.map(p => {
-        const loc   = fmtLocation(p.city, p.state, p.country)
-        const date  = fmtDate(p.start_year, p.start_month, p.start_day)
-        const venue = p.venue_name || ''
-        const title = p.title ? `<em>${esc(p.title)}</em> · ` : ''
-
-        return p.recordings.map((r, ri) => {
-          const modifier   = r.source_modifier ? ` · ${esc(r.source_modifier)}` : ''
-          const quality    = r.quality || ''
-          return `
-            <div class="rec-row" data-rec-id="${r.id}" data-perf-id="${p.performance_id}">
-              <span class="rec-date truncate">${ri === 0 ? esc(date) : ''}</span>
-              <span class="rec-venue truncate">${ri === 0 ? title + esc(venue || '(unknown venue)') : ''}</span>
-              <span class="rec-location truncate">${ri === 0 ? esc(loc) : ''}</span>
-              <span>${sourceBadge(r.source)}</span>
-              <span class="quality ${qualityClass(quality)}">${esc(quality)}</span>
-              <span class="rec-tracks">${r.track_count}t</span>
-              <button class="rec-play-btn" data-rec-id="${r.id}" title="Play">▶</button>
-            </div>`
-        }).join('')
-      }).join('')
-
-      return `
-        <div class="year-group">
-          <div class="year-divider lib-artist-divider" data-artist-id="${artist.artist_id}">
-            ${esc(artist.artist_name)}
-            <span class="year-divider-count">${artist.recording_count} recording${artist.recording_count !== 1 ? 's' : ''}</span>
-          </div>
-          ${perfRows}
-        </div>`
-    }).join('')
+    // Flatten to one row per recording — performer + date + venue on every line,
+    // already ordered by performer (backend) then chronologically old→new. No headers.
+    const rowsHtml = allArtists.map(artist =>
+      artist.performances.map(p =>
+        p.recordings.map(r => flatRowHtml({
+          id: r.id, performer: artist.performer_name,
+          start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
+          venue: p.venue_name, city: p.city, state: p.state, country: p.country,
+          source: r.source, source_modifier: r.source_modifier, quality: r.quality,
+          rating: r.rating, is_complete: r.is_complete,
+          track_count: r.track_count, duration_sec: r.duration_sec,
+        }, true)).join('')
+      ).join('')
+    ).join('')
 
     setMainHTML(`
       <div class="artist-header">
         <h1>Library</h1>
-        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${totalPerfs} performance${totalPerfs !== 1 ? 's' : ''} · ${allArtists.length} artist${allArtists.length !== 1 ? 's' : ''}</div>
+        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${allArtists.length} performer${allArtists.length !== 1 ? 's' : ''}</div>
       </div>
-      ${artistBlocks}
-    `)
+      <div class="rec-table">${rowsHtml}</div>`)
 
-    // Row clicks → recording detail
-    mainContent.querySelectorAll('.rec-row').forEach(el => {
-      el.addEventListener('click', e => {
-        if (e.target.closest('.rec-play-btn')) return
-        window.location.hash = `#/recording/${el.dataset.recId}`
-      })
-    })
-
-    // Play buttons
-    mainContent.querySelectorAll('.rec-play-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation()
-        const recId = parseInt(btn.dataset.recId)
-        playRecording(recId, 0, null)
-      })
-    })
-
-    // Artist header click → filter to that artist
-    mainContent.querySelectorAll('.lib-artist-divider').forEach(el => {
-      el.addEventListener('click', () => {
-        const id = parseInt(el.dataset.artistId)
-        if (id) window.location.hash = `#/artist/${id}`
-      })
-    })
+    wireRecordingRows(mainContent)
   }
 
   /** Artist recordings — the main catalog browser */
@@ -633,8 +906,8 @@ const App = (() => {
     let artist, performances
     try {
       [artist, performances] = await Promise.all([
-        API.artists.get(artistId),
-        API.artists.recordings(artistId),
+        API.performers.get(artistId),
+        API.performers.recordings(artistId),
       ])
     } catch (e) {
       setMainHTML(`<div class="empty-state"><div class="empty-title">Failed to load</div></div>`)
@@ -642,97 +915,34 @@ const App = (() => {
     }
 
     state.selectedArtist = artist
-
-    // Only show performances that actually have recordings — a performance
-    // with zero recordings (orphan) would otherwise render a phantom, empty
-    // year-group header (e.g. "UNKNOWN").
     performances = performances.filter(p => (p.recordings || []).length > 0)
-
     const totalRecordings = performances.reduce((n, p) => n + p.recordings.length, 0)
 
-    // Group performances by year
-    const byYear = {}
-    performances.forEach(p => {
-      const yr = p.start_year || 'Unknown'
-      ;(byYear[yr] = byYear[yr] || []).push(p)
-    })
-
-    const yearKeys = Object.keys(byYear).sort((a, b) => b - a)
-
-    const rows = yearKeys.map(yr => {
-      const perfs = byYear[yr]
-      const perfRows = perfs.map(p => {
-        const loc    = fmtLocation(p.city, p.state, p.country)
-        const date   = fmtDate(p.start_year, p.start_month, p.start_day)
-        const venue  = p.venue_name || ''
-        const title  = p.title ? `<em>${esc(p.title)}</em> · ` : ''
-
-        // Performer name — always shown under the venue. Uses the specific
-        // performer (e.g. "Bill Evans Trio") when present, otherwise falls
-        // back to the canonical artist name so every recording is labeled.
-        const performerName = p.performer_name || artist.name
-        const performerLabel = performerName
-          ? `<span class="rec-performer truncate" title="${esc(performerName)}">${esc(performerName)}</span>`
-          : ''
-
-        // Each performance row, then child rows per recording
-        return p.recordings.map((r, ri) => {
-          const quality  = r.quality || ''
-          const qcls     = qualityClass(quality)
-          const runtime  = fmtRuntime(r.duration_sec)
-          const ratingHtml = r.rating != null
-            ? `<span class="rating-badge rating-badge--sm">${r.rating}</span>` : ''
-          const incMarker = r.is_complete
-            ? '' : '<span class="rec-inc" title="Incomplete recording">inc</span>'
-          return `
-            <div class="rec-row" data-rec-id="${r.id}" data-perf-id="${p.performance_id}">
-              <span class="rec-date truncate">${ri === 0 ? esc(date) : ''}</span>
-              <span class="rec-venue-wrap">
-                <span class="rec-venue truncate">${ri === 0 ? title + esc(venue || '(unknown venue)') : ''}</span>
-                ${ri === 0 ? performerLabel : ''}
-              </span>
-              <span class="rec-location truncate">${ri === 0 ? esc(loc) : ''}</span>
-              <span>${sourceBadge(r.source)}</span>
-              <span class="quality ${qcls}">${esc(quality)}</span>
-              <span class="rec-rating">${ratingHtml}</span>
-              <span class="rec-runtime">${runtime}</span>
-              <span class="rec-tracks">${r.track_count}t${incMarker ? ' ' + incMarker : ''}</span>
-              <button class="rec-play-btn" data-rec-id="${r.id}" title="Play first track">▶</button>
-            </div>`
-        }).join('')
-      }).join('')
-
-      return `
-        <div class="year-group">
-          <div class="year-divider">${yr}</div>
-          ${perfRows}
-        </div>`
-    }).join('')
+    // Flat one row per recording, oldest→newest. No year headers (one performer).
+    const ordered = performances.slice().sort((a, b) =>
+      (a.start_year || 0) - (b.start_year || 0) ||
+      (a.start_month || 0) - (b.start_month || 0) ||
+      (a.start_day || 0) - (b.start_day || 0))
+    const rowsHtml = ordered.map(p =>
+      p.recordings.map(r => flatRowHtml({
+        id: r.id, performer: p.performer_name,
+        start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
+        venue: p.venue_name, city: p.city, state: p.state, country: p.country,
+        source: r.source, source_modifier: r.source_modifier, quality: r.quality,
+        rating: r.rating, is_complete: r.is_complete,
+        track_count: r.track_count, duration_sec: r.duration_sec,
+      }, false)).join('')
+    ).join('')
 
     setMainHTML(`
       <div class="artist-header">
         <h1>${esc(artist.name)}</h1>
-        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performances.length} performance${performances.length !== 1 ? 's' : ''}</div>
+        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performances.length} performance${performances.length !== 1 ? 's' : ''}${
+          (artist.members || []).length ? ' · ' + esc(artist.members.map(m => m.name).join(', ')) : ''}</div>
       </div>
-      ${rows || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}
-    `)
+      <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>`)
 
-    // Wire up recording row clicks → detail view
-    mainContent.querySelectorAll('.rec-row').forEach(el => {
-      el.addEventListener('click', (e) => {
-        if (e.target.closest('.rec-play-btn')) return
-        window.location.hash = `#/recording/${el.dataset.recId}`
-      })
-    })
-
-    // Wire up play buttons → load queue for that recording
-    mainContent.querySelectorAll('.rec-play-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        const recId = parseInt(btn.dataset.recId)
-        playRecording(recId, 0)
-      })
-    })
+    wireRecordingRows(mainContent)
   }
 
   /** Recording detail — split panel: tracks + info file */
@@ -928,6 +1138,12 @@ const App = (() => {
       ? state.playingTrackId
       : (firstTrack?.id ?? null)
 
+    const collectionArea = `
+      <div class="rec-collections" id="rec-collections">
+        ${(rec.collections || []).map(collectionTagHtml).join('')}
+        <button class="collection-add-btn" id="btn-add-collection">+ Add to Collection</button>
+      </div>`
+
     setMainHTML(`
       <div class="rec-view-shell">
       <div class="rec-detail-header">
@@ -938,7 +1154,7 @@ const App = (() => {
           ${rec.notes ? `<div class="rec-header-notes">${esc(rec.notes)}</div>` : ''}
           ${rec.is_official ? `<div class="badge-row"><span class="badge-official" title="Contains officially released material">© Official</span></div>` : ''}
         </div>
-        ${headerMetaRows ? `<div class="rec-header-right">${headerMetaRows}</div>` : ''}
+        <div class="rec-header-right">${collectionArea}${headerMetaRows || ''}</div>
       </div>
       <canvas id="rec-waveform" class="rec-waveform-canvas"
         title="${hasAnalysis ? 'Click to seek' : 'Click Analyze Audio to generate waveform'}">
@@ -1003,12 +1219,6 @@ const App = (() => {
               </div>
             </div>
 
-            <!-- AI Assist pane — saved AI research output -->
-            <div class="slide-pane" id="sp-ai">
-              <div class="slide-pane-header">AI Assist</div>
-              <div class="slide-pane-scroll">${aiResultsReadonlyHtml(rec.ai_research)}</div>
-            </div>
-
             <!-- Debug pane (DEV_MODE only) -->
             <div class="slide-pane" id="sp-debug">
               <div class="slide-pane-header">Debug <span class="dbg-badge dbg-badge-dev">DEV</span></div>
@@ -1021,7 +1231,6 @@ const App = (() => {
           <div class="slide-tabs">
             <button class="slide-tab" data-pane="info">Info File</button>
             <button class="slide-tab" data-pane="filetags">File Tags</button>
-            <button class="slide-tab" data-pane="ai">AI Assist</button>
             <button class="slide-tab" data-pane="spectrogram">Spectrogram</button>
             ${window.fluxDebug ? `<button class="slide-tab slide-tab--dev" data-pane="debug">Debug</button>` : ''}
           </div>
@@ -1154,6 +1363,9 @@ const App = (() => {
         })
       })
     }
+
+    // Collection tags (add / remove)
+    wireRecCollectionArea(recordingId)
 
     // Edit metadata
     document.getElementById('btn-edit-meta')?.addEventListener('click', () => {
@@ -1857,21 +2069,6 @@ const App = (() => {
 
   // AI Assist tab body: the health score folded in (current + band message),
   // a Run button, and a container that fills with clean results after a run.
-  function aiTabBody(health) {
-    const score = health?.score ?? '—'
-    const band  = health?.band || 'yellow'
-    return `
-      <div class="ai-tab-score">
-        <span class="ai-tab-score-num ai-tab-score-num--${band}" id="ai-score">${score}</span>
-        <span class="ai-tab-score-msg" id="ai-score-msg">${esc(HEALTH_MSG[band] || '')}</span>
-      </div>
-      <div class="ai-tab-run">
-        <button class="btn btn-primary btn-sm health-ai-btn" id="btn-ai-assist">✨ Run AI research</button>
-        <div class="ai-tab-hint">Researches the web to verify and fill metadata. Nothing is saved until you apply and confirm.</div>
-      </div>
-      <div class="ai-results" id="ai-results"></div>`
-  }
-
   // File Tags JSON (raw Vorbis per track) for the scan — same shape/formatting as
   // the recording view's File Tags pane.
   function scanFileTagsJson() {
@@ -2098,36 +2295,6 @@ const App = (() => {
 
   // Read-only render of a saved AI research blob (recording view AI Assist tab).
   // Same look as the interactive version, minus the Apply controls.
-  function aiResultsReadonlyHtml(r) {
-    if (!r) return '<div class="info-panel-empty">No AI research saved for this recording.</div>'
-    const props = (r.proposals || []).map(p => `
-      <div class="ai-res-row">
-        <span class="ai-res-field">${esc(p.field)}</span>
-        <span class="ai-res-value">${esc(p.proposed)}
-          <span class="ai-res-conf">${esc(p.confidence || '')}</span>${p.url ? ` <a class="ai-link" href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ''}</span>
-      </div>`).join('')
-    const tt = r.track_titles || []
-    const trackSection = tt.length
-      ? `<div class="ai-res-section"><div class="ai-res-title">Track Listing</div><div class="ai-tt-list">${tt.map(t =>
-          `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div></div>` : ''
-    const notes = (title, items) => items && items.length
-      ? `<div class="ai-res-section"><div class="ai-res-title">${title}</div>${items.map(v => `<p class="ai-res-note">${esc(v)}</p>`).join('')}</div>` : ''
-    const sources = (r.sources || []).length
-      ? `<div class="ai-res-section"><div class="ai-res-title">Sources</div>${r.sources.map(s => `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''
-    return `
-      <div class="ai-results">
-        <div class="ai-res-section">
-          <div class="ai-res-title">Metadata Review</div>
-          ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
-          ${props || '<p class="ai-res-empty">No field changes proposed.</p>'}
-        </div>
-        ${trackSection}
-        ${notes('Verify', r.verify_items)}
-        ${notes('Provenance', r.provenance_notes)}
-        ${sources}
-      </div>`
-  }
-
   // Clean, succinct AI results in the AI Assist tab — prose + simple lists, no
   // tables or colour chips. Links are neutral + theme-aware (.ai-link).
   function renderAiResults(r) {
@@ -2194,12 +2361,12 @@ const App = (() => {
     try {
       const h = await API.ingest.health(clone)
       ingest.scan.health = h
-      const scoreEl = document.getElementById('ai-score')
-      const msgEl   = document.getElementById('ai-score-msg')
+      const scoreEl = document.getElementById('iq-score')
+      const msgEl   = document.getElementById('iq-msg')
       if (scoreEl) {
         const base = ingest._aiBaseScore
         scoreEl.textContent = (base != null && h.score !== base) ? `${base} → ${h.score}` : h.score
-        scoreEl.className = 'ai-tab-score-num ai-tab-score-num--' + h.band
+        scoreEl.className = 'iq-score iq-score--' + h.band
       }
       if (msgEl) msgEl.textContent = HEALTH_MSG[h.band] || ''
     } catch (_) {}
@@ -2224,10 +2391,44 @@ const App = (() => {
     })()
   }
 
+  // Switch which right-column pane is visible in the ingest review.
+  function switchIngestPane(paneId, tabEl) {
+    const root = document.querySelector('.ingest-review-raw')
+    if (!root) return
+    root.querySelectorAll('.slide-tab').forEach(t => t.classList.toggle('active', t === tabEl))
+    root.querySelectorAll('.slide-pane').forEach(p => p.classList.toggle('active', p.id === paneId))
+  }
+
+  // Lazily create the AI Assist pane + tab, inserted ABOVE Info File. The tab is
+  // only born when the user runs AI Assist, and lives only for this add/edit
+  // session (nothing is persisted to the recording). Returns the results div.
+  function ensureAiPane() {
+    let body = document.getElementById('ai-results')
+    if (body) return body
+    const panes = document.getElementById('ingest-panes')
+    const rail  = document.getElementById('ingest-tab-rail')
+    if (!panes || !rail) return null
+    const pane = document.createElement('div')
+    pane.className = 'slide-pane'
+    pane.id = 'isp-ai'
+    pane.innerHTML = `
+      <div class="slide-pane-header">AI Assist</div>
+      <div class="slide-pane-scroll"><div class="ai-results" id="ai-results"></div></div>`
+    panes.insertBefore(pane, panes.firstChild)
+    const tab = document.createElement('button')
+    tab.className = 'slide-tab slide-tab--ai'
+    tab.dataset.ipane = 'isp-ai'
+    tab.textContent = 'AI Assist'
+    tab.addEventListener('click', () => switchIngestPane('isp-ai', tab))
+    rail.insertBefore(tab, rail.firstChild)
+    return document.getElementById('ai-results')
+  }
+
   async function startAiAssist() {
     const btn  = document.getElementById('btn-ai-assist')
-    const body = document.getElementById('ai-results')
+    const body = ensureAiPane()
     if (!body) return
+    switchIngestPane('isp-ai', document.querySelector('.ingest-review-raw .slide-tab--ai'))
     ingest._aiBaseScore = ingest.scan?.health?.score ?? null
     if (btn) { btn.disabled = true; btn.textContent = '… researching' }
     body.innerHTML = `<div class="ai-loading"><div class="loading-spinner"></div><div>Researching the web — this can take a minute or two… <span id="ai-elapsed">0s</span></div></div>`
@@ -2246,7 +2447,7 @@ const App = (() => {
         body.innerHTML = `<p class="ai-res-note" style="color:var(--red)">AI Assist failed after ${secs}s: ${esc(e.message)}</p>`
       }
     } finally {
-      if (btn) { btn.disabled = false; btn.innerHTML = '✨ Run AI research' }
+      if (btn) { btn.disabled = false; btn.innerHTML = '✨ AI Assist' }
     }
   }
 
@@ -2486,10 +2687,20 @@ const App = (() => {
 
             <!-- Artist with autocomplete -->
             <div class="ingest-field">
-              <label>Artist</label>
+              <label>Performer <span style="color:var(--t3); font-weight:400">— the act (FLAC ARTIST tag)</span></label>
               <div class="artist-picker-wrap">
-                <input type="text" id="f-artist" value="${esc(f.artist_name)}" autocomplete="off" placeholder="Search or type artist name…" />
+                <input type="text" id="f-artist" value="${esc(f.artist_name)}" autocomplete="off" placeholder="Search or type the act…" />
                 <div class="artist-dropdown" id="f-artist-dropdown" style="display:none"></div>
+              </div>
+            </div>
+
+            <div class="ingest-field" style="margin-top:6px">
+              <label>Members <span style="color:var(--t3); font-weight:400">— the Artists in this act</span></label>
+              <div class="members-field" id="f-members-field">
+                <div class="artist-picker-wrap" style="flex:1; min-width:120px">
+                  <input type="text" id="f-member-input" class="member-input" autocomplete="off" placeholder="Add a member…" />
+                  <div class="artist-dropdown" id="f-member-dropdown" style="display:none"></div>
+                </div>
               </div>
             </div>
 
@@ -2610,26 +2821,28 @@ const App = (() => {
         <!-- Resize handle -->
         <div class="rev-resize-handle" id="rev-divider"></div>
 
-        <!-- Right: vertical-tab reference panel (Info File / File Tags / AI Assist) -->
+        <!-- Right: Quality bar (score + blurb + AI Assist) over vertical-tab panel -->
         <div class="ingest-review-raw">
-          <div class="slide-panel-body">
-            <div class="slide-pane active" id="isp-info">
-              <div class="slide-pane-header">Info File</div>
-              <div class="slide-pane-scroll"><div class="rev-raw-section">${infoText}</div></div>
-            </div>
-            <div class="slide-pane" id="isp-filetags">
-              <div class="slide-pane-header">File Tags <span class="filetags-hint">(Vorbis, on disk)</span></div>
-              <div class="slide-pane-scroll"><pre class="filetags-json">${esc(scanFileTagsJson())}</pre></div>
-            </div>
-            <div class="slide-pane" id="isp-ai">
-              <div class="slide-pane-header">AI Assist</div>
-              <div class="slide-pane-scroll">${aiTabBody(ingest.scan.health)}</div>
-            </div>
+          <div class="ingest-quality-bar">
+            <span class="iq-score iq-score--${ingest.scan.health?.band || 'yellow'}" id="iq-score">${ingest.scan.health?.score ?? '—'}</span>
+            <span class="iq-msg" id="iq-msg">${esc(HEALTH_MSG[ingest.scan.health?.band || 'yellow'] || '')}</span>
+            <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
           </div>
-          <div class="slide-tabs">
-            <button class="slide-tab active" data-ipane="isp-info">Info File</button>
-            <button class="slide-tab" data-ipane="isp-filetags">File Tags</button>
-            <button class="slide-tab" data-ipane="isp-ai">AI Assist</button>
+          <div class="ingest-tabs">
+            <div class="slide-panel-body" id="ingest-panes">
+              <div class="slide-pane active" id="isp-info">
+                <div class="slide-pane-header">Info File</div>
+                <div class="slide-pane-scroll"><div class="rev-raw-section">${infoText}</div></div>
+              </div>
+              <div class="slide-pane" id="isp-filetags">
+                <div class="slide-pane-header">File Tags <span class="filetags-hint">(Vorbis, on disk)</span></div>
+                <div class="slide-pane-scroll"><pre class="filetags-json">${esc(scanFileTagsJson())}</pre></div>
+              </div>
+            </div>
+            <div class="slide-tabs" id="ingest-tab-rail">
+              <button class="slide-tab active" data-ipane="isp-info">Info File</button>
+              <button class="slide-tab" data-ipane="isp-filetags">File Tags</button>
+            </div>
           </div>
         </div>
 
@@ -2812,11 +3025,13 @@ const App = (() => {
     })()
 
     // Artist autocomplete
-    wireArtistAutocomplete(
-      document.getElementById('f-artist'),
-      document.getElementById('f-artist-dropdown'),
-      { createLabel: 'New artist' }
-    )
+    // Performer + Members widget (shared with the Edit form).
+    const addMembersWidget = createMembersWidget(ingest.form, {
+      performerInput: 'f-artist', performerDropdown: 'f-artist-dropdown',
+      field: 'f-members-field', memberInput: 'f-member-input', memberDropdown: 'f-member-dropdown',
+    })
+    addMembersWidget.mount()
+    initAddPerformerMembers(addMembersWidget)
 
     // End date toggle — show/hide the row; pre-fill from start date on first reveal
     ;(function () {
@@ -3022,13 +3237,9 @@ const App = (() => {
 
     document.getElementById('btn-ai-assist')?.addEventListener('click', startAiAssist)
 
-    // Right-column vertical tabs (Info File / File Tags / AI Assist)
+    // Right-column vertical tabs (Info File / File Tags; AI Assist added on demand)
     mainContent.querySelectorAll('.ingest-review-raw .slide-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        const paneId = tab.dataset.ipane
-        mainContent.querySelectorAll('.ingest-review-raw .slide-tab').forEach(t => t.classList.toggle('active', t === tab))
-        mainContent.querySelectorAll('.ingest-review-raw .slide-pane').forEach(p => p.classList.toggle('active', p.id === paneId))
-      })
+      tab.addEventListener('click', () => switchIngestPane(tab.dataset.ipane, tab))
     })
 
     document.getElementById('btn-confirm').addEventListener('click', () => {
@@ -3294,8 +3505,8 @@ const App = (() => {
         tracks: ingest.tracks,
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
-        // Option B: persist the latest AI research blob (audit trail) on the recording.
-        ai_research_json: ingest.aiResult ? JSON.stringify(ingest.aiResult) : null,
+        // Performer members → ordered artist (person) names for the backend.
+        members: (ingest.form.members || []).map(m => m.name),
       }
 
       try {
@@ -3443,10 +3654,10 @@ const App = (() => {
 
           <div class="ingest-field-grid" style="grid-template-columns:1fr 72px 52px 52px; gap:10px; margin-bottom:10px">
             <div class="ingest-field">
-              <label>Artist</label>
+              <label>Performer</label>
               <div class="artist-picker-wrap">
                 <input type="text" id="e-artist" value="${esc(perf?.performer||'')}" autocomplete="off"
-                  title="Change to reassign this recording to a different artist" />
+                  title="Change to reassign this recording to a different act" />
                 <div class="artist-dropdown" id="e-artist-dropdown" style="display:none"></div>
               </div>
             </div>
@@ -3461,6 +3672,17 @@ const App = (() => {
             <div class="ingest-field">
               <label>Day</label>
               <input type="number" id="e-day" value="${perf?.start_day||''}" min="1" max="31" />
+            </div>
+          </div>
+
+          <!-- Members (the Artists in the act) -->
+          <div class="ingest-field" style="margin-bottom:16px">
+            <label>Members <span style="color:var(--t3); font-weight:400">— the Artists in this act</span></label>
+            <div class="members-field" id="e-members-field">
+              <div class="artist-picker-wrap" style="flex:1; min-width:120px">
+                <input type="text" id="e-member-input" class="member-input" autocomplete="off" placeholder="Add a member…" />
+                <div class="artist-dropdown" id="e-member-dropdown" style="display:none"></div>
+              </div>
             </div>
           </div>
 
@@ -3613,11 +3835,17 @@ const App = (() => {
     })
 
     // ── Artist autocomplete (reassignment) ────────────────────────────────────
-    wireArtistAutocomplete(
-      document.getElementById('e-artist'),
-      document.getElementById('e-artist-dropdown'),
-      { createLabel: 'Reassign to new artist' }
-    )
+    // Performer + Members widget (shared with the Add form). editMembers is read
+    // by the save handler below to send the roster.
+    const editMembers = {
+      members:        (perf?.members || []).map(m => ({ id: m.id, name: m.name })),
+      performer_name: perf?.performer || '',
+      performer_id:   perf?.performer_id || null,
+    }
+    createMembersWidget(editMembers, {
+      performerInput: 'e-artist', performerDropdown: 'e-artist-dropdown',
+      field: 'e-members-field', memberInput: 'e-member-input', memberDropdown: 'e-member-dropdown',
+    }).mount()
 
     // ── Venue live-search picker ──────────────────────────────────────────────
     ;(function () {
@@ -3717,6 +3945,8 @@ const App = (() => {
         if (artistName && artistName !== (perf?.performer || '')) {
           perfUpdate.performer_name = artistName
         }
+        // Members (the act's roster) — always sent; global to the performer.
+        perfUpdate.members = editMembers.members.map(m => m.name)
         // Always send venue_id: set to int if selected, null if name cleared
         const venueName = document.getElementById('e-venue-name').value.trim()
         perfUpdate.venue_id = venueIdRaw ? parseInt(venueIdRaw) : (venueName ? undefined : null)
@@ -4043,242 +4273,43 @@ const App = (() => {
 
   // ── Artists Index ──────────────────────────────────────────────────────────
 
-  async function renderArtistsIndexPage(preSelectId = null) {
+  async function renderArtistsIndexPage() {
     setActiveNav('artists-index')
     setActiveArtist(null)
     setLoading()
 
-    let artists = [], allPerformers = []
-    try {
-      [artists, allPerformers] = await Promise.all([
-        API.artists.list(),
-        API.artists.allPerformers(),
-      ])
-    } catch (_) {}
+    let performers = []
+    try { performers = await API.performers.list() } catch (_) {}
+
+    const rowHtml = list => list.map(p => `
+      <div class="artist-index-row" data-id="${p.id}">
+        <span class="artist-index-name">${esc(p.name)}</span>
+        <span class="artist-index-members">${esc((p.members || []).join(', '))}</span>
+        <span class="artist-index-count">${p.recording_count || 0} rec</span>
+      </div>`).join('')
 
     setMainHTML(`
       <div class="action-bar">
-        <span style="font-size:13px; font-weight:500; color:var(--t0)">Artists</span>
-        <button class="btn btn-ghost btn-sm" id="btn-new-artist" style="margin-left:auto">+ New Artist</button>
+        <span style="font-size:13px; font-weight:500; color:var(--t0)">Performers</span>
+        <input type="text" id="artist-search-input" placeholder="Search performers or members…" style="margin-left:auto; width:240px; font-size:12px" />
       </div>
-      <div class="venues-shell">
-        <div class="venues-list-panel">
-          <div class="venues-search-bar">
-            <input type="text" id="artist-search-input" style="font-size:12px" placeholder="Search…" />
-          </div>
-          <div class="venue-list-scroll" id="artist-list-scroll"></div>
-        </div>
-        <div class="venues-detail-panel" id="artists-detail-panel">
-          <div class="venue-detail-empty">Select an artist to view or edit</div>
-        </div>
-      </div>`)
+      <div class="artist-index-list" id="artist-index-list">${rowHtml(performers) || '<div class="empty-state" style="min-height:120px"><div>No performers yet</div></div>'}</div>`)
 
-    let allArtists = artists
-    let activeId   = null
-
-    function renderList(list) {
-      const scroll = document.getElementById('artist-list-scroll')
-      if (!list.length) {
-        scroll.innerHTML = '<div style="padding:16px 14px; font-size:12px; color:var(--t2)">No artists found</div>'
-        return
-      }
-      scroll.innerHTML = list.map(a => `
-        <div class="venue-list-row ${a.id === activeId ? 'active' : ''}" data-id="${a.id}">
-          <div>
-            <div class="venue-row-name">${esc(a.name)}</div>
-            ${a.sort_name ? `<div class="venue-row-loc">${esc(a.sort_name)}</div>` : ''}
-          </div>
-          <div class="venue-row-count">${a.recording_count}r</div>
-        </div>`).join('')
-
-      scroll.querySelectorAll('.venue-list-row').forEach(el => {
-        el.addEventListener('click', () => {
-          activeId = parseInt(el.dataset.id)
-          renderList(list)
-          loadArtistDetail(activeId)
-        })
-      })
+    function wireRows() {
+      mainContent.querySelectorAll('.artist-index-row').forEach(el =>
+        el.addEventListener('click', () => { window.location.hash = `#/artist/${el.dataset.id}` }))
     }
+    wireRows()
 
-    async function loadArtistDetail(id) {
-      const panel = document.getElementById('artists-detail-panel')
-      panel.innerHTML = '<div class="venue-detail-empty" style="color:var(--t2)">Loading…</div>'
-      let a
-      try { a = await API.artists.get(id) } catch (_) {
-        panel.innerHTML = '<div class="venue-detail-empty">Failed to load</div>'
-        return
-      }
-
-      // Performers not yet linked to this artist (available to add)
-      const linkedIds    = new Set(a.performers.map(p => p.id))
-      const unlinked     = allPerformers.filter(p => !linkedIds.has(p.id))
-
-      panel.innerHTML = `
-        <div style="max-width:600px">
-          <h2 style="font-size:18px; font-weight:500; color:var(--t0); margin:0 0 18px">${esc(a.name)}</h2>
-
-          <div class="rev-section-title" style="margin-bottom:12px">Artist info</div>
-
-          <div class="ingest-field-grid" style="grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px">
-            <div class="ingest-field">
-              <label>Canonical name</label>
-              <input type="text" id="ad-name" value="${esc(a.name)}" />
-            </div>
-            <div class="ingest-field">
-              <label>Sort name <span style="color:var(--t3); font-weight:400">(e.g. Evans, Bill)</span></label>
-              <input type="text" id="ad-sort-name" value="${esc(a.sort_name||'')}" placeholder="Last, First" />
-            </div>
-          </div>
-
-          <div class="ingest-field" style="margin-bottom:18px">
-            <label>Bio / notes</label>
-            <textarea id="ad-bio" style="min-height:70px">${esc(a.bio||'')}</textarea>
-          </div>
-
-          <div style="display:flex; align-items:center; gap:10px; margin-bottom:28px">
-            <button class="btn btn-primary btn-sm" id="ad-save">Save</button>
-            <span id="ad-msg" style="font-size:11px; color:var(--t2)"></span>
-          </div>
-
-          <div class="rev-section-title" style="margin-bottom:10px">
-            Linked Performers
-            <span style="font-weight:400; text-transform:none; letter-spacing:0; font-size:11px; color:var(--t2); margin-left:6px">
-              — Performers that include this artist
-            </span>
-          </div>
-
-          <div id="ad-performers-list" style="margin-bottom:14px">
-            ${a.performers.length
-              ? a.performers.map(p => `
-                <div class="ad-performer-row" data-pid="${p.id}">
-                  <span class="ad-performer-name">${esc(p.name)}</span>
-                  <button class="ad-unlink-btn" data-pid="${p.id}" title="Remove link">×</button>
-                </div>`).join('')
-              : '<div style="font-size:12px; color:var(--t2); padding:6px 0">No performers linked yet</div>'
-            }
-          </div>
-
-          <div class="ad-add-performer-row">
-            <select id="ad-performer-picker" style="flex:1; font-size:12px">
-              <option value="">— link a performer —</option>
-              ${unlinked.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}
-            </select>
-            <button class="btn btn-ghost btn-sm" id="ad-link-btn">Link</button>
-          </div>
-        </div>`
-
-      // Save artist info
-      document.getElementById('ad-save').addEventListener('click', async () => {
-        const btn   = document.getElementById('ad-save')
-        const msgEl = document.getElementById('ad-msg')
-        btn.disabled = true; btn.textContent = 'Saving…'
-        try {
-          await API.artists.update(id, {
-            name:      document.getElementById('ad-name').value.trim(),
-            sort_name: document.getElementById('ad-sort-name').value.trim() || null,
-            bio:       document.getElementById('ad-bio').value.trim()       || null,
-          })
-          // Refresh list so the name updates
-          allArtists = await API.artists.list()
-          renderList(allArtists)
-          loadArtistList()  // refresh persistent left sidebar (name/sort order may have changed)
-          document.querySelector('#artists-detail-panel h2').textContent =
-            document.getElementById('ad-name').value.trim()
-          msgEl.textContent = 'Saved'
-          setTimeout(() => { if (msgEl) msgEl.textContent = '' }, 2000)
-        } catch (e) {
-          msgEl.style.color = 'var(--red)'
-          msgEl.textContent = 'Save failed: ' + e.message
-        } finally {
-          btn.disabled = false; btn.textContent = 'Save'
-        }
-      })
-
-      // Unlink performer
-      async function doUnlink(performerId) {
-        try {
-          await API.artists.unlinkPerformer(id, performerId)
-          // Remove from allPerformers-linked knowledge and re-render detail
-          const a2 = await API.artists.get(id)
-          const linkedIds2 = new Set(a2.performers.map(p => p.id))
-          const unlinked2  = allPerformers.filter(p => !linkedIds2.has(p.id))
-          _updatePerformerSection(a2.performers, unlinked2)
-        } catch (e) { alert('Unlink failed: ' + e.message) }
-      }
-
-      // Link performer
-      async function doLink() {
-        const picker = document.getElementById('ad-performer-picker')
-        const pid    = parseInt(picker.value)
-        if (!pid) return
-        try {
-          const res = await API.artists.linkPerformer(id, pid)
-          // Re-fetch and update section
-          const a2 = await API.artists.get(id)
-          const linkedIds2 = new Set(a2.performers.map(p => p.id))
-          const unlinked2  = allPerformers.filter(p => !linkedIds2.has(p.id))
-          _updatePerformerSection(a2.performers, unlinked2)
-        } catch (e) { alert('Link failed: ' + e.message) }
-      }
-
-      function _updatePerformerSection(performers, available) {
-        const list = document.getElementById('ad-performers-list')
-        const picker = document.getElementById('ad-performer-picker')
-        if (list) list.innerHTML = performers.length
-          ? performers.map(p => `
-              <div class="ad-performer-row" data-pid="${p.id}">
-                <span class="ad-performer-name">${esc(p.name)}</span>
-                <button class="ad-unlink-btn" data-pid="${p.id}" title="Remove link">×</button>
-              </div>`).join('')
-          : '<div style="font-size:12px; color:var(--t2); padding:6px 0">No performers linked yet</div>'
-        if (picker) {
-          picker.innerHTML = '<option value="">— link a performer —</option>' +
-            available.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')
-        }
-        // Re-wire unlink buttons
-        wireUnlinkBtns()
-      }
-
-      function wireUnlinkBtns() {
-        document.querySelectorAll('.ad-unlink-btn').forEach(btn => {
-          btn.addEventListener('click', () => doUnlink(parseInt(btn.dataset.pid)))
-        })
-      }
-
-      wireUnlinkBtns()
-      document.getElementById('ad-link-btn').addEventListener('click', doLink)
-    }
-
-    // Search
     document.getElementById('artist-search-input').addEventListener('input', e => {
-      const q        = e.target.value.trim().toLowerCase()
+      const q = e.target.value.trim().toLowerCase()
       const filtered = q
-        ? allArtists.filter(a => a.name.toLowerCase().includes(q) ||
-            (a.sort_name || '').toLowerCase().includes(q))
-        : allArtists
-      renderList(filtered)
+        ? performers.filter(p => p.name.toLowerCase().includes(q) ||
+            (p.members || []).some(m => m.toLowerCase().includes(q)))
+        : performers
+      document.getElementById('artist-index-list').innerHTML = rowHtml(filtered)
+      wireRows()
     })
-
-    // New artist
-    document.getElementById('btn-new-artist').addEventListener('click', async () => {
-      const name = prompt('Canonical artist name:')
-      if (!name?.trim()) return
-      try {
-        const created = await API.artists.create({ name: name.trim() })
-        allArtists = await API.artists.list()
-        activeId   = created.id
-        renderList(allArtists)
-        loadArtistDetail(created.id)
-      } catch (e) { alert('Failed: ' + e.message) }
-    })
-
-    renderList(allArtists)
-
-    if (preSelectId) {
-      activeId = preSelectId
-      renderList(allArtists)
-      loadArtistDetail(preSelectId)
-    }
   }
 
   // ── Router ─────────────────────────────────────────────────────────────────
@@ -4313,9 +4344,21 @@ const App = (() => {
     } else if (hash === '#/artists') {
       renderArtistsIndexPage()
 
-    } else if (hash.startsWith('#/artists/')) {
+    } else if (hash.startsWith('#/person/')) {
       const id = parseInt(hash.split('/')[2])
-      renderArtistsIndexPage(id || null)
+      if (id) renderPersonView(id)
+      else    renderLibraryView()
+
+    } else if (hash === '#/collections') {
+      renderCollectionsIndex()
+
+    } else if (hash === '#/collection/new') {
+      renderCollectionCreate()
+
+    } else if (hash.startsWith('#/collection/')) {
+      const id = parseInt(hash.split('/')[2])
+      if (id) renderCollectionView(id)
+      else    renderCollectionsIndex()
 
     } else {
       renderLibraryView()

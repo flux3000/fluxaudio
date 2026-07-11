@@ -23,3 +23,33 @@ def recording_summary(rec):
         # Total runtime in seconds (None-safe); powers the catalog length column.
         "duration_sec":    sum(t.duration or 0 for t in rec.tracks) or None,
     }
+
+
+def recording_row(rec):
+    """
+    Self-contained recording row for flat catalog/collection displays — includes
+    the performer, date, and venue so a single row fully describes the show.
+    """
+    from app.utils.format import format_partial_date
+    p = rec.performance
+    v = p.venue if p else None
+    return {
+        "id":              rec.id,
+        "performer":       p.performer.name if (p and p.performer) else None,
+        "performer_id":    p.performer_id if p else None,
+        "date":            format_partial_date(p.start_year, p.start_month, p.start_day) if p else None,
+        "start_year":      p.start_year  if p else None,
+        "start_month":     p.start_month if p else None,
+        "start_day":       p.start_day   if p else None,
+        "venue":           v.name    if v else None,
+        "city":            v.city    if v else (p.city    if p else None),
+        "state":           v.state   if v else (p.state   if p else None),
+        "country":         v.country if v else (p.country if p else None),
+        "source":          rec.source,
+        "source_modifier": rec.source_modifier,
+        "quality":         rec.quality,
+        "rating":          rec.rating,
+        "is_complete":     rec.is_complete,
+        "track_count":     len(rec.tracks),
+        "duration_sec":    sum(t.duration or 0 for t in rec.tracks) or None,
+    }

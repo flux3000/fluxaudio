@@ -34,18 +34,34 @@ const API = (() => {
       logout: ()             => post('/api/auth/logout'),
     },
 
-    // ── Artists ─────────────────────────────────────────────────────────────
+    // ── Artists (people) ──────────────────────────────────────────────────────
     artists: {
-      list:            ()                   => get('/api/artists/'),
-      search:          (q)                  => get(`/api/artists/search?q=${encodeURIComponent(q)}`),
-      allRecordings:   ()                   => get('/api/artists/all-recordings'),
-      get:             (id)                 => get(`/api/artists/${id}`),
-      recordings:      (id)                 => get(`/api/artists/${id}/recordings`),
-      create:          (data)               => post('/api/artists/', data),
-      update:          (id, data)           => put(`/api/artists/${id}`, data),
-      allPerformers:   ()                   => get('/api/artists/performers'),
-      linkPerformer:   (id, performer_id)   => post(`/api/artists/${id}/performers`, { performer_id }),
-      unlinkPerformer: (id, performer_id)   => request('DELETE', `/api/artists/${id}/performers/${performer_id}`),
+      search: (q)        => get(`/api/artists/search?q=${encodeURIComponent(q)}`),
+      list:   ()         => get('/api/artists/'),
+      get:    (id)       => get(`/api/artists/${id}`),
+      create: (data)     => post('/api/artists/', data),
+    },
+
+    // ── Collections ───────────────────────────────────────────────────────────
+    collections: {
+      list:            ()               => get('/api/collections/'),
+      get:             (id)             => get(`/api/collections/${id}`),
+      create:          (data)           => post('/api/collections/', data),
+      update:          (id, data)       => put(`/api/collections/${id}`, data),
+      remove:          (id)             => request('DELETE', `/api/collections/${id}`),
+      addRecording:    (id, recId)      => post(`/api/collections/${id}/recordings`, { recording_id: recId }),
+      removeRecording: (id, recId)      => request('DELETE', `/api/collections/${id}/recordings/${recId}`),
+    },
+
+    // ── Performers (acts) ─────────────────────────────────────────────────────
+    performers: {
+      search:        (q)         => get(`/api/performers/search?q=${encodeURIComponent(q)}`),
+      list:          ()          => get('/api/performers/'),
+      allRecordings: ()          => get('/api/performers/all-recordings'),
+      get:           (id)        => get(`/api/performers/${id}`),
+      recordings:    (id)        => get(`/api/performers/${id}/recordings`),
+      create:        (data)      => post('/api/performers/', data),
+      update:        (id, data)  => put(`/api/performers/${id}`, data),
     },
 
     // ── Performances ─────────────────────────────────────────────────────────

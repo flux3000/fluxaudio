@@ -16,6 +16,7 @@ from flask_login import login_required, current_user
 
 from app.extensions import db
 from app.models.recording import Recording, RecordingFingerprint
+from app.models.collection import CollectionRecording
 from app.models.recording_event import RecordingEvent
 from app.models.track import Track
 from app.utils.ingest import (scan_folder, read_flac_tags, parse_info_file,
@@ -70,7 +71,10 @@ def get_recording(recording_id):
         "is_official":          bool(rec.is_official),
         "info_file_content":    rec.info_file_content,
         "notes":                rec.notes,
-        "ai_research":          _json.loads(rec.ai_research_json) if rec.ai_research_json else None,
+        "collections": [
+            {"id": l.collection.id, "name": l.collection.name}
+            for l in db.session.query(CollectionRecording).filter_by(recording_id=rec.id).all()
+        ],
         "tracks": [
             {
                 "id":           t.id,

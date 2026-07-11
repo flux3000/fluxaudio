@@ -21,8 +21,8 @@ from config import Config
 from app import create_app
 from app.extensions import db as _db
 from app.models.user import User
-from app.models.artist import Artist, ArtistCanonical
-from app.models.canonical_artist import CanonicalArtist
+from app.models.performer import Performer
+from app.models.artist import Artist, Membership
 from app.models.venue import Venue
 from app.models.performance import Performance
 from app.models.recording import Recording
@@ -60,20 +60,20 @@ def _seed():
     user = User(username="admin", role="admin", is_active=True, password_hash="x")
     _db.session.add(user)
 
-    # Canonical artist + its 1:1 performing artist
-    canon = CanonicalArtist(name="Bill Evans", sort_name="Evans, Bill")
-    _db.session.add(canon)
+    # Performer (act) + its sole member Artist (person)
+    performer = Performer(name="Bill Evans", sort_name="Evans, Bill")
+    _db.session.add(performer)
     _db.session.flush()
-    artist_solo = Artist(name="Bill Evans")
-    _db.session.add(artist_solo)
+    person = Artist(name="Bill Evans")
+    _db.session.add(person)
     _db.session.flush()
-    _db.session.add(ArtistCanonical(artist_id=artist_solo.id, canonical_artist_id=canon.id, order=0))
+    _db.session.add(Membership(performer_id=performer.id, artist_id=person.id, order=0))
 
     venue = Venue(name="Sprague Memorial Hall", city="New Haven", state="CT", country="US")
     _db.session.add(venue)
     _db.session.flush()
 
-    performance = Performance(artist_id=artist_solo.id, venue_id=venue.id,
+    performance = Performance(performer_id=performer.id, venue_id=venue.id,
                               start_year=1980, start_month=2, start_day=22)
     _db.session.add(performance)
     _db.session.flush()
@@ -99,12 +99,12 @@ def _seed():
 @pytest.fixture()
 def seeded_ids(app):
     """Convenience IDs for the seeded graph."""
-    canon  = _db.session.query(CanonicalArtist).filter_by(name="Bill Evans").first()
-    artist = _db.session.query(Artist).filter_by(name="Bill Evans").first()
-    rec    = _db.session.query(Recording).first()
+    performer = _db.session.query(Performer).filter_by(name="Bill Evans").first()
+    person    = _db.session.query(Artist).filter_by(name="Bill Evans").first()
+    rec       = _db.session.query(Recording).first()
     return {
-        "canonical_id": canon.id,
-        "performer_id": artist.id,   # key name kept; value is the performing Artist id
+        "performer_id":   performer.id,
+        "artist_id":      person.id,
         "performance_id": rec.performance_id,
-        "recording_id": rec.id,
+        "recording_id":   rec.id,
     }

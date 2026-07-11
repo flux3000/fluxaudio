@@ -1,72 +1,67 @@
 """
 utils/pruning.py — Cascade cleanup of empty chain rows.
 
-A recording archive has no use for a performance/artist/canonical-artist that
-no longer has any recording. These helpers prune the empty chain after a
-recording is deleted or a performance is reassigned. Single source of truth so
-the two call sites (recordings.delete_recording, performances.update_performance)
-stay consistent.
+After a recording is deleted or a performance reassigned, prune the empty chain:
+  performance with 0 recordings → performer with 0 performances → orphan Artists
+  (people with no remaining memberships).
 
-SQLite FK enforcement is off and the tables carry no ON DELETE actions, so
-cascades are done here in app code, bottom-up.
+Single source of truth so the call sites (recordings.delete_recording,
+performances.update_performance) stay consistent. SQLite FK enforcement is off,
+so cascades are done here in app code, bottom-up.
 
-(Terminology: "artist" = performing credit; "canonical artist" = grouping node.
-Renamed 2026-07-09 from performer/artist.)
+(2026-07-11 remodel: Performer = the act; Artist = a person; Membership = M2M.)
 """
 
 from app.extensions import db
 from app.models.performance import Performance
-from app.models.artist import Artist, ArtistCanonical
-from app.models.canonical_artist import CanonicalArtist
+from app.models.performer import Performer
+from app.models.artist import Artist, Membership
 from app.models.user import UserArtistPermission
 from app.models.recording import Recording
 
 
-def _delete_empty_canonicals(canonical_ids):
-    """Delete any canonical artist in the list left with 0 linked artists."""
+def _delete_orphan_artists(artist_ids):
+    """Delete any Artist (person) left with 0 memberships."""
     deleted = []
-    for cid in canonical_ids:
-        if db.session.query(ArtistCanonical).filter_by(canonical_artist_id=cid).count() == 0:
-            db.session.query(UserArtistPermission).filter_by(canonical_artist_id=cid).delete(
-                synchronize_session=False)
-            canonical = db.session.get(CanonicalArtist, cid)
-            if canonical:
-                deleted.append(canonical.id)
-                db.session.delete(canonical)
+    for aid in artist_ids:
+        if db.session.query(Membership).filter_by(artist_id=aid).count() == 0:
+            a = db.session.get(Artist, aid)
+            if a:
+                deleted.append(a.id)
+                db.session.delete(a)
     db.session.flush()
     return deleted
 
 
-def prune_artist_if_orphaned(artist_id):
+def prune_performer_if_orphaned(performer_id):
     """
-    If an artist has no performances left, delete it (+ its canonical links),
-    then delete any canonical artist left with 0 linked artists.
-    Returns {"performers": [...], "artists": [...]}  (JSON keys kept stable).
+    If a Performer has no performances left, delete it (+ its memberships and
+    permissions), then delete any member Artist left with 0 memberships.
+    Returns {"performers": [...], "artists": [...]}.
     """
     result = {"performers": [], "artists": []}
-    if db.session.query(Performance).filter_by(artist_id=artist_id).count() > 0:
+    if db.session.query(Performance).filter_by(performer_id=performer_id).count() > 0:
         return result
 
-    canonical_ids = [
-        l.canonical_artist_id
-        for l in db.session.query(ArtistCanonical).filter_by(artist_id=artist_id).all()
+    member_artist_ids = [
+        m.artist_id
+        for m in db.session.query(Membership).filter_by(performer_id=performer_id).all()
     ]
-    db.session.query(ArtistCanonical).filter_by(artist_id=artist_id).delete(
+    db.session.query(UserArtistPermission).filter_by(performer_id=performer_id).delete(
         synchronize_session=False)
-    artist = db.session.get(Artist, artist_id)
-    if artist:
-        result["performers"].append(artist.id)
-        db.session.delete(artist)
+    performer = db.session.get(Performer, performer_id)
+    if performer:
+        result["performers"].append(performer.id)
+        db.session.delete(performer)   # memberships cascade-delete
     db.session.flush()
 
-    result["artists"] = _delete_empty_canonicals(canonical_ids)
+    result["artists"] = _delete_orphan_artists(member_artist_ids)
     return result
 
 
 def prune_after_recording_delete(performance_id):
     """
-    After a recording is removed, prune the empty chain above it:
-      performance with 0 recordings → artist with 0 performances → empty canonical.
+    After a recording is removed, prune the empty chain above it.
     Returns {"performances": [...], "performers": [...], "artists": [...]}.
     """
     pruned = {"performances": [], "performers": [], "artists": []}
@@ -77,12 +72,12 @@ def prune_after_recording_delete(performance_id):
     if db.session.query(Recording).filter_by(performance_id=perf.id).count() > 0:
         return pruned
 
-    artist_id = perf.artist_id
+    performer_id = perf.performer_id
     pruned["performances"].append(perf.id)
     db.session.delete(perf)
     db.session.flush()
 
-    artist_pruned = prune_artist_if_orphaned(artist_id)
-    pruned["performers"] = artist_pruned["performers"]
-    pruned["artists"]    = artist_pruned["artists"]
+    sub = prune_performer_if_orphaned(performer_id)
+    pruned["performers"] = sub["performers"]
+    pruned["artists"]    = sub["artists"]
     return pruned
