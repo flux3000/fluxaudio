@@ -107,6 +107,49 @@ def ai_assist():
     return jsonify({"job_id": job_id}), 202
 
 
+@bp.route("/ai-assist-recording/<int:recording_id>", methods=["POST"])
+@login_required
+def ai_assist_recording(recording_id):
+    """Run AI research for an already-saved recording (background job). Builds the
+    `current` metadata from the DB — run_ai_assist reads no files."""
+    import threading
+    import uuid
+    from app.models.recording import Recording
+    from app.utils.format import format_partial_date
+
+    rec = db.session.get(Recording, recording_id)
+    if not rec:
+        return jsonify({"error": "Not found"}), 404
+    p = rec.performance
+    v = p.venue if p else None
+    current = {
+        "artist":  (p.performer.name if (p and p.performer) else ""),
+        "date":    format_partial_date(p.start_year, p.start_month, p.start_day) if p else "",
+        "venue":   (v.name if v else ""),
+        "city":    (v.city if v else (p.city if p else "")),
+        "state":   (v.state if v else (p.state if p else "")),
+        "country": (v.country if v else (p.country if p else "")),
+        "source":  rec.source or "",
+        "lineage": rec.lineage or "",
+        "tracks":  [{"number": t.track_number, "title": t.title, "duration": t.duration}
+                    for t in rec.tracks],
+    }
+
+    api_key = get_api_key(current_user.id)
+    if not api_key:
+        return jsonify({"error": "no_api_key"}), 428
+    model = get_pref(current_user.id, "ai_model") or "claude-sonnet-5"
+
+    job_id = uuid.uuid4().hex
+    _AI_JOBS[job_id] = {"status": "running"}
+    threading.Thread(
+        target=_run_ai_job,
+        args=(job_id, rec.folder_path or "", current, api_key, model),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id}), 202
+
+
 @bp.route("/ai-assist/<job_id>", methods=["GET"])
 @login_required
 def ai_assist_status(job_id):
@@ -122,11 +165,71 @@ def ai_assist_status(job_id):
     return jsonify({"status": "done", "result": job["result"]})
 
 
+_INGEST_JOBS = {}  # job_id -> {status, copied, total, result, error}
+
+
+def _run_ingest_job(job_id, app, data, user_id):
+    """Background worker: copy files (with progress) + create the DB chain."""
+    import traceback as _tb
+    job = _INGEST_JOBS[job_id]
+    try:
+        with app.app_context():
+            def prog(copied, total):
+                job["copied"] = copied
+                job["total"]  = total
+            job["result"] = _do_confirm(data, user_id, prog)
+            job["status"] = "done"
+    except Exception as e:  # noqa: BLE001
+        _tb.print_exc()
+        job["error"]  = str(e)
+        job["status"] = "error"
+
+
 @bp.route("/confirm", methods=["POST"])
 @login_required
 def confirm_ingest():
+    """Validate, then run the copy + ingest as a background job — a big folder can
+    take far longer than the webview's fetch timeout. Returns a job id to poll."""
+    import threading
+    import uuid
+    data          = request.get_json() or {}
+    source_folder = (data.get("source_folder_path") or "").strip()
+    artist_name   = (data.get("artist_name") or "").strip()
+    if not source_folder or not os.path.isdir(source_folder):
+        return jsonify({"error": f"Source folder not found: {source_folder!r}"}), 400
+    if not artist_name:
+        return jsonify({"error": "artist_name is required"}), 400
+    job_id = uuid.uuid4().hex
+    _INGEST_JOBS[job_id] = {"status": "running", "copied": 0, "total": 0}
+    threading.Thread(
+        target=_run_ingest_job,
+        args=(job_id, current_app._get_current_object(), data, current_user.id),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/confirm/<job_id>", methods=["GET"])
+@login_required
+def confirm_status(job_id):
+    """Poll a confirm job: running (+copy progress), or done+result / error."""
+    job = _INGEST_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    if job["status"] == "running":
+        return jsonify({"status": "running", "copied": job.get("copied", 0),
+                        "total": job.get("total", 0)})
+    _INGEST_JOBS.pop(job_id, None)
+    if job["status"] == "error":
+        return jsonify({"status": "error", "error": job["error"]})
+    return jsonify({"status": "done", "result": job["result"]})
+
+
+def _do_confirm(data, user_id, progress_cb=None):
     """
     Resolve or create the full object chain, then ingest the recording.
+    Runs inside an app context (background thread). Returns a result dict;
+    raises on failure.
 
     Expected payload:
     {
@@ -154,15 +257,8 @@ def confirm_ingest():
       ]
     }
     """
-    data = request.get_json()
-
     source_folder = (data.get("source_folder_path") or "").strip()
     artist_name   = (data.get("artist_name")        or "").strip()
-
-    if not source_folder or not os.path.isdir(source_folder):
-        return jsonify({"error": f"Source folder not found: {source_folder!r}"}), 400
-    if not artist_name:
-        return jsonify({"error": "artist_name is required"}), 400
 
     city        = (data.get("city")       or "").strip() or None
     state       = (data.get("state")      or "").strip() or None
@@ -276,7 +372,7 @@ def confirm_ingest():
     behavior = (data.get("behavior") or "").strip().lower()
     if behavior not in ("move", "copy"):
         pref = db.session.query(UserPreference).filter_by(
-            user_id=current_user.id, key="ingest_file_behavior"
+            user_id=user_id, key="ingest_file_behavior"
         ).first()
         behavior = pref.value if pref else "copy"
     library_root = str(current_app.config["LIBRARY_ROOT"])
@@ -288,10 +384,11 @@ def confirm_ingest():
             artist_name   = artist_name,
             folder_name   = folder_name,
             behavior      = behavior,
+            progress_cb   = progress_cb,
         )
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": f"File operation failed: {str(e)}"}), 500
+        raise RuntimeError(f"File operation failed: {e}")
 
     # ── 7. Create Recording ───────────────────────────────────────────────────
     rec_is_official = bool(data.get("is_official", False))
@@ -346,19 +443,19 @@ def confirm_ingest():
     # ── 10. Irrevocable ingest event ──────────────────────────────────────────
     db.session.add(RecordingEvent(
         recording_id = rec.id,
-        user_id      = current_user.id,
+        user_id      = user_id,
         event_type   = "ingested",
         note         = f"behavior={behavior} original={os.path.basename(source_folder)}",
     ))
 
     db.session.commit()
 
-    return jsonify({
+    return {
         "recording_id":  rec.id,
         "performer_id":  performer.id,
         "folder_name":   folder_name,
         "event_id":      event.id if event else None,
-    }), 201
+    }
 
 
 import re as _re

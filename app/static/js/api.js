@@ -119,9 +119,11 @@ const API = (() => {
 
     // ── Ingest ───────────────────────────────────────────────────────────────
     ingest: {
-      confirm:    (data)       => post('/api/ingest/confirm', data),
-      aiAssist:       (payload) => post('/api/ingest/ai-assist', payload),
-      aiAssistStatus: (jobId)   => get(`/api/ingest/ai-assist/${jobId}`),
+      confirm:       (data)  => post('/api/ingest/confirm', data),
+      confirmStatus: (jobId) => get(`/api/ingest/confirm/${jobId}`),
+      aiAssist:          (payload) => post('/api/ingest/ai-assist', payload),
+      aiAssistRecording: (recId)   => post(`/api/ingest/ai-assist-recording/${recId}`),
+      aiAssistStatus:    (jobId)   => get(`/api/ingest/ai-assist/${jobId}`),
       health:         (scan)    => post('/api/ingest/health', scan),
       batchScan:  (source_dir) => post('/api/ingest/batch-scan', { source_dir }),
     },

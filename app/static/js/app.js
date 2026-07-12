@@ -203,6 +203,38 @@ const App = (() => {
     })
   })()
 
+  // ── Resizable sidebar ──────────────────────────────────────────────────────
+  ;(function () {
+    const MIN = 200, MAX = 460
+    const setW = w => document.documentElement.style.setProperty('--sidebar-w', Math.round(w) + 'px')
+    const saved = parseInt(localStorage.getItem('fluxSidebarW'), 10)
+    if (saved && saved >= MIN && saved <= MAX) setW(saved)
+
+    const handle = document.getElementById('sidebar-resizer')
+    if (!handle) return
+    let dragging = false
+    handle.addEventListener('mousedown', e => {
+      dragging = true
+      handle.classList.add('dragging')
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      e.preventDefault()
+    })
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return
+      setW(Math.max(MIN, Math.min(e.clientX, MAX)))
+    })
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return
+      dragging = false
+      handle.classList.remove('dragging')
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      const cur = getComputedStyle(document.documentElement).getPropertyValue('--sidebar-w').trim()
+      localStorage.setItem('fluxSidebarW', parseInt(cur, 10))
+    })
+  })()
+
   // ── Utilities ──────────────────────────────────────────────────────────────
 
   function fmtDate(year, month, day) {
@@ -344,6 +376,38 @@ const App = (() => {
     return role === 'admin' || role === 'archivist'
   }
 
+
+  // Venue autocomplete — searches venues, shows location, offers a create row.
+  // onPick receives {id|null, name}.
+  function wireVenuePickerDropdown(inputEl, dropEl, onPick) {
+    if (!inputEl || !dropEl) return
+    let debounce = null
+    const close = () => { dropEl.style.display = 'none'; dropEl.innerHTML = '' }
+    async function run() {
+      const q = inputEl.value.trim()
+      if (q.length < 2) { close(); return }
+      let results = []
+      try { results = await API.venues.list(q) } catch (_) {}
+      const rows = results.slice(0, 10).map(v => {
+        const loc = [v.city, v.state, v.country].filter(Boolean).join(', ')
+        return `<div class="venue-result" data-id="${v.id}" data-name="${esc(v.name)}">${esc(v.name)}${loc ? ` <span class="venue-result-loc">${esc(loc)}</span>` : ''}</div>`
+      }).join('')
+      const exact = results.some(v => v.name.toLowerCase() === q.toLowerCase())
+      const createRow = (!exact && q)
+        ? `<div class="venue-result venue-result-new" data-id="" data-name="${esc(q)}">+ Create venue: "${esc(q)}"</div>` : ''
+      dropEl.innerHTML = rows + createRow
+      dropEl.style.display = (rows || createRow) ? 'block' : 'none'
+      dropEl.querySelectorAll('.venue-result').forEach(el => {
+        el.addEventListener('mousedown', e => {
+          e.preventDefault()
+          onPick({ id: el.dataset.id ? parseInt(el.dataset.id) : null, name: el.dataset.name })
+          close()
+        })
+      })
+    }
+    inputEl.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(run, 220) })
+    inputEl.addEventListener('focus', () => { if (inputEl.value.trim().length >= 2) run() })
+  }
 
   // Generic autocomplete over {id,name} results with an optional "create" row.
   // onPick receives {id|null, name}. Used for the Performer and Member pickers.
@@ -1093,6 +1157,11 @@ const App = (() => {
             <div class="pp-artists" id="pp-artists"></div>
           </div>
 
+          <div class="pp-artists-block">
+            <div class="pp-artists-label">Resources</div>
+            <div class="pp-resources" id="pp-resources"></div>
+          </div>
+
           <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${withRecs.length} performance${withRecs.length !== 1 ? 's' : ''}</div>
         </div>
         <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
@@ -1149,6 +1218,40 @@ const App = (() => {
     }
     renderArtists()
 
+    // ── Editable reference Resources (external DBs / discographies) ──────────
+    let resources = (performer.resources || []).map(r => ({ label: r.label, url: r.url }))
+    const persistResources = () => saveField({ resources })
+    function renderResources() {
+      const box = document.getElementById('pp-resources')
+      if (!box) return
+      box.innerHTML =
+        resources.map((r, i) => `
+          <div class="pp-resource-row" data-i="${i}">
+            <a class="pp-resource-link" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.url)}</a>
+            <span class="pp-resource-url">${esc(r.url)}</span>
+            <span class="pp-resource-x" data-i="${i}" title="Remove">×</span>
+          </div>`).join('') +
+        `<div class="pp-resource-add">
+           <input type="text" class="pp-res-label" placeholder="Label (optional)" />
+           <input type="text" class="pp-res-url" placeholder="https://…" />
+           <button class="btn btn-ghost btn-xs pp-res-add-btn" type="button">Add</button>
+         </div>`
+      box.querySelectorAll('.pp-resource-x').forEach(x =>
+        x.addEventListener('click', async () => { resources.splice(parseInt(x.dataset.i), 1); await persistResources(); renderResources() }))
+      const urlEl = box.querySelector('.pp-res-url')
+      const labelEl = box.querySelector('.pp-res-label')
+      const add = async () => {
+        let url = urlEl.value.trim()
+        if (!url) return
+        if (!/^https?:\/\//i.test(url)) url = 'https://' + url
+        resources.push({ label: labelEl.value.trim() || null, url })
+        await persistResources(); renderResources()
+      }
+      box.querySelector('.pp-res-add-btn').addEventListener('click', add)
+      urlEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add() } })
+    }
+    renderResources()
+
     document.getElementById('pp-delete').addEventListener('click', async () => {
       if (!confirm(`Delete performer "${performer.name}"? This can't be undone.`)) return
       try { await API.performers.remove(performerId); refreshSidebar(); window.location.hash = '#/' }
@@ -1184,6 +1287,61 @@ const App = (() => {
         else if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); field.blur() }
       })
     })
+  }
+
+  // AI Assist on the saved-recording page — open the AI tab, run a research job,
+  // render read-only findings. Apply anything worthwhile via the inline editors.
+  async function startRecAiAssist(recordingId, rec) {
+    // The button lives inside the (already-open) AI pane; running replaces it.
+    const body = document.getElementById('ai-results')
+    if (!body) return
+    body.innerHTML = `<div class="ai-loading"><div class="loading-spinner"></div><div>Researching the web — this can take a minute or two… <span id="ai-elapsed">0s</span></div></div>`
+    const t0 = Date.now()
+    try {
+      const { job_id } = await API.ingest.aiAssistRecording(recordingId)
+      const result = await pollAiJob(job_id, t0)
+      renderRecAiResults(result, body)
+    } catch (e) {
+      const secs = Math.round((Date.now() - t0) / 1000)
+      const msg = /no_api_key/.test(e.message)
+        ? 'No Anthropic API key set — add one in Settings (⚙).'
+        : `AI Assist failed after ${secs}s: ${esc(e.message)}`
+      body.innerHTML = `<div class="ai-assist-cta">
+        <p class="ai-res-note" style="color:var(--red)">${msg}</p>
+        <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist-retry">✨ Try again</button>
+      </div>`
+      document.getElementById('btn-ai-assist-retry')?.addEventListener('click', () => startRecAiAssist(recordingId, rec))
+    }
+  }
+
+  // Read-only render of AI findings on the recording page (proposals shown with
+  // confidence + source links; edit fields inline to apply anything worth keeping).
+  function renderRecAiResults(r, body) {
+    if (!body) return
+    const props = (r.proposals || []).map(p => `
+      <div class="ai-res-row">
+        <span class="ai-res-field">${esc(p.field)}</span>
+        <span class="ai-res-value">${esc(p.proposed)}
+          <span class="ai-res-conf">${esc(p.confidence || '')}</span>${p.url ? ` <a class="ai-link" href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ''}</span>
+      </div>`).join('')
+    const tt = r.track_titles || []
+    const trackSection = tt.length
+      ? `<div class="ai-res-section"><div class="ai-res-title">Track Listing</div><div class="ai-tt-list">${tt.map(t =>
+          `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div></div>` : ''
+    const notes = (title, items) => items && items.length
+      ? `<div class="ai-res-section"><div class="ai-res-title">${title}</div>${items.map(v => `<p class="ai-res-note">${esc(v)}</p>`).join('')}</div>` : ''
+    const sources = (r.sources || []).length
+      ? `<div class="ai-res-section"><div class="ai-res-title">Sources</div>${r.sources.map(s => `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''
+    body.innerHTML = `
+      <div class="ai-res-section">
+        <div class="ai-res-title">Metadata Review</div>
+        ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
+        ${props || '<p class="ai-res-empty">No field changes proposed.</p>'}
+      </div>
+      ${trackSection}
+      ${notes('Verify', r.verify_items)}
+      ${notes('Provenance', r.provenance_notes)}
+      ${sources}`
   }
 
   /** Recording detail — split panel: tracks + info file */
@@ -1245,31 +1403,27 @@ const App = (() => {
         ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
       const flagChips = (t.flags || []).map(f =>
         `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`).join('')
-      const noteText = t.notes
-        ? `<span class="track-note-inline truncate" title="${esc(t.notes)}">${esc(t.notes)}</span>` : ''
-      return `${esc(t.title)}${officialBadge}${flagChips ? ' ' + flagChips : ''}${noteText ? ' ' + noteText : ''}`
+      return `<span class="track-title-text">${esc(t.title)}</span>${officialBadge}${flagChips ? ' ' + flagChips : ''}`
     }
 
     // Flat track list — no disc/set grouping. Right-click a row to quick-edit
     // its flags and note (admin/archivist).
-    const editHint = canEditLibrary() ? ' title="Right-click to edit flags & note"' : ''
+    const canEdit  = canEditLibrary()
+    const editHint = canEdit ? ' title="Click title to rename · right-click for songwriter, note & flags"' : ''
     const trackRows = (rec.tracks || []).map(t => {
       const isPlaying  = t.id === state.playingTrackId
       const playingCls = isPlaying ? ' playing' : ''
       const playIcon   = isPlaying ? '▶' : '▷'
-      const songwriterInline = t.songwriter
-        ? `<span class="track-songwriter-inline truncate">${esc(t.songwriter)}</span>` : ''
       return `
         <div class="track-row${playingCls}" data-track-id="${t.id}" data-flags="${(t.flags||[]).join(',')}"${editHint}>
           <span class="track-play">${playIcon}</span>
           <span class="track-num">${String(t.track_number || '').padStart(2,'0')}</span>
           <span class="track-title-wrap">
-            <span class="track-title truncate">${trackTitleInnerHtml(t)}</span>
+            <span class="track-title truncate${canEdit ? ' track-title--editable' : ''}">${trackTitleInnerHtml(t)}</span>
           </span>
-          <span class="track-meta-right">
-            ${songwriterInline}
-            <span class="track-dur">${fmtDuration(t.duration)}</span>
-          </span>
+          <span class="track-note-col truncate" title="${esc(t.notes || '')}">${esc(t.notes || '')}</span>
+          <span class="track-sw-col truncate" title="${esc(t.songwriter || '')}">${esc(t.songwriter || '')}</span>
+          <span class="track-dur">${fmtDuration(t.duration)}</span>
         </div>`
     }).join('')
 
@@ -1390,32 +1544,34 @@ const App = (() => {
       <div class="rec-detail-header">
         <div class="rec-header-left">
           <div class="breadcrumb" id="back-btn">${backLabel}</div>
-          <h2>${esc(perfName)}</h2>
-          <div class="rec-date-line">${dateLineHtml}</div>
-          ${rec.notes ? `<div class="rec-header-notes">${esc(rec.notes)}</div>` : ''}
+          <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
+          <div class="rec-date-line" id="rec-date-line">
+            <span class="rec-f rec-f-date${canEdit ? ' pp-editable' : ''}" id="rec-f-date">${dateStr ? esc(dateStr) : (canEdit ? '<span class="pp-empty">Add date</span>' : '')}</span>
+            <span class="rec-dot">·</span>
+            ${canEdit
+              ? `<span class="rec-f rec-f-venue pp-editable" id="rec-f-venue">${venueStr ? esc(venueStr) : '<span class="pp-empty">Add venue</span>'}</span>`
+              : (venueHtml || '')}
+            ${locStr ? `<span class="rec-dot">·</span><span class="rec-f-loc">${esc(locStr)}</span>` : ''}
+          </div>
+          <div class="rec-artists-row" id="rec-artists"></div>
+          <div class="rec-header-notes${canEdit ? ' pp-editable' : ''}${rec.notes ? '' : ' pp-empty'}" id="rec-notes"${canEdit ? ' title="Click to edit notes"' : ''}>${rec.notes ? esc(rec.notes) : (canEdit ? 'Add notes…' : '')}</div>
           ${rec.is_official ? `<div class="badge-row"><span class="badge-official" title="Contains officially released material">© Official</span></div>` : ''}
         </div>
-        <div class="rec-header-right">${collectionArea}${headerMetaRows || ''}</div>
+        <div class="rec-header-right">
+          ${collectionArea}${headerMetaRows || ''}
+        </div>
       </div>
       <canvas id="rec-waveform" class="rec-waveform-canvas"
         title="${hasAnalysis ? 'Click to seek' : 'Click Analyze Audio to generate waveform'}">
       </canvas>
       <div class="action-bar">
-        <!-- Left: playback actions -->
+        <!-- Playback actions only — editing/admin actions live at the bottom -->
         <button class="btn btn-ghost btn-sm" id="btn-play-all">▶ Play All</button>
         <label class="skip-toggle skip-toggle--action" title="Skip announcements, banter &amp; tuning from queue">
           <input type="checkbox" class="skip-filter-cb" id="skip-filter-action" ${state.skipNonMusic ? 'checked' : ''} />
           <span class="skip-toggle-track"></span>
           <span class="skip-toggle-label">Skip Non-Music</span>
         </label>
-        <!-- Right: editing actions -->
-        <div class="action-bar-right">
-          <button class="btn btn-ghost btn-sm" id="btn-edit-meta">Edit Recording</button>
-          <button class="btn btn-ghost btn-sm" id="btn-analyze-audio">Re-Analyze</button>
-          <button class="btn btn-sm ${stagedCount > 0 ? 'btn-staged' : 'btn-ghost'}" id="btn-write-tags">Write Tags to Files</button>
-          <span class="action-bar-sep"></span>
-          <button class="btn btn-danger btn-sm" id="btn-delete-rec" title="Delete this recording from the database (files are not removed)">Delete</button>
-        </div>
       </div>
       <div class="detail-panels" id="detail-panels">
         <div class="track-panel" id="track-panel">
@@ -1460,11 +1616,17 @@ const App = (() => {
               </div>
             </div>
 
-            <!-- Debug pane (DEV_MODE only) -->
-            <div class="slide-pane" id="sp-debug">
-              <div class="slide-pane-header">Debug <span class="dbg-badge dbg-badge-dev">DEV</span></div>
-              <div class="slide-pane-scroll" id="sp-debug-body"></div>
-            </div>
+            ${canEdit ? `
+            <!-- AI Assist pane (results of a web-research pass) -->
+            <div class="slide-pane" id="sp-ai">
+              <div class="slide-pane-header">AI Assist <span class="ai-assist-note">Not saved — update fields yourself with anything useful.</span></div>
+              <div class="slide-pane-scroll"><div class="ai-results" id="ai-results">
+                <div class="ai-assist-cta">
+                  <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
+                  <div class="ai-assist-hint">Research the web to verify and fill this recording's metadata.</div>
+                </div>
+              </div></div>
+            </div>` : ''}
 
           </div>
 
@@ -1473,11 +1635,18 @@ const App = (() => {
             <button class="slide-tab" data-pane="info">Info File</button>
             <button class="slide-tab" data-pane="filetags">File Tags</button>
             <button class="slide-tab" data-pane="spectrogram">Spectrogram</button>
-            ${window.fluxDebug ? `<button class="slide-tab slide-tab--dev" data-pane="debug">Debug</button>` : ''}
+            ${canEdit ? `<button class="slide-tab slide-tab--ai" data-pane="ai">AI Assist</button>` : ''}
           </div>
         </div>
 
       </div>
+      ${canEdit ? `
+      <div class="rec-bottom-actions">
+        <button class="btn btn-ghost btn-sm" id="btn-analyze-audio">Re-Analyze</button>
+        <button class="btn btn-sm ${stagedCount > 0 ? 'btn-staged' : 'btn-ghost'}" id="btn-write-tags">Write Tags to Files</button>
+        <button class="btn btn-sm ${rec.is_official ? 'btn-staged' : 'btn-ghost'}" id="btn-official" title="Mark this recording (and its tracks) as an official release">${rec.is_official ? '✓ Official Release' : 'Mark as Official Release'}</button>
+        <button class="btn btn-danger btn-sm" id="btn-delete-rec" title="Delete this recording from the database (files are not removed)">Delete Recording</button>
+      </div>` : ''}
       </div>
     `)
 
@@ -1580,23 +1749,64 @@ const App = (() => {
     }
 
     // ── Quick edit: right-click a track → flags + note popup ──────────────────
+    function markStaged() {
+      const wt = document.getElementById('btn-write-tags')
+      wt?.classList.add('btn-staged'); wt?.classList.remove('btn-ghost')
+    }
     function refreshTrackRow(t) {
       const row = mainContent.querySelector(`.track-row[data-track-id="${t.id}"]`)
       if (!row) return
       const titleEl = row.querySelector('.track-title')
       if (titleEl) titleEl.innerHTML = trackTitleInnerHtml(t)
+      const noteEl = row.querySelector('.track-note-col')
+      if (noteEl) { noteEl.textContent = t.notes || ''; noteEl.title = t.notes || '' }
+      const swEl = row.querySelector('.track-sw-col')
+      if (swEl) { swEl.textContent = t.songwriter || ''; swEl.title = t.songwriter || '' }
       row.dataset.flags = (t.flags || []).join(',')
       applySkipFilter()
     }
+    // Click a track title → inline rename (auto-saves on Enter/blur).
+    function startTrackTitleEdit(titleEl, t) {
+      if (titleEl.querySelector('input')) return
+      titleEl.innerHTML = `<input class="track-title-input" type="text" value="${esc(t.title || '')}" />`
+      const input = titleEl.querySelector('input')
+      input.focus(); input.select()
+      let done = false
+      const finish = async (save) => {
+        if (done) return; done = true
+        if (save) {
+          const v = input.value.trim()
+          if (v && v !== t.title) {
+            t.title = v
+            try { await API.tracks.update(t.id, { title: v }); markStaged() }
+            catch (e) { console.error('Track rename failed:', e) }
+          }
+        }
+        titleEl.innerHTML = trackTitleInnerHtml(t)
+      }
+      input.addEventListener('click', e => e.stopPropagation())
+      input.addEventListener('keydown', e => {
+        e.stopPropagation()
+        if (e.key === 'Enter') { e.preventDefault(); finish(true) }
+        else if (e.key === 'Escape') { finish(false) }
+      })
+      input.addEventListener('blur', () => finish(true))
+    }
     if (canEditLibrary()) {
       mainContent.querySelectorAll('.track-row[data-track-id]').forEach(row => {
+        const track = rec.tracks.find(t => t.id === parseInt(row.dataset.trackId))
+        if (!track) return
+        // Click the title → rename (don't start playback)
+        row.querySelector('.track-title--editable')?.addEventListener('click', ev => {
+          ev.stopPropagation()
+          startTrackTitleEdit(row.querySelector('.track-title'), track)
+        })
+        // Right-click anywhere on the row → songwriter / note / flags popup
         row.addEventListener('contextmenu', ev => {
           ev.preventDefault()
-          const track = rec.tracks.find(t => t.id === parseInt(row.dataset.trackId))
-          if (!track) return
           openTrackMenu(track, ev.clientX, ev.clientY, {
             onChange: async (t) => {
-              try { await API.tracks.update(t.id, { flags: t.flags, songwriter: t.songwriter, notes: t.notes }) }
+              try { await API.tracks.update(t.id, { flags: t.flags, songwriter: t.songwriter, notes: t.notes }); markStaged() }
               catch (e) { console.error(e) }
               refreshTrackRow(t)
             },
@@ -1608,10 +1818,141 @@ const App = (() => {
     // Collection tags (add / remove)
     wireRecCollectionArea(recordingId)
 
-    // Edit metadata
-    document.getElementById('btn-edit-meta')?.addEventListener('click', () => {
-      renderRecordingEdit(recordingId, rec, perf)
-    })
+    // ── Inline header editing (performer / date / venue / artists / notes) ─────
+    if (canEdit && perf) {
+      const reload = () => renderRecordingView(recordingId)
+
+      // Performer name → reassign (autocomplete; Enter commits typed name).
+      const nameEl = document.getElementById('rec-perf-name')
+      nameEl?.addEventListener('click', () => {
+        if (nameEl.querySelector('input')) return
+        nameEl.innerHTML = `<span class="artist-picker-wrap" style="display:inline-block; min-width:220px">
+          <input type="text" class="pp-inline-input" id="rec-perf-input" value="${esc(perf.performer || '')}" autocomplete="off" />
+          <div class="artist-dropdown" id="rec-perf-dd" style="display:none"></div></span>`
+        const input = document.getElementById('rec-perf-input')
+        input.focus(); input.select()
+        let committed = false
+        const commit = async name => {
+          if (committed) return; committed = true
+          name = (name || '').trim()
+          if (name && name.toLowerCase() !== (perf.performer || '').toLowerCase()) {
+            try { await API.performances.update(perf.id, { performer_name: name }); invalidateDims('performers', 'artists') }
+            catch (e) { alert('Failed: ' + e.message) }
+          }
+          reload()
+        }
+        wirePickerDropdown(input, document.getElementById('rec-perf-dd'), API.performers.search,
+          ({ name }) => commit(name), 'Create new performer')
+        input.addEventListener('keydown', e => {
+          e.stopPropagation()
+          if (e.key === 'Enter') { e.preventDefault(); commit(input.value) }
+          else if (e.key === 'Escape') { committed = true; reload() }
+        })
+      })
+
+      // Date → inline Year / Month / Day
+      const dateEl = document.getElementById('rec-f-date')
+      dateEl?.addEventListener('click', () => {
+        if (dateEl.querySelector('input')) return
+        dateEl.innerHTML = `
+          <input type="number" class="rec-date-input" id="rec-d-y" placeholder="YYYY" value="${perf.start_year || ''}" min="1900" max="2099" style="width:52px" />
+          <input type="number" class="rec-date-input" id="rec-d-m" placeholder="MM" value="${perf.start_month || ''}" min="1" max="12" style="width:38px" />
+          <input type="number" class="rec-date-input" id="rec-d-d" placeholder="DD" value="${perf.start_day || ''}" min="1" max="31" style="width:38px" />`
+        document.getElementById('rec-d-y').focus()
+        let done = false
+        const commit = async () => {
+          if (done) return; done = true
+          const y = parseInt(document.getElementById('rec-d-y').value) || null
+          const m = parseInt(document.getElementById('rec-d-m').value) || null
+          const d = parseInt(document.getElementById('rec-d-d').value) || null
+          try { await API.performances.update(perf.id, { start_year: y, start_month: m, start_day: d }) }
+          catch (e) { alert('Failed: ' + e.message) }
+          reload()
+        }
+        dateEl.querySelectorAll('input').forEach(inp => {
+          inp.addEventListener('keydown', e => {
+            e.stopPropagation()
+            if (e.key === 'Enter') { e.preventDefault(); commit() }
+            else if (e.key === 'Escape') { done = true; reload() }
+          })
+        })
+        // commit when focus leaves the whole date group
+        dateEl.addEventListener('focusout', () => setTimeout(() => {
+          if (!dateEl.contains(document.activeElement)) commit()
+        }, 0))
+      })
+
+      // Venue → picker (search existing / create new)
+      const venueEl = document.getElementById('rec-f-venue')
+      venueEl?.addEventListener('click', () => {
+        if (venueEl.querySelector('input')) return
+        venueEl.innerHTML = `<span class="venue-picker-wrap" style="display:inline-block; min-width:200px">
+          <input type="text" class="pp-inline-input" id="rec-venue-input" value="${esc(perf.venue_name || '')}" autocomplete="off" />
+          <div class="venue-dropdown" id="rec-venue-dd" style="display:none"></div></span>`
+        const input = document.getElementById('rec-venue-input')
+        input.focus(); input.select()
+        let committed = false
+        const commitVenue = async ({ id, name }) => {
+          if (committed) return; committed = true
+          try {
+            let venueId = id
+            if (!venueId && name) { const c = await API.venues.create({ name }); venueId = c.id; invalidateDims('venues') }
+            if (venueId) await API.performances.update(perf.id, { venue_id: venueId })
+          } catch (e) { alert('Failed: ' + e.message) }
+          reload()
+        }
+        wireVenuePickerDropdown(input, document.getElementById('rec-venue-dd'), commitVenue)
+        input.addEventListener('keydown', e => {
+          e.stopPropagation()
+          if (e.key === 'Enter') { e.preventDefault(); commitVenue({ id: null, name: input.value.trim() }) }
+          else if (e.key === 'Escape') { committed = true; reload() }
+        })
+      })
+
+      // Notes → inline multiline (recording-level)
+      makeInlineEditable(document.getElementById('rec-notes'), {
+        multiline: true, placeholder: 'Add notes…',
+        get: () => rec.notes || '',
+        onSave: async v => {
+          v = v.trim(); rec.notes = v
+          try { await API.recordings.update(recordingId, { notes: v || null, change_note: 'Quick edit' }); markStaged() }
+          catch (e) { alert('Failed: ' + e.message) }
+        },
+      })
+
+      // Artists association pill row
+      let recMembers = (perf.members || []).map(m => ({ id: m.id, name: m.name }))
+      const persistMembers = async () => {
+        try { await API.performances.update(perf.id, { members: recMembers.map(m => m.name) }); invalidateDims('artists') }
+        catch (e) { alert('Failed: ' + e.message) }
+      }
+      function renderRecArtists() {
+        const box = document.getElementById('rec-artists')
+        if (!box) return
+        box.innerHTML =
+          `<span class="rec-artists-label">Artists</span>` +
+          recMembers.map((m, i) => `<span class="member-chip">${esc(m.name)} <span class="member-chip-x" data-i="${i}" title="Remove">×</span></span>`).join('') +
+          `<span class="artist-picker-wrap rec-art-add">
+             <input type="text" class="member-input rec-art-input" autocomplete="off" placeholder="Add an artist…" />
+             <div class="artist-dropdown" id="rec-art-dd" style="display:none"></div>
+           </span>`
+        box.querySelectorAll('.member-chip-x').forEach(x =>
+          x.addEventListener('click', async () => { recMembers.splice(parseInt(x.dataset.i), 1); await persistMembers(); renderRecArtists() }))
+        const input = box.querySelector('.rec-art-input')
+        wirePickerDropdown(input, document.getElementById('rec-art-dd'), API.artists.search,
+          async ({ name }) => {
+            name = (name || '').trim()
+            if (name && !recMembers.some(m => m.name.toLowerCase() === name.toLowerCase())) {
+              recMembers.push({ name }); await persistMembers()
+            }
+            renderRecArtists()
+          }, 'Create new artist')
+      }
+      renderRecArtists()
+    }
+
+    // AI Assist (top-right) — research the web to verify/fill this recording.
+    document.getElementById('btn-ai-assist')?.addEventListener('click', () => startRecAiAssist(recordingId, rec))
 
     // Analyze Audio — run Librosa analysis on all tracks
     document.getElementById('btn-analyze-audio')?.addEventListener('click', async () => {
@@ -1672,6 +2013,22 @@ const App = (() => {
       }
     })
 
+    // Mark / unmark as official release (cascades to tracks server-side).
+    document.getElementById('btn-official')?.addEventListener('click', async () => {
+      const btn = document.getElementById('btn-official')
+      const next = !rec.is_official
+      btn.disabled = true
+      try {
+        await API.recordings.update(recordingId, { is_official: next, change_note: 'Official flag' })
+        rec.is_official = next
+        btn.classList.toggle('btn-staged', next)
+        btn.classList.toggle('btn-ghost', !next)
+        btn.textContent = next ? '✓ Official Release' : 'Mark as Official Release'
+        markStaged()
+      } catch (e) { alert('Failed: ' + e.message) }
+      finally { btn.disabled = false }
+    })
+
     document.getElementById('btn-delete-rec')?.addEventListener('click', async () => {
       if (!confirm('Delete this recording from the database?\n\nAudio files on disk are not removed.')) return
       const btn = document.getElementById('btn-delete-rec')
@@ -1697,47 +2054,37 @@ const App = (() => {
       if (!panel) return
       let activePane = null
 
+      function openPane(pane) {
+        panel.classList.add('open')
+        document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
+        document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
+        document.getElementById(`sp-${pane}`)?.classList.add('active')
+        document.querySelector(`.slide-tab[data-pane="${pane}"]`)?.classList.add('active')
+        activePane = pane
+        if (pane === 'spectrogram' && defaultTrackId) {
+          const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
+          loadSpectrogram(defaultTrackId, defaultTrack?.title)
+        }
+        if (pane === 'filetags') loadFileTags(recordingId)
+      }
+
       document.querySelectorAll('.slide-tab').forEach(tab => {
         tab.addEventListener('click', () => {
           const pane = tab.dataset.pane
-          const isOpen = panel.classList.contains('open')
-
-          if (isOpen && activePane === pane) {
+          if (panel.classList.contains('open') && activePane === pane) {
             // Same tab clicked again → collapse
             panel.classList.remove('open')
             document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
             document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
-            if (activePane === 'debug') window.fluxDebug?.detach()
             activePane = null
           } else {
-            // Open/switch pane
-            panel.classList.add('open')
-            document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
-            document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
-            const paneEl = document.getElementById(`sp-${pane}`)
-            if (paneEl) paneEl.classList.add('active')
-            tab.classList.add('active')
-            activePane = pane
-
-            // Lazy-load spectrogram the first time the tab opens
-            if (pane === 'spectrogram' && defaultTrackId) {
-              const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
-              loadSpectrogram(defaultTrackId, defaultTrack?.title)
-            }
-
-            // Load on-disk Vorbis tags each time the File Tags tab opens
-            // (re-fetch so it reflects the latest "Write Tags to Files").
-            if (pane === 'filetags') loadFileTags(recordingId)
-
-            // Mount/refresh debug panel
-            if (pane === 'debug') {
-              window.fluxDebug?.attach(document.getElementById('sp-debug-body'))
-            } else {
-              // Not navigating away from panel itself — just switching panes
-            }
+            openPane(pane)
           }
         })
       })
+
+      // Default: Info File open.
+      openPane('info')
     })()
 
     // ── Waveform canvas — start RAF loop ────────────────────────────────────
@@ -2187,10 +2534,11 @@ const App = (() => {
     try {
       const scan        = await API.recordings.scan(item.path)
       ingest.scan       = scan
-      ingest.step       = 'review'  // set BEFORE hash change — bypasses reset guard
+      ingest.step       = 'review'
       ingest.folderPath = item.path
       ingest.form       = {}
       ingest.tracks     = []
+      ingest._resume    = true   // one-shot: tell renderIngestView to resume here
       window.location.hash = '#/ingest'
     } catch (err) {
       if (btn) { btn.disabled = false; btn.textContent = 'Review →' }
@@ -2205,13 +2553,18 @@ const App = (() => {
   function renderIngestView() {
     setActiveNav('ingest')
     setActiveArtist(null)
-    // Reset to folder step when arriving fresh or after a completed ingest
-    if (ingest.step === 'folder' || ingest.step === 'success' || !ingest.scan) {
+    // Fresh navigation to Add Recording always starts with an empty form. The one
+    // exception is Batch Import opening a pre-scanned folder, which sets a
+    // one-shot _resume flag so the in-progress review isn't wiped.
+    if (ingest._resume) {
+      ingest._resume = false
+    } else {
       ingest.step       = 'folder'
       ingest.scan       = null
       ingest.folderPath = null
       ingest.form       = {}
       ingest.tracks     = []
+      ingest.aiResult   = null
     }
     renderIngestStep()
   }
@@ -2492,12 +2845,18 @@ const App = (() => {
     }).join('')
     menu.innerHTML = `
       <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
+      <div class="et-detail-grid2">
+        <div class="et-detail-field">
+          <label>Note</label>
+          <textarea class="track-qmenu-note" placeholder="Add a note…">${esc(track.notes || '')}</textarea>
+        </div>
+        <div class="et-detail-field">
+          <label>Songwriter</label>
+          <input class="track-qmenu-songwriter" type="text" placeholder="Songwriter…" value="${esc(track.songwriter || '')}" />
+        </div>
+      </div>
       <div class="track-qmenu-label">Flags</div>
-      <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>
-      <div class="track-qmenu-label">Songwriter</div>
-      <input class="track-qmenu-songwriter" type="text" placeholder="Songwriter…" value="${esc(track.songwriter || '')}" />
-      <div class="track-qmenu-label">Note</div>
-      <textarea class="track-qmenu-note" placeholder="Add a note…">${esc(track.notes || '')}</textarea>`
+      <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>`
     document.body.appendChild(menu)
 
     // Position at cursor, clamped to the viewport
@@ -2526,6 +2885,9 @@ const App = (() => {
       if (changed) onChange(track)
     }
     menu._commit = commit
+    // Auto-save on complete: commit when the field loses focus, and on Enter.
+    swEl.addEventListener('blur', commit)
+    noteEl.addEventListener('blur', commit)
     swEl.addEventListener('keydown', e => {
       e.stopPropagation()
       if (e.key === 'Enter') { e.preventDefault(); commit() }
@@ -3655,10 +4017,7 @@ const App = (() => {
           <div class="confirm-folder-name">${esc(folderName)}</div>
           <div class="confirm-row" style="margin-top:10px; border-top:none">
             <span class="label">File behavior</span>
-            <div class="behavior-toggle">
-              <button class="behavior-btn ${ingest.behavior === 'copy' ? 'active' : ''}" data-beh="copy">Copy files</button>
-              <button class="behavior-btn ${ingest.behavior === 'move' ? 'active' : ''}" data-beh="move">Move files</button>
-            </div>
+            <span class="value">Copy files <span style="color:var(--t3)">— originals stay where they are</span></span>
           </div>
         </div>
 
@@ -3725,15 +4084,6 @@ const App = (() => {
         </div>
       </div>`)
 
-    // Behavior toggle
-    mainContent.querySelectorAll('.behavior-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        ingest.behavior = btn.dataset.beh
-        mainContent.querySelectorAll('.behavior-btn').forEach(b => b.classList.remove('active'))
-        btn.classList.add('active')
-      })
-    })
-
     document.getElementById('btn-back-tracks').addEventListener('click', () => {
       ingest.step = 'review'
       renderIngestStep()
@@ -3749,7 +4099,7 @@ const App = (() => {
       const payload = {
         source_folder_path: ingest.folderPath,
         ...ingest.form,
-        behavior: ingest.behavior,   // 'copy' | 'move' — honored by the backend
+        behavior: 'copy',   // always copy — never move/delete the user's originals
         tracks: ingest.tracks,
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
@@ -3757,9 +4107,37 @@ const App = (() => {
         members: (ingest.form.members || []).map(m => m.name),
       }
 
+      // Progress UI under the button (copy can take a while for big folders)
+      const actions = btn.closest('.ingest-actions')
+      let prog = document.getElementById('confirm-progress')
+      if (!prog) {
+        prog = document.createElement('div')
+        prog.id = 'confirm-progress'
+        prog.className = 'confirm-progress'
+        prog.innerHTML = `<div class="confirm-progress-bar"><div class="confirm-progress-fill" id="confirm-progress-fill"></div></div>
+                          <div class="confirm-progress-label" id="confirm-progress-label">Preparing…</div>`
+        actions?.parentNode.insertBefore(prog, actions.nextSibling)
+      }
+      const fill  = document.getElementById('confirm-progress-fill')
+      const label = document.getElementById('confirm-progress-label')
+      const fmtMB = b => b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB'
+
       try {
-        const result = await API.ingest.confirm(payload)
-        ingest.step     = 'success'
+        const { job_id } = await API.ingest.confirm(payload)
+        const sleep = ms => new Promise(r => setTimeout(r, ms))
+        let result = null
+        while (true) {
+          await sleep(600)
+          const s = await API.ingest.confirmStatus(job_id)
+          if (s.status === 'running') {
+            const pct = s.total ? Math.min(100, Math.round(100 * s.copied / s.total)) : 0
+            if (fill)  fill.style.width = pct + '%'
+            if (label) label.textContent = s.total ? `Copying files… ${pct}% (${fmtMB(s.copied)} / ${fmtMB(s.total)})` : 'Copying files…'
+          } else if (s.status === 'done') { result = s.result; break }
+          else if (s.status === 'error')  { throw new Error(s.error) }
+        }
+        if (fill) fill.style.width = '100%'
+        ingest.step        = 'success'
         ingest._lastResult = result
         renderIngestStep()
       } catch (e) {
@@ -3767,6 +4145,7 @@ const App = (() => {
         errEl.style.display = 'block'
         btn.disabled = false
         btn.textContent = 'Add to library'
+        prog?.remove()
       }
     })
   }
@@ -3789,12 +4168,11 @@ const App = (() => {
       </div>`)
 
     document.getElementById('btn-view-recording').addEventListener('click', () => {
-      if (result.artist_id) {
-        // Refresh artist list then navigate
-        loadArtistList().then(() => {
-          window.location.hash = `#/recording/${result.recording_id}`
-        })
-      }
+      if (!result.recording_id) return
+      // Refresh the sidebar (new performer/venue/artist may exist) then navigate.
+      loadArtistList().then(() => {
+        window.location.hash = `#/recording/${result.recording_id}`
+      })
     })
 
     document.getElementById('btn-add-another').addEventListener('click', () => {
@@ -3806,464 +4184,6 @@ const App = (() => {
       ingest.tracks = []
       renderIngestStep()
       loadArtistList()  // refresh sidebar counts
-    })
-  }
-
-  // ── Recording metadata editor ──────────────────────────────────────────────
-
-  function renderRecordingEdit(recordingId, rec, perf) {
-    const backHash  = state.selectedArtist ? `#/artist/${state.selectedArtist.id}` : '#/'
-    const perfName  = perf?.performer || ''
-    const dateStr   = perf ? fmtDateLong(perf.start_year, perf.start_month, perf.start_day) : ''
-    const venueStr  = perf?.venue_name || ''
-    const locStr    = perf ? fmtLocation(perf.city, perf.state, perf.country) : ''
-    const dateLine  = [dateStr, venueStr, locStr].filter(Boolean).join(' · ')
-
-    // Track rows — title + is_official, with expandable optional detail section
-    const trackRows = (rec.tracks || []).map(t => {
-      const flagPills = TRACK_FLAGS.map(f => {
-        const active = (t.flags || []).includes(f.key)
-        return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" data-tid="${t.id}" type="button">${f.label}</button>`
-      }).join('')
-      const isPlaying  = t.id === state.playingTrackId
-      const playIcon   = isPlaying ? '▶' : '▷'
-      return `
-        <tr class="et-row${isPlaying ? ' playing' : ''}" data-id="${t.id}">
-          <td class="et-play-cell"><button class="et-play" data-tid="${t.id}" type="button" title="Play this track">${playIcon}</button></td>
-          <td class="num">${String(t.track_number || '').padStart(2,'0')}</td>
-          <td><input class="et-title" data-id="${t.id}" type="text" value="${esc(t.title)}" /></td>
-          <td class="dur">${fmtDuration(t.duration)}</td>
-          <td class="et-expand-cell"><button class="et-expand-btn" data-id="${t.id}" type="button" title="Track details">+</button></td>
-        </tr>
-        <tr class="et-detail-row" id="et-detail-${t.id}" style="display:none">
-          <td colspan="5">
-            <div class="et-detail-body">
-              <div class="et-detail-label">Track details</div>
-              <div class="et-detail-grid2">
-                <div class="et-detail-field">
-                  <label>Track notes</label>
-                  <textarea class="et-track-notes" data-id="${t.id}" style="min-height:36px">${esc(t.notes || '')}</textarea>
-                </div>
-                <div class="et-detail-field">
-                  <label>Songwriter</label>
-                  <input type="text" class="et-songwriter" data-id="${t.id}" value="${esc(t.songwriter || '')}" placeholder="" />
-                </div>
-              </div>
-              <div class="et-detail-field" style="margin-top:6px">
-                <label>Flags</label>
-                <div class="flag-pill-row">${flagPills}</div>
-              </div>
-              <div class="et-detail-field" style="margin-top:6px">
-                <label class="check-label check-inline" title="Mark this track as an official release">
-                  <input type="checkbox" class="et-official" data-id="${t.id}" ${t.is_official ? 'checked' : ''} />
-                  <span>Official release</span>
-                </label>
-              </div>
-            </div>
-          </td>
-        </tr>`
-    }).join('')
-
-    // Info file is editable in this view
-    const infoTextarea = `<textarea id="e-info-content" class="info-file-textarea">${esc(rec.info_file_content || '')}</textarea>`
-
-    // Venue: initial display value and stored ID for the picker
-    const initVenueName = perf?.venue_name || ''
-    const initVenueId   = perf?.venue_id   || ''
-
-    // Back label: "← Performer · Date · Venue" — same compact style as recording detail breadcrumb
-    const editBreadcrumb = ['←', perfName, dateStr, venueStr].filter(Boolean).join(' · ')
-
-    // Recording title — recordings carry no stored title, so identify by
-    // performer · date · venue (+ source), matching the folder-name convention.
-    // "Other" is a meaningless source label, so it's omitted from the title.
-    const recSrc     = (rec.source && rec.source !== 'Other') ? ` (${rec.source})` : ''
-    const recTitle   = [perfName, dateStr, venueStr].filter(Boolean).join(' · ') + recSrc
-
-    setMainHTML(`
-      <!-- Header: recording being edited -->
-      <div class="edit-header-bar">
-        <h2 class="edit-header-title">Editing ${esc(recTitle)}</h2>
-      </div>
-      <!-- Compact single-line edit bar -->
-      <div class="action-bar edit-mode-bar">
-        <span class="breadcrumb" id="back-btn">${esc(editBreadcrumb)}</span>
-        <div style="margin-left:auto; display:flex; gap:8px; align-items:center">
-          <div id="edit-error" style="color:var(--red); font-size:11px; display:none"></div>
-          <button class="btn btn-ghost btn-sm" id="btn-cancel-edit">Cancel</button>
-          <button class="btn btn-primary btn-sm" id="btn-save-edit">Save changes</button>
-        </div>
-      </div>
-
-      <div class="detail-panels" id="detail-panels" style="height: calc(100vh - var(--player-h) - 48px);">
-
-        <div class="track-panel" id="track-panel" style="overflow-y:auto; padding:14px 20px 32px">
-
-          <!-- Performance fields -->
-          <div class="rev-section-title" style="margin-bottom:10px">Performance</div>
-
-          <div class="ingest-field-grid" style="grid-template-columns:1fr 72px 52px 52px; gap:10px; margin-bottom:10px">
-            <div class="ingest-field">
-              <label>Performer</label>
-              <div class="artist-picker-wrap">
-                <input type="text" id="e-artist" value="${esc(perf?.performer||'')}" autocomplete="off"
-                  title="Change to reassign this recording to a different act" />
-                <div class="artist-dropdown" id="e-artist-dropdown" style="display:none"></div>
-              </div>
-            </div>
-            <div class="ingest-field">
-              <label>Year</label>
-              <input type="number" id="e-year" value="${perf?.start_year||''}" min="1900" max="2099" />
-            </div>
-            <div class="ingest-field">
-              <label>Month</label>
-              <input type="number" id="e-month" value="${perf?.start_month||''}" min="1" max="12" />
-            </div>
-            <div class="ingest-field">
-              <label>Day</label>
-              <input type="number" id="e-day" value="${perf?.start_day||''}" min="1" max="31" />
-            </div>
-          </div>
-
-          <!-- Members (the Artists in the act) -->
-          <div class="ingest-field" style="margin-bottom:16px">
-            <label>Artists <span style="color:var(--t3); font-weight:400">— the people in this act</span></label>
-            <div class="members-field" id="e-members-field">
-              <div class="artist-picker-wrap" style="flex:1; min-width:120px">
-                <input type="text" id="e-member-input" class="member-input" autocomplete="off" placeholder="Add an artist…" />
-                <div class="artist-dropdown" id="e-member-dropdown" style="display:none"></div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Venue live-search picker -->
-          <div class="ingest-field" style="margin-bottom:16px">
-            <label>Venue</label>
-            <div class="venue-picker-wrap" style="max-width:420px">
-              <input type="text" id="e-venue-name" value="${esc(initVenueName)}" autocomplete="off" style="width:100%" />
-              <input type="hidden" id="e-venue-id" value="${esc(String(initVenueId))}" />
-              <div class="venue-dropdown" id="venue-dropdown" style="display:none"></div>
-            </div>
-            <div id="venue-location-hint" style="font-size:12px; color:var(--t2); margin-top:5px; min-height:15px">${
-              esc(fmtLocation(perf?.city, perf?.state, perf?.country))
-            }</div>
-          </div>
-
-          <!-- Recording fields — all on one row -->
-          <div class="rev-section-title" style="margin-bottom:10px">Recording</div>
-
-          <div class="ingest-field-grid" style="grid-template-columns:76px 104px minmax(120px,1.5fr) 58px 72px; gap:10px; margin-bottom:10px">
-            <div class="ingest-field">
-              <label>Source</label>
-              <select id="e-source">
-                <option value="">—</option>
-                ${['SBD','AUD','MTX','FM','Other'].map(s =>
-                  `<option value="${s}" ${rec.source === s ? 'selected':''}>${s}</option>`
-                ).join('')}
-              </select>
-            </div>
-            <div class="ingest-field">
-              <label>Source Detail</label>
-              <input type="text" id="e-modifier" value="${esc(rec.source_modifier||'')}" />
-            </div>
-            <div class="ingest-field">
-              <label>Lineage</label>
-              <input type="text" id="e-lineage" value="${esc(rec.lineage||'')}" />
-            </div>
-            <div class="ingest-field">
-              <label>Quality</label>
-              <input type="text" id="e-quality" value="${esc(rec.quality||'')}" />
-            </div>
-            <div class="ingest-field">
-              <label>Rating <span style="color:var(--t3);font-size:10px">0–100</span></label>
-              <input type="number" id="e-rating" min="0" max="100"
-                     style="width:100%"
-                     value="${rec.rating != null ? rec.rating : ''}"
-                     placeholder="—" />
-            </div>
-          </div>
-
-          <div class="rev-section-title" style="margin-bottom:8px">Tracks</div>
-          <table class="track-review-table" style="margin-bottom:16px">
-            <thead>
-              <tr>
-                <th style="width:24px"></th>
-                <th style="width:32px">#</th>
-                <th>Title</th>
-                <th style="width:44px">Time</th>
-                <th style="width:24px"></th>
-              </tr>
-            </thead>
-            <tbody>${trackRows}</tbody>
-          </table>
-
-          <div class="ingest-field" style="margin-bottom:16px">
-            <label>Notes</label>
-            <textarea id="e-notes" style="min-height:80px">${esc(rec.notes||'')}</textarea>
-          </div>
-
-          <label style="display:flex; align-items:center; gap:8px; color:var(--t3); font-size:11px; margin-top:4px; cursor:pointer">
-            <input type="checkbox" id="e-is-official" ${rec.is_official ? 'checked' : ''} />
-            <span>Official release</span>
-            <span style="color:var(--t3); font-style:italic">— marks recording and all tracks as officially released</span>
-          </label>
-
-        </div>
-
-        <div class="detail-resize-handle" id="detail-divider"></div>
-
-        <!-- Info panel: overflow:hidden so header stays pinned, textarea scrolls itself -->
-        <div class="info-panel" style="display:flex; flex-direction:column; overflow:hidden; flex:1; min-width:0">
-          <div class="info-panel-header info-panel-header--hint" style="position:relative; flex-shrink:0">
-            <span>Info file</span>
-            <span class="info-panel-hint">(click to edit)</span>
-          </div>
-          ${infoTextarea}
-        </div>
-
-      </div>`)
-
-    // Back / cancel — both return to recording view, not artist
-    document.getElementById('back-btn').addEventListener('click', () => {
-      renderRecordingView(recordingId)
-    })
-    document.getElementById('btn-cancel-edit').addEventListener('click', () => {
-      renderRecordingView(recordingId)
-    })
-
-    // Resizable split divider
-    wireResizablePanel(
-      document.getElementById('detail-panels'),
-      document.getElementById('track-panel'),
-      document.getElementById('detail-divider'),
-      180, 200
-    )
-
-    // Enter key on track title → advance to next track
-    const editTitleInputs = [...mainContent.querySelectorAll('.et-title')]
-    editTitleInputs.forEach((el, i) => {
-      el.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault()
-          const next = editTitleInputs[i + 1]
-          if (next) { next.focus(); next.select() }
-        }
-      })
-    })
-
-    // Play buttons — audition a track without leaving the edit view
-    mainContent.querySelectorAll('.et-play').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const tid = parseInt(btn.dataset.tid)
-        const idx = rec.tracks.findIndex(t => t.id === tid)
-        if (idx >= 0) playRecording(recordingId, idx, rec.tracks)
-      })
-    })
-
-    // Track expand buttons — show/hide optional detail row
-    mainContent.querySelectorAll('.et-expand-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const detailRow = document.getElementById(`et-detail-${btn.dataset.id}`)
-        if (!detailRow) return
-        const open = detailRow.style.display !== 'none'
-        detailRow.style.display = open ? 'none' : ''
-        btn.classList.toggle('active', !open)
-        btn.textContent = open ? '+' : '−'
-      })
-    })
-
-    // Flag pill toggles
-    mainContent.querySelectorAll('.flag-pill').forEach(btn => {
-      btn.addEventListener('click', () => btn.classList.toggle('active'))
-    })
-
-    // Recording is_official checkbox → cascade check to all track checkboxes
-    document.getElementById('e-is-official')?.addEventListener('change', function () {
-      if (this.checked) {
-        mainContent.querySelectorAll('.et-official').forEach(cb => { cb.checked = true })
-      }
-    })
-
-    // ── Artist autocomplete (reassignment) ────────────────────────────────────
-    // Performer + Members widget (shared with the Add form). editMembers is read
-    // by the save handler below to send the roster.
-    const editMembers = {
-      members:        (perf?.members || []).map(m => ({ id: m.id, name: m.name })),
-      performer_name: perf?.performer || '',
-      performer_id:   perf?.performer_id || null,
-    }
-    createMembersWidget(editMembers, {
-      performerInput: 'e-artist', performerDropdown: 'e-artist-dropdown',
-      field: 'e-members-field', memberInput: 'e-member-input', memberDropdown: 'e-member-dropdown',
-    }).mount()
-
-    // ── Venue live-search picker ──────────────────────────────────────────────
-    ;(function () {
-      const nameEl     = document.getElementById('e-venue-name')
-      const idEl       = document.getElementById('e-venue-id')
-      const dropEl     = document.getElementById('venue-dropdown')
-      const hintEl     = document.getElementById('venue-location-hint')
-      let   debounce   = null
-
-      function closeDropdown() { dropEl.style.display = 'none'; dropEl.innerHTML = '' }
-
-      function setLocationHint(v) {
-        // v: venue object with city/state/country, or null to clear
-        const loc = v ? fmtLocation(v.city, v.state, v.country) : ''
-        hintEl.textContent = loc
-      }
-
-      function showResults(venues, q) {
-        dropEl.innerHTML = ''
-        const rows = venues.map(v => {
-          const loc = [v.city, v.state].filter(Boolean).join(', ')
-          return `<div class="venue-result" data-id="${v.id}" data-name="${esc(v.name)}">
-            <span class="venue-result-name">${esc(v.name)}</span>
-            ${loc ? `<span class="venue-result-loc">${esc(loc)}</span>` : ''}
-          </div>`
-        }).join('')
-        // Only offer "+ Create" when the typed name doesn't already exist —
-        // no point suggesting creation of a venue that's right there in the list.
-        const exactMatch = venues.some(v => v.name.toLowerCase() === q.toLowerCase())
-        const createRow = (q && !exactMatch)
-          ? `<div class="venue-result venue-result-create" data-id="" data-name="${esc(q)}">+ Create "${esc(q)}"</div>`
-          : ''
-        dropEl.innerHTML = rows + createRow
-        dropEl.style.display = (rows || createRow) ? 'block' : 'none'
-
-        dropEl.querySelectorAll('.venue-result').forEach(el => {
-          el.addEventListener('mousedown', async e => {
-            e.preventDefault()
-            if (el.dataset.id) {
-              // existing venue — fetch full record to show location hint
-              idEl.value   = el.dataset.id
-              nameEl.value = el.dataset.name
-              try {
-                const v = await API.venues.get(parseInt(el.dataset.id))
-                setLocationHint(v)
-              } catch (_) { setLocationHint(null) }
-            } else {
-              // new venue — just set name, confirm endpoint creates it with location
-              nameEl.value = q
-              idEl.value   = ''
-              setLocationHint(null)
-            }
-            closeDropdown()
-          })
-        })
-      }
-
-      nameEl.addEventListener('input', () => {
-        idEl.value = ''          // clear any prior selection when user edits
-        setLocationHint(null)    // clear hint while typing
-        const q = nameEl.value.trim()
-        clearTimeout(debounce)
-        if (q.length < 2) { closeDropdown(); return }
-        debounce = setTimeout(async () => {
-          try {
-            const results = await API.venues.list(q)
-            showResults(results, q)
-          } catch (_) { closeDropdown() }
-        }, 220)
-      })
-
-      nameEl.addEventListener('blur', () => setTimeout(closeDropdown, 200))
-      nameEl.addEventListener('focus', () => {
-        if (nameEl.value.trim().length >= 2) nameEl.dispatchEvent(new Event('input'))
-      })
-    })()
-
-    // Save
-    document.getElementById('btn-save-edit').addEventListener('click', async () => {
-      const btn   = document.getElementById('btn-save-edit')
-      const errEl = document.getElementById('edit-error')
-      btn.disabled = true
-      btn.textContent = 'Saving…'
-      errEl.style.display = 'none'
-
-      try {
-        // 1. Performance fields
-        const venueIdRaw = document.getElementById('e-venue-id').value
-        const perfUpdate = {
-          start_year:  parseInt(document.getElementById('e-year').value)  || null,
-          start_month: parseInt(document.getElementById('e-month').value) || null,
-          start_day:   parseInt(document.getElementById('e-day').value)   || null,
-        }
-        // Artist reassignment — only send when the name actually changed, so we
-        // don't churn the performer chain on every save.
-        const artistName = document.getElementById('e-artist').value.trim()
-        if (artistName && artistName !== (perf?.performer || '')) {
-          perfUpdate.performer_name = artistName
-        }
-        // Members (the act's roster) — always sent; global to the performer.
-        perfUpdate.members = editMembers.members.map(m => m.name)
-        // Always send venue_id: set to int if selected, null if name cleared
-        const venueName = document.getElementById('e-venue-name').value.trim()
-        perfUpdate.venue_id = venueIdRaw ? parseInt(venueIdRaw) : (venueName ? undefined : null)
-        if (perfUpdate.venue_id === undefined) delete perfUpdate.venue_id
-
-        await API.performances.update(rec.performance_id, perfUpdate)
-
-        // 2. Recording fields (is_official cascades to tracks server-side when true)
-        const ratingRaw = document.getElementById('e-rating').value.trim()
-        await API.recordings.update(recordingId, {
-          source:            document.getElementById('e-source').value || null,
-          source_modifier:   document.getElementById('e-modifier').value.trim() || null,
-          lineage:           document.getElementById('e-lineage').value.trim() || null,
-          quality:           document.getElementById('e-quality').value.trim() || null,
-          rating:            ratingRaw !== '' ? parseInt(ratingRaw, 10) : null,
-          notes:             document.getElementById('e-notes').value.trim() || null,
-          info_file_content: document.getElementById('e-info-content').value.trim() || null,
-          is_official:       document.getElementById('e-is-official').checked,
-          change_note:       'Edited via metadata editor',
-        })
-
-        // 3. Tracks — collect title + is_official + songwriter + notes + flags per track
-        const trackMap = {}  // tid → update payload
-        mainContent.querySelectorAll('.et-title').forEach(el => {
-          const id = parseInt(el.dataset.id)
-          trackMap[id] = trackMap[id] || {}
-          trackMap[id].title = el.value.trim() || null
-        })
-        mainContent.querySelectorAll('.et-official').forEach(el => {
-          const id = parseInt(el.dataset.id)
-          trackMap[id] = trackMap[id] || {}
-          trackMap[id].is_official = el.checked
-        })
-        mainContent.querySelectorAll('.et-songwriter').forEach(el => {
-          const id = parseInt(el.dataset.id)
-          trackMap[id] = trackMap[id] || {}
-          trackMap[id].songwriter = el.value.trim() || null
-        })
-        mainContent.querySelectorAll('.et-track-notes').forEach(el => {
-          const id = parseInt(el.dataset.id)
-          trackMap[id] = trackMap[id] || {}
-          trackMap[id].notes = el.value.trim() || null
-        })
-        // Collect active flag pills per track
-        mainContent.querySelectorAll('.flag-pill').forEach(btn => {
-          const id = parseInt(btn.dataset.tid)
-          trackMap[id] = trackMap[id] || {}
-          if (!trackMap[id].flags) trackMap[id].flags = []
-          if (btn.classList.contains('active')) trackMap[id].flags.push(btn.dataset.flag)
-        })
-
-        await Promise.all(
-          Object.entries(trackMap).map(([id, payload]) =>
-            API.tracks.update(parseInt(id), payload)
-          )
-        )
-
-        // Reassignment can prune the old performer / create a new one, and roster
-        // edits can add or orphan Artists — refresh those sidebar lists.
-        invalidateDims('performers', 'artists')
-        renderRecordingView(recordingId)
-      } catch (e) {
-        errEl.textContent = 'Save failed: ' + e.message
-        errEl.style.display = 'block'
-        btn.disabled = false
-        btn.textContent = 'Save changes'
-      }
     })
   }
 
@@ -4347,6 +4267,69 @@ const App = (() => {
     if (canvas && _waveformMap[trackId] && trackId !== _waveformTrackId) {
       _startWaveformLoop(canvas, trackId)
     }
+  }
+
+  // Venue page — editable name / location / bio in place + performances.
+  async function renderVenueView(id) {
+    setActiveNav('venues'); setActiveArtist(null); setLoading()
+    let v
+    try { v = await API.venues.get(id) }
+    catch (e) {
+      invalidateDims('venues')
+      setMainHTML(`<div class="empty-state"><div class="empty-title">This venue no longer exists</div></div>`)
+      return
+    }
+    const descText = v.bio && v.bio.trim()
+    // One row per Recording at this venue (showing the performer, since a venue
+    // hosts many different acts). Already ordered chronologically by the API.
+    const rowsHtml = (v.recordings || []).map(r => flatRowHtml(r, true)).join('')
+
+    setMainHTML(`
+      <div class="performer-page">
+        <div class="performer-head">
+          <div class="pp-name-row">
+            <h1 class="pp-name pp-editable" id="vn-name" title="Click to edit">${esc(v.name)}</h1>
+            <button class="btn btn-ghost btn-sm pp-delete" id="vn-delete" title="Delete venue">Delete</button>
+          </div>
+          <div class="vn-loc">
+            <span class="vn-field"><label>City</label><span class="pp-editable vn-val ${v.city ? '' : 'pp-empty'}" id="vn-city">${v.city ? esc(v.city) : '—'}</span></span>
+            <span class="vn-field"><label>State / Region</label><span class="pp-editable vn-val ${v.state ? '' : 'pp-empty'}" id="vn-state">${v.state ? esc(v.state) : '—'}</span></span>
+            <span class="vn-field"><label>Country</label><span class="pp-editable vn-val ${v.country ? '' : 'pp-empty'}" id="vn-country">${v.country ? esc(v.country) : '—'}</span></span>
+          </div>
+          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="vn-bio" title="Click to edit">${descText ? esc(v.bio) : 'Add notes…'}</div>
+        </div>
+        <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:140px"><div class="empty-title">No recordings from this venue yet</div></div>'}</div>
+      </div>`)
+
+    wireRecordingRows(mainContent)
+
+    const refreshSidebar = () => invalidateDims('venues')
+    async function saveField(patch) {
+      try { await API.venues.update(id, patch); refreshSidebar() }
+      catch (e) { alert('Save failed: ' + e.message) }
+    }
+    makeInlineEditable(document.getElementById('vn-name'), {
+      get: () => v.name,
+      onSave: async val => { val = val.trim(); if (!val || val === v.name) return; v.name = val; await saveField({ name: val }) },
+    })
+    ;['city', 'state', 'country'].forEach(f => {
+      makeInlineEditable(document.getElementById('vn-' + f), {
+        placeholder: '—',
+        get: () => v[f] || '',
+        onSave: async val => { val = val.trim(); v[f] = val; await saveField({ [f]: val || null }) },
+      })
+    })
+    makeInlineEditable(document.getElementById('vn-bio'), {
+      multiline: true, placeholder: 'Add notes…',
+      get: () => v.bio || '',
+      onSave: async val => { val = val.trim(); v.bio = val; await saveField({ bio: val || null }) },
+    })
+
+    document.getElementById('vn-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete venue "${v.name}"? This can't be undone.`)) return
+      try { await API.venues.remove(id); refreshSidebar(); window.location.hash = '#/venues' }
+      catch (e) { alert(e.message) }
+    })
   }
 
   // ── Venues admin page ──────────────────────────────────────────────────────
@@ -4617,7 +4600,7 @@ const App = (() => {
 
     } else if (hash.startsWith('#/venue/')) {
       const id = parseInt(hash.split('/')[2])
-      if (id) renderVenuesPage(id)
+      if (id) renderVenueView(id)
       else    renderVenuesPage()
 
     } else if (hash === '#/artists') {

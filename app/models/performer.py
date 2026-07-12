@@ -32,6 +32,10 @@ class Performer(db.Model):
                                    cascade="all, delete-orphan",
                                    order_by="Membership.order")
     performances = db.relationship("Performance", back_populates="performer")
+    # External reference resources (databases, discographies) — see PerformerResource.
+    resources    = db.relationship("PerformerResource", back_populates="performer",
+                                   cascade="all, delete-orphan",
+                                   order_by="PerformerResource.order")
 
     @property
     def artists(self):
@@ -40,3 +44,24 @@ class Performer(db.Model):
 
     def __repr__(self):
         return f"<Performer {self.name}>"
+
+
+class PerformerResource(db.Model):
+    """
+    An external reference for a Performer — a discography, tape database, or
+    fan-maintained source of truth (e.g. the PMDB for Pat Metheny). Lives at the
+    act level, not the person level.
+    """
+    __tablename__ = "performer_resource"
+
+    id           = db.Column(db.Integer, primary_key=True)
+    performer_id = db.Column(db.Integer, db.ForeignKey("performer.id"), nullable=False)
+    label        = db.Column(db.String(255),  nullable=True)   # display name; falls back to URL
+    url          = db.Column(db.String(1024), nullable=False)
+    order        = db.Column(db.Integer, nullable=False, default=0)
+    created_at   = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    performer = db.relationship("Performer", back_populates="resources")
+
+    def __repr__(self):
+        return f"<PerformerResource {self.url} performer={self.performer_id}>"

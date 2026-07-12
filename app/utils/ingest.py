@@ -922,7 +922,8 @@ def _titlecase(s):
 
 # ── File system operations ─────────────────────────────────────────────────────
 
-def move_to_library(source_folder, library_root, artist_name, folder_name, behavior="copy"):
+def move_to_library(source_folder, library_root, artist_name, folder_name,
+                    behavior="copy", progress_cb=None):
     """
     Move or copy a source folder into the library under the artist directory.
 
@@ -932,6 +933,7 @@ def move_to_library(source_folder, library_root, artist_name, folder_name, behav
         artist_name   : str  — canonical artist name (used as subdirectory)
         folder_name   : str  — canonical folder name from build_folder_name()
         behavior      : "copy" | "move"
+        progress_cb   : callable(copied_bytes, total_bytes) | None — copy progress
 
     Returns:
         str — new folder path relative to library_root
@@ -941,12 +943,38 @@ def move_to_library(source_folder, library_root, artist_name, folder_name, behav
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     if behavior == "move":
+        # A rename on the same volume is instant; copy+delete otherwise. Report
+        # start/finish so the client always gets a terminal progress value.
+        if progress_cb:
+            progress_cb(0, 1)
         shutil.move(str(source_folder), str(dest_folder))
+        if progress_cb:
+            progress_cb(1, 1)
     else:
-        shutil.copytree(str(source_folder), str(dest_folder))
+        _copytree_with_progress(source_folder, dest_folder, progress_cb)
 
     # Return path relative to library_root for storage in DB
     return str(dest_folder.relative_to(library_root))
+
+
+def _copytree_with_progress(source_folder, dest_folder, progress_cb=None):
+    """Copy a folder file-by-file, reporting cumulative bytes copied so a slow
+    copy (large audio + photos) can show a progress bar instead of hanging."""
+    src  = Path(source_folder)
+    dest = Path(dest_folder)
+    files  = [p for p in src.rglob("*") if p.is_file()]
+    total  = sum(p.stat().st_size for p in files) or 1
+    copied = 0
+    if progress_cb:
+        progress_cb(0, total)
+    dest.mkdir(parents=True, exist_ok=True)
+    for p in files:
+        target = dest / p.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(p), str(target))
+        copied += p.stat().st_size
+        if progress_cb:
+            progress_cb(copied, total)
 
 
 def _sanitize_path(name):

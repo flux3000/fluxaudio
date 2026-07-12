@@ -114,11 +114,18 @@
     try { bc?.postMessage(msg) } catch {}
   }
 
-  // ── Build panel DOM (hidden — mounted into slide pane on demand) ─────────────
+  // ── Build panel DOM — a floating overlay anchored top-right of the window ─────
   const panel = document.createElement('div')
   panel.id        = 'dbg-panel'
-  panel.className = 'dbg-panel-inner'
+  panel.className = 'dbg-overlay'
   panel.innerHTML = `
+    <div class="dbg-overlay-head">
+      <span class="dbg-overlay-title">Debug <span class="dbg-badge dbg-badge-dev">DEV</span></span>
+      <span class="dbg-overlay-actions">
+        <button class="dbg-popout-btn" id="dbg-popout" title="Pop out to a window">⊞</button>
+        <button class="dbg-close-btn" id="dbg-close" title="Close (\`)">×</button>
+      </span>
+    </div>
     <div class="dbg-section">
       <div class="dbg-section-head" data-target="dbg-errors">
         JS Errors ▾ <span class="dbg-err-badge" id="dbg-err-badge" style="display:none"></span>
@@ -145,7 +152,7 @@
       </div>
     </div>
   `
-  // Keep in body but hidden — attach() moves it into the slide pane
+  // Floating overlay, hidden until toggled — lives at the top level of <body>.
   panel.style.display = 'none'
   document.body.appendChild(panel)
 
@@ -255,48 +262,28 @@
     }
   }
 
-  // ── Public API ───────────────────────────────────────────────────────────────
-  function attach(container) {
-    if (!container) return
-    if (!container.contains(panel)) {
-      // Inject pop-out button into pane header
-      const header = container.closest('.slide-pane')?.querySelector('.slide-pane-header')
-      if (header && !header.querySelector('.dbg-popout-btn')) {
-        const btn = document.createElement('button')
-        btn.className   = 'dbg-popout-btn'
-        btn.textContent = '⊞'
-        btn.title       = 'Pop out debug panel'
-        btn.addEventListener('click', popOut)
-        header.appendChild(btn)
-      }
-      container.appendChild(panel)
-    }
+  document.getElementById('dbg-popout').addEventListener('click', popOut)
+  document.getElementById('dbg-close').addEventListener('click', () => hide())
+
+  // ── Public API — floating overlay (top-right of the window) ──────────────────
+  function show() {
     panel.style.display = ''
-    refreshState()
-    refreshInfoCounts()
-    _refreshLog()
-    _refreshErrors()
+    refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors()
   }
-
-  function detach() {
-    panel.style.display = 'none'
-  }
-
+  function hide()   { panel.style.display = 'none' }
+  function toggle() { panel.style.display === 'none' ? show() : hide() }
   function refresh() {
-    refreshState()
-    refreshInfoCounts()
-    _refreshLog()
-    _refreshErrors()
+    refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors()
   }
 
-  window.fluxDebug = { attach, detach, refresh }
+  // attach/detach kept as aliases so any older callers still work.
+  window.fluxDebug = { show, hide, toggle, refresh, attach: show, detach: hide }
 
-  // Backtick shortcut
+  // Backtick shortcut toggles the overlay from anywhere.
   document.addEventListener('keydown', e => {
     if (e.key !== '`' || e.ctrlKey || e.metaKey || e.altKey) return
     if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return
-    const debugTab = document.querySelector('.slide-tab[data-pane="debug"]')
-    if (debugTab) debugTab.click()
+    toggle()
   })
 
   // ── Helpers ──────────────────────────────────────────────────────────────────

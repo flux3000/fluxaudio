@@ -11,7 +11,7 @@ from flask_login import login_required
 from sqlalchemy import func
 
 from app.extensions import db
-from app.models.performer import Performer
+from app.models.performer import Performer, PerformerResource
 from app.models.artist import Artist
 from app.models.performance import Performance
 from app.models.recording import Recording
@@ -117,6 +117,7 @@ def get_performer(performer_id):
         "sort_name": p.sort_name,
         "bio":       p.bio,
         "members":   [{"id": a.id, "name": a.name} for a in p.artists],
+        "resources": [{"id": r.id, "label": r.label, "url": r.url} for r in p.resources],
     })
 
 
@@ -189,8 +190,26 @@ def update_performer(performer_id):
             setattr(p, f, data[f])
     if data.get("members") is not None:
         set_performer_members(p, data["members"])
+    if data.get("resources") is not None:
+        _set_resources(p, data["resources"])
     db.session.commit()
     return jsonify({"id": p.id})
+
+
+def _set_resources(performer, resources):
+    """Replace a performer's reference resources with the given ordered list of
+    {label, url} dicts (rows with a blank url are skipped)."""
+    db.session.query(PerformerResource).filter_by(performer_id=performer.id).delete(
+        synchronize_session=False)
+    db.session.flush()
+    for i, r in enumerate(resources or []):
+        url = (r.get("url") or "").strip()
+        if not url:
+            continue
+        db.session.add(PerformerResource(
+            performer_id=performer.id, url=url,
+            label=(r.get("label") or "").strip() or None, order=i))
+    db.session.flush()
 
 
 @bp.route("/<int:performer_id>", methods=["DELETE"])

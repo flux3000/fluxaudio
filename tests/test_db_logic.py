@@ -134,6 +134,35 @@ def test_artist_edit_and_delete_when_orphan(api):
     assert _db.session.get(Artist, aid) is None
 
 
+def test_do_confirm_copies_files_and_reports_progress(app, db, tmp_path):
+    """The background ingest worker copies the folder, creates the chain, and
+    reports copy progress ending at 100%."""
+    from app.api.ingest import _do_confirm
+    from app.models.user import User
+
+    src = tmp_path / "src_show"; src.mkdir()
+    (src / "t01.flac").write_bytes(b"x" * 2000)
+    (src / "cover.jpg").write_bytes(b"y" * 1000)   # non-audio extra, copied too
+    lib = tmp_path / "lib"; lib.mkdir()
+    app.config["LIBRARY_ROOT"] = str(lib)
+    uid = db.session.query(User).first().id
+
+    progress = []
+    data = {
+        "source_folder_path": str(src),
+        "artist_name": "Progress Test Act",
+        "start_year": 2020, "start_month": 1, "start_day": 2,
+        "source": "AUD",
+        "tracks": [{"track_number": 1, "title": "One", "duration": 100, "filename": "t01.flac"}],
+    }
+    result = _do_confirm(data, uid, lambda c, t: progress.append((c, t)))
+
+    assert result["recording_id"]
+    rec = _db.session.get(Recording, result["recording_id"])
+    assert (lib / rec.folder_path / "t01.flac").exists()
+    assert progress and progress[-1][0] == progress[-1][1]   # finished at 100%
+
+
 def test_performer_and_venue_delete_when_empty(api):
     pid = api.post("/api/performers/", json={"name": "Temp Act"}).get_json()["id"]
     assert api.delete(f"/api/performers/{pid}").status_code == 200

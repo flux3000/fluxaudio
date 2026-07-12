@@ -14,7 +14,7 @@ from sqlalchemy import or_
 
 from app.extensions import db
 from app.models.venue import Venue
-from app.utils.format import format_partial_date
+from app.utils.serialize import recording_row
 
 bp = Blueprint("venues", __name__)
 
@@ -53,8 +53,11 @@ def get_venue(venue_id):
     perfs = sorted(
         v.performances,
         key=lambda p: (p.start_year or 0, p.start_month or 0, p.start_day or 0),
-        reverse=True,
     )
+
+    # One row per Recording at this venue (two tapers of one show = two rows),
+    # chronological old→new. Recordings within a performance keep their own order.
+    recordings = [recording_row(r) for p in perfs for r in p.recordings]
 
     return jsonify({
         "id":                v.id,
@@ -64,15 +67,8 @@ def get_venue(venue_id):
         "country":           v.country,
         "bio":               v.bio,
         "performance_count": len(v.performances),
-        "performances": [
-            {
-                "id":           p.id,
-                "performer":    p.performer.name,
-                "performer_id": p.performer_id,
-                "date":         format_partial_date(p.start_year, p.start_month, p.start_day),
-            }
-            for p in perfs
-        ],
+        "recording_count":   len(recordings),
+        "recordings":        recordings,
     })
 
 
