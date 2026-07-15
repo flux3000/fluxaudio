@@ -151,6 +151,13 @@
         <div id="dbg-log-content" class="dbg-log-list"></div>
       </div>
     </div>
+
+    <div class="dbg-section">
+      <div class="dbg-section-head" data-target="dbg-paula">Paula ▸</div>
+      <div class="dbg-section-body" id="dbg-paula" style="display:none">
+        <div id="dbg-paula-content" class="dbg-kv">No scan yet</div>
+      </div>
+    </div>
   `
   // Floating overlay, hidden until toggled — lives at the top level of <body>.
   panel.style.display = 'none'
@@ -223,6 +230,78 @@
     } catch {}
   }
 
+  // ── Paula breakdown ──────────────────────────────────────────────────────
+  // Full scan-time flag/component/subscore dump — this is the "ample debug
+  // information" Ryan asked for so the scoring model can actually be
+  // eyeballed against real folders, not just trusted blind. Reads
+  // window.fluxState.paula, which app.js keeps pointed at ingest.scan.paula.
+  function _fmtBool(b) { return b ? '✓' : '·' }
+
+  function _paulaAttrRow(name, a) {
+    if (!a) return ''
+    const c = a.components || {}
+    const compStr = Object.entries(c).map(([k, v]) => `${k}:${v}`).join(' ')
+    return `<div class="dbg-row" style="flex-direction:column; align-items:flex-start; gap:2px; padding:4px 0; border-bottom:1px solid var(--bd-0)">
+      <div style="display:flex; width:100%; justify-content:space-between">
+        <span class="dbg-key" style="font-weight:600">${esc(name)}</span>
+        <span class="dbg-val">${a.subscore} × ${a.weight} = ${a.points}</span>
+      </div>
+      <div style="font-size:10px; color:var(--t2)">
+        tag: ${esc(a.tag_value ?? '—')} ${_fmtBool(a.tag_matched)}match &nbsp;|&nbsp;
+        txt: ${esc(a.txt_value ?? '—')} ${_fmtBool(a.txt_matched)}match &nbsp;|&nbsp;
+        agree: ${_fmtBool(a.agree)}
+      </div>
+      <div style="font-size:10px; color:var(--t3)">${esc(compStr)}</div>
+    </div>`
+  }
+
+  function _paulaDateRow(a) {
+    if (!a) return ''
+    const c = a.components || {}
+    const compStr = Object.entries(c).map(([k, v]) => `${k}:${v}`).join(' ')
+    return `<div class="dbg-row" style="flex-direction:column; align-items:flex-start; gap:2px; padding:4px 0; border-bottom:1px solid var(--bd-0)">
+      <div style="display:flex; width:100%; justify-content:space-between">
+        <span class="dbg-key" style="font-weight:600">date</span>
+        <span class="dbg-val">${a.subscore} × ${a.weight} = ${a.points}</span>
+      </div>
+      <div style="font-size:10px; color:var(--t2)">
+        tag: ${esc(JSON.stringify(a.tag_date))} (prec ${a.tag_precision}) &nbsp;|&nbsp;
+        txt: ${esc(JSON.stringify(a.txt_date))} (prec ${a.txt_precision}) &nbsp;|&nbsp;
+        exact agree: ${_fmtBool(a.exact_agree)}
+      </div>
+      <div style="font-size:10px; color:var(--t3)">${esc(compStr)}</div>
+    </div>`
+  }
+
+  function _refreshPaula() {
+    const el = document.getElementById('dbg-paula-content')
+    if (!el || panel.style.display === 'none') return
+    const paula = window.fluxState?.paula
+    if (!paula) { el.innerHTML = 'No scan yet'; return }
+
+    const attrs = paula.attributes || {}
+    const tc    = paula.track_completeness || {}
+    const bd    = tc.breakdown || {}
+
+    el.innerHTML = `
+      <div class="dbg-row"><span class="dbg-key">Primary Attribute Score</span><span class="dbg-val">${paula.score}</span></div>
+      ${_paulaAttrRow('performer', attrs.performer)}
+      ${_paulaDateRow(attrs.date)}
+      ${_paulaAttrRow('venue_name', attrs.venue_name)}
+      ${_paulaAttrRow('city', attrs.city)}
+      ${_paulaAttrRow('state', attrs.state)}
+      ${_paulaAttrRow('country', attrs.country)}
+      <div class="dbg-row" style="margin-top:6px"><span class="dbg-key">Track Completeness Score</span><span class="dbg-val">${tc.score ?? '—'}</span></div>
+      <div style="font-size:10px; color:var(--t2)">
+        confirmed:${bd.confirmed ?? 0} tag_only:${bd.tag_only ?? 0} txt_only:${bd.txt_only ?? 0}
+        conflict:${bd.conflict ?? 0} missing:${bd.missing ?? 0}
+      </div>
+      ${(tc.tracks || []).map(t => `<div style="font-size:10px; color:var(--t3); padding:1px 0">
+        #${t.index} [${esc(t.state)}] tag: ${esc(t.tag_title ?? '—')} / txt: ${esc(t.txt_title ?? '—')}
+      </div>`).join('')}
+    `
+  }
+
   // FLAC tag inspector removed 2026-07-09 — the always-on "File Tags" pane in
   // the recording view replaces it (GET /api/recordings/<id>/tags).
 
@@ -268,12 +347,12 @@
   // ── Public API — floating overlay (top-right of the window) ──────────────────
   function show() {
     panel.style.display = ''
-    refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors()
+    refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors(); _refreshPaula()
   }
   function hide()   { panel.style.display = 'none' }
   function toggle() { panel.style.display === 'none' ? show() : hide() }
   function refresh() {
-    refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors()
+    refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors(); _refreshPaula()
   }
 
   // attach/detach kept as aliases so any older callers still work.

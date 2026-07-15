@@ -71,6 +71,8 @@ def get_performance(performance_id):
         "city":         v.city    if v else p.city,
         "state":        v.state   if v else p.state,
         "country":      v.country if v else p.country,
+        "event_id":     p.event_id,
+        "event_name":   p.event.name if p.event else None,
         "notes":        p.notes,
         "recordings":   [recording_summary(r) for r in p.recordings],
     })
@@ -130,7 +132,7 @@ def update_performance(performance_id):
         set_performer_members(p.performer, data["members"])
 
     for f in ["title", "stage", "start_year", "start_month", "start_day",
-              "end_year", "end_month", "end_day", "venue_id",
+              "end_year", "end_month", "end_day", "venue_id", "event_id",
               "city", "state", "country", "notes"]:
         if f in data:
             setattr(p, f, data[f])

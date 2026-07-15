@@ -45,6 +45,18 @@ class Track(db.Model):
     # Composer / songwriter credit (optional, not in standard FLAC tags)
     songwriter   = db.Column(db.String(255), nullable=True)
 
+    # ── Checksum verification (2026-07-13) ────────────────────────────────────
+    # Populated when a fingerprint file (.ffp / .md5 / .st5) accompanying the
+    # source folder could be matched to this track. "ffp" and "st5" verify
+    # against the FLAC file's own internal MD5 signature of the decoded audio
+    # (tag/rename-proof); "md5" verifies the whole encoded file (breaks on any
+    # tag edit, including Flux's own Write Tags to Files — expected, not a bug).
+    # See app/utils/checksums.py for the read-the-authoritative-sources writeup.
+    checksum_type         = db.Column(db.String(8),  nullable=True)   # ffp | md5 | st5
+    expected_checksum     = db.Column(db.String(64), nullable=True)   # hex digest, as recorded in the fingerprint file
+    checksum_status       = db.Column(db.String(16), nullable=True)   # match | mismatch | unverified
+    checksum_verified_at  = db.Column(db.DateTime,   nullable=True)
+
     notes      = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),

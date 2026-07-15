@@ -14,8 +14,12 @@ Metrics produced
   dc_offset            Mean sample value (ideal = 0.0)
   spectral_centroid_hz Average spectral centroid (Hz) — perceptual brightness
   bpm                  Estimated tempo (librosa.beat.tempo)
-  waveform_json        JSON list of ~300 normalised RMS values (0.0–1.0)
-                       covering the full track duration, for waveform display
+  waveform_json        JSON {"min": [...], "max": [...]} — true per-bucket peak
+                       envelope (signed, -1.0-1.0) at WAVEFORM_POINTS resolution,
+                       covering the full track duration, for waveform display.
+                       (v1 stored a single mirrored RMS-magnitude array instead —
+                       the frontend still renders that shape for tracks that
+                       haven't been re-analysed since the v2 bump.)
 """
 
 import json
@@ -24,8 +28,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ANALYSIS_VERSION = "1"
-WAVEFORM_POINTS  = 300   # resolution of waveform envelope array
+ANALYSIS_VERSION = "2"   # bumped: waveform_json is now a real min/max peak envelope
+WAVEFORM_POINTS  = 2000  # resolution of waveform envelope — was 300 (v1)
 
 
 def _to_db(amplitude, min_db=-80.0):
@@ -133,21 +137,26 @@ def analyse_track(abs_path):
     except Exception:
         bpm = None
 
-    # ── Waveform envelope (normalised 0–1) ────────────────────────────────────
-    # Downsample frame_rms to WAVEFORM_POINTS using mean-pooling, then
-    # normalise by the peak frame value so the display fills the canvas.
-    n = len(frame_rms)
+    # ── Waveform envelope (signed min/max peaks, -1..1) ───────────────────────
+    # Split the raw signal itself (not the already-smoothed frame_rms) into
+    # WAVEFORM_POINTS buckets and keep each bucket's true min and max sample —
+    # a real bipolar peak envelope rather than a mirrored RMS average. This is
+    # what actually looks "punchy" instead of smooth/rounded.
+    n = len(y)
     if n >= WAVEFORM_POINTS:
-        # reshape into WAVEFORM_POINTS buckets, average each bucket
-        buckets = np.array_split(frame_rms, WAVEFORM_POINTS)
-        envelope = np.array([b.mean() for b in buckets])
+        buckets = np.array_split(y, WAVEFORM_POINTS)
+        wf_min = np.array([b.min() for b in buckets])
+        wf_max = np.array([b.max() for b in buckets])
     else:
-        # fewer frames than points — pad by repeating last value
-        pad = np.full(WAVEFORM_POINTS - n, frame_rms[-1] if n else 0.0)
-        envelope = np.concatenate([frame_rms, pad])
+        pad = np.zeros(WAVEFORM_POINTS - n)
+        wf_min = np.concatenate([y, pad])
+        wf_max = np.concatenate([y, pad])
 
-    peak_env = float(envelope.max()) or 1.0
-    waveform  = [round(float(v) / peak_env, 4) for v in envelope]
+    norm = peak_amp or 1.0
+    waveform = {
+        "min": [round(float(v) / norm, 4) for v in wf_min],
+        "max": [round(float(v) / norm, 4) for v in wf_max],
+    }
 
     return {
         "sample_rate_hz":       sample_rate_hz,

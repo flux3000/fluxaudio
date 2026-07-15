@@ -2,15 +2,17 @@
 api/recordings.py — Recording endpoints.
 
 Routes:
-  GET  /api/recordings/<id>              full recording detail (incl. analysis)
-  POST /api/recordings/scan              scan a folder, return suggestions (no DB write)
-  PUT  /api/recordings/<id>             update recording metadata
-  POST /api/recordings/<id>/write-tags  write Vorbis comments to FLAC files
-  POST /api/recordings/<id>/reprocess   re-run Librosa analysis on all tracks
+  GET  /api/recordings/<id>                 full recording detail (incl. analysis)
+  POST /api/recordings/scan                 scan a folder, return suggestions (no DB write)
+  PUT  /api/recordings/<id>                update recording metadata
+  POST /api/recordings/<id>/write-tags     write Vorbis comments to FLAC files
+  POST /api/recordings/<id>/reprocess      re-run Librosa analysis on all tracks
+  POST /api/recordings/<id>/verify-checksums  (re-)validate fingerprint checksums
 """
 
 import json as _json
 import os
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 
@@ -19,13 +21,35 @@ from app.models.recording import Recording, RecordingFingerprint
 from app.models.collection import CollectionRecording
 from app.models.recording_event import RecordingEvent
 from app.models.track import Track
-from app.utils.ingest import (scan_folder, read_flac_tags, parse_info_file,
-                              write_flac_tags, read_recording_tags, _parse_location)
+from app.models.performer import Performer
+from app.models.venue import Venue
+from app.utils.ingest import (build_scan_payload, write_flac_tags, read_recording_tags)
 from app.utils.analysis import analyse_recording
-from app.utils.health import compute_health
 from app.utils.pruning import prune_after_recording_delete
+from app.utils.serialize import recording_row
+from app.utils.paula import compute_paula_score
+from app.utils.checksums import (
+    discover_fingerprint_files, parse_checksum_file,
+    match_entries_to_tracks, verify_track_checksum, FINGERPRINT_TYPE_PRIORITY,
+)
 
 bp = Blueprint("recordings", __name__)
+
+
+# ── GET /api/recordings/recent ────────────────────────────────────────────────
+# Virtual "Recently Added" view — not a stored grouping, just the N newest
+# recordings by ingest timestamp. Always exactly correct, nothing to keep in sync.
+
+@bp.route("/recent")
+@login_required
+def recent_recordings():
+    limit = request.args.get("limit", 50, type=int) or 50
+    limit = max(1, min(limit, 200))
+    recs = (Recording.query
+            .order_by(Recording.created_at.desc())
+            .limit(limit)
+            .all())
+    return jsonify([recording_row(r) for r in recs])
 
 
 # ── GET /api/recordings/<id> ──────────────────────────────────────────────────
@@ -63,7 +87,6 @@ def get_recording(recording_id):
         "performance_id":       rec.performance_id,
         "title":                rec.title,
         "source":               rec.source,
-        "source_modifier":      rec.source_modifier,
         "lineage":              rec.lineage,
         "quality":              rec.quality,
         "rating":               rec.rating,
@@ -71,6 +94,7 @@ def get_recording(recording_id):
         "is_official":          bool(rec.is_official),
         "info_file_content":    rec.info_file_content,
         "notes":                rec.notes,
+        "ai_research":          _json.loads(rec.ai_research_json) if rec.ai_research_json else None,
         "collections": [
             {"id": l.collection.id, "name": l.collection.name}
             for l in db.session.query(CollectionRecording).filter_by(recording_id=rec.id).all()
@@ -88,6 +112,12 @@ def get_recording(recording_id):
                 "notes":        t.notes,
                 "stream_url":   f"/api/stream/{t.id}",
                 "analysis":     _analysis(t.analysis),
+                "checksum": {
+                    "type":            t.checksum_type,
+                    "expected":        t.expected_checksum,
+                    "status":          t.checksum_status,
+                    "verified_at":     t.checksum_verified_at.isoformat() if t.checksum_verified_at else None,
+                } if t.checksum_type else None,
             }
             for t in rec.tracks
         ],
@@ -119,6 +149,15 @@ def scan_recording():
     Step 1 of ingest — non-destructive scan of a source folder.
     Returns two parallel metadata sets (from_tags, from_info_file) for
     the user to review field by field in the UI. Nothing is written to DB.
+    Delegates to build_scan_payload() — the same function batch import uses,
+    so a folder's health score never differs between the two flows.
+
+    Also runs Paula (app.utils.paula.compute_paula_score) — the free,
+    non-AI completeness/confidence scorer, 2026-07-16. Paula needs real DB
+    data to fuzzy-match tag/txt-inferred Performer and Venue names, which is
+    why she runs here (DB access) rather than inside build_scan_payload
+    (kept DB-free/pure, same as compute_health()). Scoped to the interactive
+    Add Recording flow only for now — batch-scan is untouched.
     """
     data        = request.get_json()
     folder_path = data.get("folder_path", "").strip()
@@ -126,144 +165,17 @@ def scan_recording():
     if not folder_path or not os.path.isdir(folder_path):
         return jsonify({"error": "Invalid or inaccessible folder path"}), 400
 
-    # Scan for files
-    files = scan_folder(folder_path)
-
-    if not files["audio_files"]:
+    resp = build_scan_payload(folder_path)
+    if resp is None:
         return jsonify({"error": "No audio files found in folder"}), 422
 
-    # Read FLAC tags
-    from_tags = read_flac_tags(files["audio_files"])
+    known_performers = [p.name for p in Performer.query.all()]
+    known_venues = [
+        {"name": v.name, "city": v.city, "state": v.state, "country": v.country}
+        for v in Venue.query.all()
+    ]
+    resp["paula"] = compute_paula_score(resp, known_performers, known_venues)
 
-    # Parse CONCERTLOCATION tag into city/state/country using the same
-    # geonamescache-backed parser as the info file (best-effort, graceful fallback)
-    tag_city = tag_state = tag_country = None
-    tag_location = from_tags["container"].get("location") or ""
-    if tag_location:
-        try:
-            tag_city, tag_state, tag_country = _parse_location(tag_location)
-        except Exception:
-            pass
-
-    # Parse ALL text file candidates (scored/sorted best-first by scan_folder).
-    # Include content + suggestions for each so the frontend switcher needs no
-    # extra API call. Text files are small; parsing all is cheap.
-    from_info         = {}
-    info_file_content = None
-    parsed_candidates = []
-
-    for tf in files["text_files"]:
-        parsed = parse_info_file(tf["path"])
-        entry  = {
-            "filename":    tf["filename"],
-            "score":       tf.get("score", 0),
-            "content":     parsed.get("raw_content", ""),
-            "suggestions": {
-                "artist":       parsed.get("artist"),
-                "artist_match": parsed.get("artist_match"),
-                "year":         parsed.get("year"),
-                "month":        parsed.get("month"),
-                "day":          parsed.get("day"),
-                "venue":        parsed.get("venue"),
-                "venue_match":  parsed.get("venue_match"),
-                "city":         parsed.get("city"),
-                "state":        parsed.get("state"),
-                "country":      parsed.get("country"),
-                "source":       parsed.get("source"),
-                "lineage":      parsed.get("lineage"),
-                "tracks": [
-                    {"number": t["number"], "title": t["title"]}
-                    for t in parsed.get("tracks", [])
-                ],
-            },
-        }
-        parsed_candidates.append(entry)
-
-    # Use best-scored candidate as primary
-    if parsed_candidates:
-        from_info         = parsed_candidates[0]["suggestions"]
-        info_file_content = parsed_candidates[0]["content"]
-
-    # Read fingerprint file contents
-    fingerprints = []
-    for fp in files["fingerprints"]:
-        try:
-            with open(fp["path"], "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-        except OSError:
-            content = None
-        fingerprints.append({
-            "type":     fp["type"],
-            "filename": fp["filename"],
-            "content":  content,
-        })
-
-    resp = {
-        "folder_path":      folder_path,
-        "folder_name":      os.path.basename(folder_path),
-        "audio_file_count": len(files["audio_files"]),
-        "sets_detected":    files.get("sets_detected", False),
-        "audio_files": [
-            {
-                "index":    f["index"],
-                "filename": f["filename"],            # display name (basename)
-                "rel_path": f.get("rel_path", f["filename"]),  # path relative to source root
-                "set":      f.get("set"),
-            }
-            for f in files["audio_files"]
-        ],
-        "info_file_content": info_file_content,
-        # All text file candidates, best-first — includes content + parsed suggestions
-        # so the UI switcher works without an extra API call
-        "text_file_candidates": parsed_candidates,
-        "fingerprints":      fingerprints,
-        "suggestions": {
-            # Metadata from existing FLAC tags
-            "from_tags": {
-                "artist":       from_tags["container"].get("artist"),
-                "concert_date": from_tags["container"].get("concert_date"),
-                "venue":        from_tags["container"].get("venue"),
-                "location":     from_tags["container"].get("location"),
-                "city":         tag_city,
-                "state":        tag_state,
-                "country":      tag_country,
-                "source":       from_tags["container"].get("source"),
-                "lineage":      from_tags["container"].get("lineage"),
-                "tracks": [
-                    {
-                        "index":        t["index"],
-                        "filename":     t["filename"],
-                        "rel_path":     t.get("rel_path", t["filename"]),
-                        "track_number": t["track_number"],
-                        "title":        t["title"],
-                        "duration":     t["duration"],
-                        "raw":          t.get("raw", {}),
-                    }
-                    for t in from_tags["tracks"]
-                ],
-            },
-            # Metadata parsed from the info/text file
-            "from_info_file": {
-                "artist":       from_info.get("artist"),
-                "artist_match": from_info.get("artist_match"),
-                "year":         from_info.get("year"),
-                "month":        from_info.get("month"),
-                "day":          from_info.get("day"),
-                "venue":        from_info.get("venue"),
-                "venue_match":  from_info.get("venue_match"),
-                "city":         from_info.get("city"),
-                "state":        from_info.get("state"),
-                "country":      from_info.get("country"),
-                "source":       from_info.get("source"),
-                "lineage":      from_info.get("lineage"),
-                "tracks": [
-                    {"number": t["number"], "title": t["title"]}
-                    for t in from_info.get("tracks", [])
-                ],
-            },
-        },
-    }
-    resp["health"] = compute_health(resp)
     return jsonify(resp)
 
 
@@ -284,7 +196,7 @@ def update_recording(recording_id):
     # TODO: validate archivist permission for this recording's artist
 
     data = request.get_json()
-    updatable = ["title", "source", "source_modifier", "lineage",
+    updatable = ["title", "source", "lineage",
                  "quality", "rating", "is_complete", "notes", "info_file_content"]
     for field in updatable:
         if field in data:
@@ -470,3 +382,81 @@ def reprocess_recording(recording_id):
         return jsonify({"error": "Analysis failed for all tracks", "errors": errors}), 500
 
     return jsonify({"analysed": n_ok, "errors": errors})
+
+
+# ── POST /api/recordings/<id>/verify-checksums ───────────────────────────────
+
+@bp.route("/<int:recording_id>/verify-checksums", methods=["POST"])
+@login_required
+def verify_checksums(recording_id):
+    """
+    (Re-)validate this recording's fingerprint checksums against the audio
+    files currently sitting in the library. Safe to call any time — nothing
+    here depends on the original source folder still existing.
+
+    Also opportunistically discovers fingerprint files that were copied into
+    the library with this recording but never parsed into RecordingFingerprint
+    rows (covers shows ingested before this feature existed) — so this one
+    endpoint serves both "re-validate" and "go back and process the ones I
+    already have in the library."
+    """
+    rec = db.session.get(Recording, recording_id)
+    if not rec:
+        return jsonify({"error": "Not found"}), 404
+
+    library_root = current_app.config.get("LIBRARY_ROOT", "")
+    folder_abs   = os.path.join(str(library_root), rec.folder_path)
+
+    # Collect into a local list rather than re-reading rec.fingerprints after
+    # adding to it — the relationship collection was already cached by the
+    # line above and db.session.flush() doesn't invalidate that cache, so a
+    # freshly-discovered row wouldn't show up in it this same request.
+    all_fingerprints = list(rec.fingerprints)
+    known_filenames  = {fp.filename for fp in all_fingerprints}
+    for found in discover_fingerprint_files(folder_abs):
+        if found["filename"] in known_filenames:
+            continue
+        try:
+            with open(os.path.join(folder_abs, found["rel_path"]),
+                      "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            content = None
+        new_fp = RecordingFingerprint(
+            recording_id     = rec.id,
+            fingerprint_type = found["type"],
+            filename         = found["filename"],
+            content          = content,
+        )
+        db.session.add(new_fp)
+        all_fingerprints.append(new_fp)
+
+    # Same FINGERPRINT_TYPE_PRIORITY tie-break as ingest (see
+    # api/ingest.py _do_confirm) when more than one fingerprint file
+    # is present: ffp, then md5, then st5.
+    fingerprints = sorted(all_fingerprints,
+                          key=lambda fp: FINGERPRINT_TYPE_PRIORITY.get(fp.fingerprint_type, 9))
+    now = datetime.now(timezone.utc)
+    checked = 0
+    for fp in fingerprints:
+        if not fp.content:
+            continue
+        matches = match_entries_to_tracks(parse_checksum_file(fp.content), rec.tracks)
+        for track, expected in matches.items():
+            abs_path = os.path.join(folder_abs, track.file_path)
+            track.checksum_type        = fp.fingerprint_type
+            track.expected_checksum    = expected
+            track.checksum_status      = verify_track_checksum(abs_path, fp.fingerprint_type, expected)
+            track.checksum_verified_at = now
+            checked += 1
+    db.session.commit()
+
+    return jsonify({
+        "verified_at": now.isoformat(),
+        "checked":     checked,
+        "tracks": [
+            {"id": t.id, "checksum_type": t.checksum_type,
+             "checksum_status": t.checksum_status, "expected_checksum": t.expected_checksum}
+            for t in rec.tracks
+        ],
+    })

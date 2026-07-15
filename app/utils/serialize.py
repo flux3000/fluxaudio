@@ -14,7 +14,6 @@ def recording_summary(rec):
     return {
         "id":              rec.id,
         "source":          rec.source,
-        "source_modifier": rec.source_modifier,
         "quality":         rec.quality,
         "rating":          rec.rating,
         "is_complete":     rec.is_complete,
@@ -22,6 +21,9 @@ def recording_summary(rec):
         "track_count":     len(rec.tracks),
         # Total runtime in seconds (None-safe); powers the catalog length column.
         "duration_sec":    sum(t.duration or 0 for t in rec.tracks) or None,
+        # When this recording was ingested (distinct from the show date) — powers
+        # the sortable "Date Added" catalog column.
+        "created_at":      rec.created_at.isoformat() if rec.created_at else None,
     }
 
 
@@ -46,10 +48,12 @@ def recording_row(rec):
         "state":           v.state   if v else (p.state   if p else None),
         "country":         v.country if v else (p.country if p else None),
         "source":          rec.source,
-        "source_modifier": rec.source_modifier,
         "quality":         rec.quality,
         "rating":          rec.rating,
         "is_complete":     rec.is_complete,
         "track_count":     len(rec.tracks),
         "duration_sec":    sum(t.duration or 0 for t in rec.tracks) or None,
+        # When this recording was ingested (distinct from the show date) — powers
+        # the sortable "Date Added" catalog column.
+        "created_at":      rec.created_at.isoformat() if rec.created_at else None,
     }

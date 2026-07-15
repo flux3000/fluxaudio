@@ -12,6 +12,7 @@ provides names and dates; this endpoint does the lookup/create work.
 
 import os
 import json
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from sqlalchemy import func
@@ -29,13 +30,36 @@ from app.models.recording import Recording, RecordingFingerprint
 from app.models.recording_event import RecordingEvent
 from app.models.track import Track
 from app.models.user_preference import UserPreference
-from app.utils.ingest import move_to_library
+from app.utils.ingest import move_to_library, compute_audio_rename_map
 from app.utils.folder_naming import build_folder_name
 from app.utils.ai_assist import run_ai_assist, AiAssistError
 from app.utils.prefs import get_api_key, get_pref
 from app.utils.health import compute_health
+from app.utils.checksums import (
+    parse_checksum_file, match_entries_to_tracks, verify_track_checksum,
+    FINGERPRINT_TYPE_PRIORITY,
+)
 
 bp = Blueprint("ingest", __name__)
+
+
+class _ChecksumMatchProxy:
+    """
+    Stand-in for a Track during fingerprint matching (step 9 of _do_confirm).
+
+    match_entries_to_tracks() matches by reading `.file_path` / `.track_number`
+    off whatever it's given. Since Track.file_path now always holds the NEW
+    flattened+renamed filename (see compute_audio_rename_map / move_to_library
+    in app.utils.ingest), matching a fingerprint file — which lists ORIGINAL
+    filenames — directly against real Track rows would silently fail for any
+    recording whose audio got renamed on ingest. This proxy presents the
+    original filename to the matcher while `.real` routes a successful match
+    back to the actual Track so the checksum lands on the right row.
+    """
+    def __init__(self, real_track, original_filename):
+        self.real          = real_track
+        self.file_path     = original_filename
+        self.track_number  = real_track.track_number
 
 
 @bp.route("/health", methods=["POST"])
@@ -56,7 +80,7 @@ def health():
 _AI_JOBS = {}  # job_id -> {"status": running|done|error, "result"/"error", "t0"}
 
 
-def _run_ai_job(job_id, folder_path, current, api_key, model):
+def _run_ai_job(job_id, folder_path, current, api_key, model, *, recording_id=None, app=None):
     import time as _time
     import traceback as _tb
     t0 = _time.time()
@@ -64,12 +88,135 @@ def _run_ai_job(job_id, folder_path, current, api_key, model):
         result = run_ai_assist(folder_path, current, api_key, model)
         _AI_JOBS[job_id] = {"status": "done", "result": result}
         print("[ai-assist] job %s ok in %.1fs" % (job_id[:8], _time.time() - t0), flush=True)
+        # Persist to the recording, if this run was for an already-saved one.
+        # Best-effort: a save failure shouldn't hide a successful research result
+        # from the client, which already has it in _AI_JOBS.
+        if recording_id and app is not None:
+            try:
+                with app.app_context():
+                    from app.models.recording import Recording
+                    rec = db.session.get(Recording, recording_id)
+                    if rec:
+                        rec.ai_research_json = json.dumps(result)
+                        db.session.commit()
+            except Exception:
+                _tb.print_exc()
     except AiAssistError as e:
         _AI_JOBS[job_id] = {"status": "error", "error": str(e)}
         print("[ai-assist] job %s failed after %.1fs: %s" % (job_id[:8], _time.time() - t0, e), flush=True)
     except Exception as e:  # noqa: BLE001
         _tb.print_exc()
         _AI_JOBS[job_id] = {"status": "error", "error": "Unexpected error: %s" % e}
+
+
+@bp.route("/check-existing", methods=["GET"])
+@login_required
+def check_existing():
+    """
+    GET /api/ingest/check-existing?artist_name=...&year=...&month=...&day=...
+    Read-only lookup (no creation) — the Add Recording form calls this once
+    performer + date are known, to WARN (not block) when the library already
+    has a performance for that performer/date. Multiple recordings per
+    performance are legitimate (SBD + AUD of the same show), so this never
+    prevents Confirm — it just surfaces what's already there so an archivist
+    doesn't accidentally re-ingest a tape they already have. Ryan, 2026-07-14.
+
+    Matches on performer name the same way resolve_or_create_performer does
+    (case-insensitive exact match) so this never disagrees with what Confirm
+    would actually resolve to. Month/day narrow the match; year is required —
+    without it there's nothing meaningful to match on.
+    """
+    from app.utils.format import format_partial_date
+
+    artist_name = (request.args.get("artist_name") or "").strip()
+    year  = request.args.get("year",  type=int)
+    month = request.args.get("month", type=int)
+    day   = request.args.get("day",   type=int)
+    if not artist_name or not year:
+        return jsonify({"performer_found": False, "performances": []})
+
+    performer = db.session.query(Performer).filter(
+        func.lower(Performer.name) == artist_name.lower()
+    ).first()
+    if not performer:
+        return jsonify({"performer_found": False, "performances": []})
+
+    q = db.session.query(Performance).filter(
+        Performance.performer_id == performer.id,
+        Performance.start_year == year,
+    )
+    if month:
+        q = q.filter(Performance.start_month == month)
+    if day:
+        q = q.filter(Performance.start_day == day)
+
+    performances = []
+    for p in q.all():
+        if not p.recordings:
+            continue   # nothing recorded against it yet — no duplicate risk
+        v = p.venue
+        performances.append({
+            "id":    p.id,
+            "date":  format_partial_date(p.start_year, p.start_month, p.start_day),
+            "venue": v.name if v else None,
+            "recordings": [
+                {
+                    "id":          r.id,
+                    "source":      r.source,
+                    "quality":     r.quality,
+                    "track_count": len(r.tracks),
+                    "created_at":  r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in p.recordings
+            ],
+        })
+    return jsonify({"performer_found": True, "performances": performances})
+
+
+@bp.route("/save-info-file", methods=["POST"])
+@login_required
+def save_info_file():
+    """
+    POST /api/ingest/save-info-file
+    Write edited info-file text back to disk in the (not-yet-ingested) scan
+    folder, independent of Confirm — so an archivist can save corrections,
+    then re-run AI Assist against the fixed-up file. When `filename` matches
+    a text file scan_folder() already found in that folder, the target path
+    is re-derived server-side from that scan (not trusted from the client).
+    When it doesn't match anything scanned — the folder had no info file and
+    one was typed in from scratch — a new file is created in folder_path,
+    provided the name is a bare filename (no path separators/traversal).
+
+    Body: { folder_path, filename, content }
+    """
+    from app.utils.ingest import scan_folder
+
+    data        = request.get_json() or {}
+    folder_path = (data.get("folder_path") or "").strip()
+    filename    = (data.get("filename") or "").strip()
+    content     = data.get("content", "")
+    if not folder_path or not os.path.isdir(folder_path):
+        return jsonify({"error": "Invalid or inaccessible folder path"}), 400
+    if not filename:
+        return jsonify({"error": "No filename given"}), 400
+
+    scan  = scan_folder(folder_path)
+    match = next((tf for tf in scan["text_files"] if tf["filename"] == filename), None)
+    if match:
+        target_path = match["path"]
+    else:
+        safe_name = os.path.basename(filename)
+        if not safe_name or safe_name != filename:
+            return jsonify({"error": "Invalid filename"}), 400
+        target_path = os.path.join(folder_path, safe_name)
+
+    try:
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return jsonify({"error": "Could not write file: %s" % e}), 500
+
+    return jsonify({"ok": True, "filename": os.path.basename(target_path)})
 
 
 @bp.route("/ai-assist", methods=["POST"])
@@ -133,6 +280,7 @@ def ai_assist_recording(recording_id):
         "lineage": rec.lineage or "",
         "tracks":  [{"number": t.track_number, "title": t.title, "duration": t.duration}
                     for t in rec.tracks],
+        "info_file_content": rec.info_file_content or "",
     }
 
     api_key = get_api_key(current_user.id)
@@ -145,6 +293,7 @@ def ai_assist_recording(recording_id):
     threading.Thread(
         target=_run_ai_job,
         args=(job_id, rec.folder_path or "", current, api_key, model),
+        kwargs={"recording_id": recording_id, "app": current_app._get_current_object()},
         daemon=True,
     ).start()
     return jsonify({"job_id": job_id}), 202
@@ -168,8 +317,35 @@ def ai_assist_status(job_id):
 _INGEST_JOBS = {}  # job_id -> {status, copied, total, result, error}
 
 
+def _run_analysis_job(app, recording_id):
+    """
+    Background worker: run Librosa analysis on every track of a freshly
+    ingested recording. Fire-and-forget — nothing polls this, it just fills in
+    track_analysis (waveform, RMS, BPM, etc.) shortly after the recording
+    itself becomes visible. Deliberately its own thread, separate from the
+    ingest job, so analysis time never delays "done" (and the UI's jump to
+    the new recording page) the way the copy step used to. Re-Analyze can
+    always re-run this by hand; it upserts the same rows either way.
+    """
+    import traceback as _tb
+    try:
+        with app.app_context():
+            from app.models.recording import Recording
+            from app.utils.analysis import analyse_recording
+            rec = db.session.get(Recording, recording_id)
+            if not rec:
+                return
+            library_root = app.config.get("LIBRARY_ROOT", "")
+            n_ok, errors = analyse_recording(rec, library_root, db.session)
+            print("[ingest] auto-analysis for recording %s: %d ok, %d error(s)"
+                  % (recording_id, n_ok, len(errors)), flush=True)
+    except Exception:
+        _tb.print_exc()
+
+
 def _run_ingest_job(job_id, app, data, user_id):
     """Background worker: copy files (with progress) + create the DB chain."""
+    import threading
     import traceback as _tb
     job = _INGEST_JOBS[job_id]
     try:
@@ -179,6 +355,12 @@ def _run_ingest_job(job_id, app, data, user_id):
                 job["total"]  = total
             job["result"] = _do_confirm(data, user_id, prog)
             job["status"] = "done"
+        # Kick off Librosa analysis in its own background thread once the
+        # recording exists — decoupled from this job so it can't hold up
+        # reporting "done".
+        rec_id = (job.get("result") or {}).get("recording_id")
+        if rec_id:
+            threading.Thread(target=_run_analysis_job, args=(app, rec_id), daemon=True).start()
     except Exception as e:  # noqa: BLE001
         _tb.print_exc()
         job["error"]  = str(e)
@@ -243,7 +425,6 @@ def _do_confirm(data, user_id, progress_cb=None):
       "state":              "CO",
       "country":            "US",                 # optional
       "source":             "SBD",
-      "source_modifier":    null,
       "quality":            "B+",
       "lineage":            "...",
       "notes":              "",
@@ -251,6 +432,8 @@ def _do_confirm(data, user_id, progress_cb=None):
       "info_file_content":  "...",
       "event_name":         "Bonnaroo 2009",  # optional — name-resolved to Event record
       "event_id":           null,             # optional — use existing Event ID directly
+      "ai_result":          {...},  # optional — raw AI Assist result if run pre-confirm,
+                                     # saved as-is to ai_research_json (see run_ai_assist)
       "fingerprints":       [{"type":"ffp","filename":"...","content":"..."}],
       "tracks": [
         {"track_number":1,"title":"Dark Star","set":"Set 1","duration":1200,"filename":"t01.flac"}
@@ -363,7 +546,6 @@ def _do_confirm(data, user_id, progress_cb=None):
         state           = state,
         country         = country,
         source          = data.get("source"),
-        source_modifier = data.get("source_modifier"),
     )
 
     # ── 6. Move / copy folder into library ────────────────────────────────────
@@ -377,14 +559,25 @@ def _do_confirm(data, user_id, progress_cb=None):
         behavior = pref.value if pref else "copy"
     library_root = str(current_app.config["LIBRARY_ROOT"])
 
+    tracks_in = data.get("tracks", [])
+    # Audio is always flattened + renamed into the library folder's root on
+    # the way in (Ryan's 2026-07-14 decision — this is what fixes multi-disc
+    # sources like CD1/CD2 whose per-disc TRACKNUMBER tags reset and collide).
+    # Map is keyed by each track's ORIGINAL rel_path/filename as scanned;
+    # move_to_library() applies it while copying/moving. Fingerprint files
+    # (step 9) list the ORIGINAL names too, so matching happens against the
+    # original name and only the final DB/verification path uses the new one.
+    audio_rename_map = compute_audio_rename_map(tracks_in)
+
     try:
         new_folder_path = move_to_library(
-            source_folder = source_folder,
-            library_root  = library_root,
-            artist_name   = artist_name,
-            folder_name   = folder_name,
-            behavior      = behavior,
-            progress_cb   = progress_cb,
+            source_folder    = source_folder,
+            library_root     = library_root,
+            artist_name      = artist_name,
+            folder_name      = folder_name,
+            behavior         = behavior,
+            progress_cb      = progress_cb,
+            audio_rename_map = audio_rename_map,
         )
     except Exception as e:
         db.session.rollback()
@@ -396,10 +589,16 @@ def _do_confirm(data, user_id, progress_cb=None):
         rating_val = int(data["rating"]) if data.get("rating") not in (None, "") else None
     except (ValueError, TypeError):
         rating_val = None
+    # AI Assist may already have been run pre-confirm (Add Recording's own
+    # "AI Assist" button, before the recording even exists) — if so, the
+    # frontend sends the raw result back as "ai_result" so it isn't lost the
+    # moment Confirm creates the row. Same shape/storage as the post-save
+    # path (app.api.ingest._run_ai_job), just written synchronously here
+    # instead of after a background job.
+    ai_result = data.get("ai_result")
     rec = Recording(
         performance_id       = performance.id,
         source               = data.get("source"),
-        source_modifier      = data.get("source_modifier"),
         lineage              = data.get("lineage"),
         quality              = data.get("quality"),
         rating               = rating_val,
@@ -409,36 +608,111 @@ def _do_confirm(data, user_id, progress_cb=None):
         original_folder_name = os.path.basename(source_folder),
         info_file_content    = data.get("info_file_content"),
         notes                = data.get("notes"),
+        ai_research_json     = json.dumps(ai_result) if ai_result else None,
     )
     db.session.add(rec)
     db.session.flush()
 
     # ── 8. Create Tracks ──────────────────────────────────────────────────────
-    for t in data.get("tracks", []):
+    # file_path stores the NEW flattened+renamed name (what move_to_library
+    # actually wrote to disk), never the original subdir-nested scan name —
+    # original names are kept around only for fingerprint matching (step 9).
+    created_tracks     = []
+    original_filenames = {}   # Track (by identity, filled in below) → original filename
+    for t in tracks_in:
         # If recording is marked official, cascade to all tracks
         track_official = rec_is_official or bool(t.get("is_official", False))
         flags_raw      = t.get("flags") or []
-        db.session.add(Track(
+        orig_filename  = t.get("filename", "")
+        new_filename   = audio_rename_map.get(orig_filename, os.path.basename(orig_filename))
+        track = Track(
             recording_id = rec.id,
             track_number = t.get("track_number"),
             title        = t.get("title") or f"Track {t.get('track_number', '?')}",
             set          = t.get("set") or None,
             duration     = t.get("duration"),
-            file_path    = t.get("filename", ""),
+            file_path    = new_filename,
             is_official  = track_official,
             flags        = json.dumps(flags_raw) if flags_raw else None,
             songwriter   = t.get("songwriter") or None,
             notes        = t.get("notes") or None,
-        ))
+        )
+        db.session.add(track)
+        created_tracks.append(track)
+        original_filenames[track] = orig_filename
 
-    # ── 9. Store fingerprints ─────────────────────────────────────────────────
-    for fp in data.get("fingerprints", []):
+    # ── 9. Fingerprint files: archive raw content, parse, match to tracks, and
+    #       auto-verify. The files already sit in the library folder at this
+    #       point (move_to_library has copied/moved the whole source tree, not
+    #       just audio), so verification reads the exact copy the app streams
+    #       from — no continued dependence on the original source folder.
+    #
+    #       Matching happens against tracks' ORIGINAL (pre-flatten/rename)
+    #       filenames, since that's what the fingerprint file itself lists —
+    #       a lightweight proxy stands in for each Track during the match so
+    #       match_entries_to_tracks() (which reads `.file_path`/`.track_number`)
+    #       sees the original name, then `.real` routes the matched checksum
+    #       back to the actual Track, whose `.file_path` and on-disk location
+    #       already reflect the new flattened name. Renaming doesn't affect
+    #       the checksum itself — FFP/MD5/ST5 are content hashes.
+    #
+    #       Processed in FINGERPRINT_TYPE_PRIORITY order (ffp, then md5, then
+    #       st5) so that when a folder has more than one fingerprint file,
+    #       each track's stored status reflects the type most worth trusting
+    #       rather than whichever happened to be listed last.
+    fingerprints = sorted(
+        data.get("fingerprints", []),
+        key=lambda fp: FINGERPRINT_TYPE_PRIORITY.get(fp.get("type"), 9),
+    )
+    for fp in fingerprints:
+        fp_type  = fp.get("type")
+        rel_path = fp.get("rel_path") or os.path.basename(fp.get("filename") or "")
+        fp_abs_path = os.path.join(library_root, new_folder_path, rel_path)
+        content = None
+        try:
+            with open(fp_abs_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            pass
         db.session.add(RecordingFingerprint(
             recording_id     = rec.id,
-            fingerprint_type = fp.get("type"),
+            fingerprint_type = fp_type,
             filename         = fp.get("filename"),
-            content          = fp.get("content"),
+            content          = content,
         ))
+        if content and created_tracks:
+            # A fingerprint file nested inside a disc/set subdir (e.g.
+            # "CD1/checksum.md5") almost always lists filenames scoped to
+            # that disc only ("01.flac", "02.flac", ...). Since audio is now
+            # always flattened, those bare names can collide across discs —
+            # every disc's own "01.flac" — so matching against ALL tracks
+            # could hand a CD1 checksum to a CD2 track that happens to share
+            # a basename. Restrict candidates to tracks whose ORIGINAL path
+            # was under that same subdir; a root-level fingerprint file
+            # (fp_dir == "") still considers every track, same as before.
+            fp_dir = os.path.dirname(rel_path).replace(os.sep, "/")
+            if fp_dir:
+                candidates = [
+                    t for t in created_tracks
+                    if os.path.dirname(original_filenames.get(t, "")).replace(os.sep, "/") == fp_dir
+                ]
+                if not candidates:   # scoping found nothing usable — fall back
+                    candidates = created_tracks
+            else:
+                candidates = created_tracks
+            proxies = [
+                _ChecksumMatchProxy(track, original_filenames.get(track, track.file_path))
+                for track in candidates
+            ]
+            matches = match_entries_to_tracks(parse_checksum_file(content), proxies)
+            now = datetime.now(timezone.utc)
+            for proxy, expected in matches.items():
+                track          = proxy.real
+                track_abs_path = os.path.join(library_root, new_folder_path, track.file_path)
+                track.checksum_type        = fp_type
+                track.expected_checksum    = expected
+                track.checksum_status      = verify_track_checksum(track_abs_path, fp_type, expected)
+                track.checksum_verified_at = now
 
     # ── 10. Irrevocable ingest event ──────────────────────────────────────────
     db.session.add(RecordingEvent(
@@ -450,11 +724,14 @@ def _do_confirm(data, user_id, progress_cb=None):
 
     db.session.commit()
 
+    checksum_mismatches = sum(1 for t in created_tracks if t.checksum_status == "mismatch")
+
     return {
-        "recording_id":  rec.id,
-        "performer_id":  performer.id,
-        "folder_name":   folder_name,
-        "event_id":      event.id if event else None,
+        "recording_id":        rec.id,
+        "performer_id":        performer.id,
+        "folder_name":         folder_name,
+        "event_id":            event.id if event else None,
+        "checksum_mismatches": checksum_mismatches,
     }
 
 
@@ -592,7 +869,7 @@ def batch_scan():
                      source, lineage, track_count, tracks_titled }
       - already_ingested: bool  (folder path already in DB)
     """
-    from app.utils.ingest import scan_folder, read_flac_tags, parse_info_file
+    from app.utils.ingest import build_scan_payload
     from app.models.recording import Recording
 
     data       = request.get_json() or {}
@@ -682,42 +959,36 @@ def batch_scan():
                 "audio_count": 0, "size_mb": size_mb,
                 "tier": "red", "issues": issues,
                 "confidence": {}, "extracted": {},
+                "health": {"score": 0, "band": "red", "factors": [], "populated": 0, "total": 0},
                 "already_ingested": already_ingested,
             })
             continue
 
-        # ── Tag + info file scan ───────────────────────────────────────────────
+        # ── Full scan (tags + info file) ───────────────────────────────────────
+        # Same build_scan_payload() the Add Recording flow uses, so this folder's
+        # health score and field suggestions are identical no matter which flow
+        # scanned it — no separate hand-rolled parsing to drift out of sync.
         try:
-            files    = scan_folder(folder_path)
-            tags     = read_flac_tags(files["audio_files"])
-            tag_c    = tags["container"]
-            tag_trks = tags["tracks"]
+            scan = build_scan_payload(folder_path)
         except Exception:
-            tag_c    = {}
-            tag_trks = []
+            scan = None
 
-        info_parsed = {}
-        if files.get("text_files"):
-            try:
-                info_parsed = parse_info_file(
-                    files["text_files"][0]["path"],
-                    known_artists=known_performers,
-                )
-            except Exception:
-                info_parsed = {}
+        from_tags = ((scan or {}).get("suggestions") or {}).get("from_tags") or {}
+        from_info = ((scan or {}).get("suggestions") or {}).get("from_info_file") or {}
+        health    = (scan or {}).get("health") or {"score": 0, "band": "red"}
 
         # ── Field resolution: tags win, info file fills gaps ──────────────────
         # Artist
-        artist = (tag_c.get("artist") or info_parsed.get("artist") or "").strip()
+        artist = (from_tags.get("artist") or from_info.get("artist") or "").strip()
         artist_in_db = bool(
             artist and any(
                 artist.lower() == p.lower() for p in known_performers
             )
         )
-        artist_fuzzy = bool(info_parsed.get("artist_match"))
+        artist_fuzzy = bool(from_info.get("artist_match"))
 
         # Date — prefer CONCERTDATE tag, then individual fields from info file
-        concert_date_tag = tag_c.get("concert_date") or ""
+        concert_date_tag = from_tags.get("concert_date") or ""
         year = month = day = None
         if concert_date_tag:
             # Parse "YYYY-MM-DD" or "YYYY-MM" or "YYYY"
@@ -728,9 +999,9 @@ def batch_scan():
                 month = int(m.group(2)) if m.group(2) else None
                 day   = int(m.group(3)) if m.group(3) else None
         if not year:
-            year  = info_parsed.get("year")
-            month = info_parsed.get("month")
-            day   = info_parsed.get("day")
+            year  = from_info.get("year")
+            month = from_info.get("month")
+            day   = from_info.get("day")
         # Also try folder name if still no date
         if not year:
             m = _DATE_RE.search(os.path.basename(folder_path))
@@ -740,27 +1011,36 @@ def batch_scan():
                 day   = int(m.group(0)[8:10])
 
         # Tracks
+        tag_trks = from_tags.get("tracks", [])
         titled_count = sum(
             1 for t in tag_trks if t.get("title") and t["title"].strip()
         )
-        info_tracks  = info_parsed.get("tracks", [])
+        info_tracks  = from_info.get("tracks", [])
 
-        # Venue / location
-        venue   = (tag_c.get("venue")   or info_parsed.get("venue")   or "").strip() or None
-        city    = (info_parsed.get("city")    or "").strip() or None
-        state   = (info_parsed.get("state")   or "").strip() or None
-        country = (info_parsed.get("country") or "").strip() or None
-        # Try parsing CONCERTLOCATION tag
-        location_tag = tag_c.get("location") or ""
-        if location_tag and not (city or state):
-            parts = [p.strip() for p in location_tag.split(",")]
-            if len(parts) == 3:
-                city, state, country = parts[0], parts[1], parts[2]
-            elif len(parts) == 2:
-                city, country = parts[0], parts[1]
+        # Merged per-track inferred title (tag wins, info file fills gap) —
+        # the exact same resolution _batchIngestOne() uses when it actually
+        # writes tracks, so what's previewed here is what Auto-Ingest would do.
+        merged_tracks = []
+        for idx in range(audio_count):
+            tag_t  = tag_trks[idx]    if idx < len(tag_trks)    else {}
+            info_t = info_tracks[idx] if idx < len(info_tracks) else {}
+            tag_title  = (tag_t.get("title") or "").strip()
+            info_title = (info_t.get("title") or "").strip()
+            merged_tracks.append({
+                "number": idx + 1,
+                "title":  tag_title or info_title or None,
+                "source": "tags" if tag_title else ("info" if info_title else None),
+            })
 
-        source  = (tag_c.get("source")  or info_parsed.get("source")  or "").strip() or None
-        lineage = (tag_c.get("lineage") or info_parsed.get("lineage") or "").strip() or None
+        # Venue / location — build_scan_payload already parses the tag's
+        # CONCERTLOCATION into city/state/country via the shared parser.
+        venue   = (from_tags.get("venue")   or from_info.get("venue")   or "").strip() or None
+        city    = (from_tags.get("city")    or from_info.get("city")    or "").strip() or None
+        state   = (from_tags.get("state")   or from_info.get("state")   or "").strip() or None
+        country = (from_tags.get("country") or from_info.get("country") or "").strip() or None
+
+        source  = (from_tags.get("source")  or from_info.get("source")  or "").strip() or None
+        lineage = (from_tags.get("lineage") or from_info.get("lineage") or "").strip() or None
 
         # ── Confidence scoring ────────────────────────────────────────────────
         # Each dimension: "high" | "medium" | "low"
@@ -823,6 +1103,7 @@ def batch_scan():
             "size_mb":     size_mb,
             "tier":        tier,
             "issues":      issues,
+            "health":      health,
             "confidence": {
                 "artist": conf_artist,
                 "date":   conf_date,
@@ -843,13 +1124,18 @@ def batch_scan():
                 "track_count":      audio_count,
                 "tracks_titled":    titled_count,
                 "info_track_count": len(info_tracks),  # total from info file (not capped)
+                "tracks":           merged_tracks,
             },
             "already_ingested": already_ingested,
         })
 
-    # Sort: green first, then yellow, then red; alpha within tier
-    tier_order = {"green": 0, "yellow": 1, "red": 2}
-    results.sort(key=lambda r: (tier_order[r["tier"]], r["name"].lower()))
+    # Drop anything already in the DB — a folder that's been ingested (via this
+    # batch UI, the full wizard, or otherwise) shouldn't keep showing up as a
+    # pending candidate on a rescan.
+    results = [r for r in results if not r["already_ingested"]]
+
+    # Sort: highest completeness score first; alpha within a score for stability.
+    results.sort(key=lambda r: (-r["health"]["score"], r["name"].lower()))
 
     green  = sum(1 for r in results if r["tier"] == "green")
     yellow = sum(1 for r in results if r["tier"] == "yellow")

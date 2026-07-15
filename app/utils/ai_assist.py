@@ -15,6 +15,12 @@ Design rules baked into the system prompt:
   • Scalars (venue/city/state/country/date/source/event) are proposals and may be
     auto-applied by the UI when high-confidence. Track titles / setlist are NEVER
     proposals — setlist problems go to verify_items for human-by-ear resolution.
+  • A finding described in 'thinking' but missing from 'proposals' is a bug (seen
+    2026-07-14: model found a well-corroborated date/venue discrepancy, wrote it up
+    in the narrative, and returned zero proposals). The prompt now explicitly
+    requires every narrated discrepancy to have a matching proposal, even at low
+    confidence — the UI never auto-applies below high, so there's no reason to
+    withhold one.
   • Notes split: verify_items (transient, → DB Notes) vs provenance_notes
     (lasting, → info-file). ISO dates. Location = city[, state][, country], US only
     for state.
@@ -58,14 +64,45 @@ The recording's own tags, info file, and DB entry are NOT independent of each ot
 institutional archives, etree) over forums.
 - Propose scalar fields (artist, date, venue, city, state, country, source, event) in \
 'proposals'.
-- ALWAYS actively research the track listing / setlist online (setlist.fm, \
-archive.org/etree, official sources) and return it in 'track_titles' as \
-{number, title} for as many of the audio files as you can confidently identify. Track \
-titles are the single most valuable field and are usually missing — this is a primary \
-goal of the pass. Order them to match the audio files. If the audio file count does not \
-match the setlist you find, still return your best-ordered titles and flag the count \
-discrepancy in verify_items. If you CANNOT find a setlist online, say so explicitly in \
-verify_items ("No setlist found online for this recording"). Never invent titles.
+- Every discrepancy you describe in 'thinking' MUST also appear as a structured entry in \
+'proposals' — never narrate a correction ("the date is actually...", "this was really \
+recorded at...") without also emitting the matching proposal(s). If you're not fully \
+certain, propose it anyway at medium or low confidence rather than only mentioning it in \
+prose — low-confidence proposals are never auto-applied, so submitting one is always safe \
+and puts the finding in front of the human either way. A narrative-only finding with no \
+matching proposal is a bug, not a valid result. When you correct a date or venue, also \
+check whether city/state/country need a matching correction (a wrong venue often means \
+the location fields are wrong too) and propose those alongside it.
+- ALWAYS actively research the track listing / setlist — both online (setlist.fm, \
+archive.org/etree, official sources) AND in the info file text if one is provided — and \
+return it in 'track_titles' as {number, title} for as many of the audio files as you can \
+confidently identify. Track titles are the single most valuable field and are usually \
+missing — this is a primary goal of the pass. Order them to match the audio files. If the \
+audio file count does not match the setlist you find, still return your best-ordered \
+titles and flag the count discrepancy in verify_items. If you CANNOT find a setlist \
+anywhere, say so explicitly in verify_items ("No setlist found for this recording"). \
+Never invent titles.
+- The info file often contains a real setlist typed as plain, unnumbered lines — no \
+"1.", no track numbers, just song titles one per line in the spot where a tracklist \
+normally goes. Recognize that pattern and treat it as a primary source, not just prose to \
+skim:
+  * Segue notation appended to a title ("->", "-->", "/") marks a transition into the \
+next song — strip it, it isn't part of the title.
+  * Footnote markers appended to a title (*, **, ***, †, ^, or a bracketed number) point \
+to an annotation elsewhere in the file (often personnel/lineup notes). Strip the marker \
+from the title; the annotation text itself is worth keeping but belongs in \
+provenance_notes, not in the title.
+  * Section/break labels ("Set I", "Set II", "Encore", "Disc 1", "Intro") are structural \
+headers, not songs — skip them, but they confirm you're reading the tracklist section.
+  * A line that's only a time value (e.g. "3:40") is a duration, not a title — drop it.
+  * Named improvisation/instrumental segments ("Drums", "Bass", "Jam", "Tuning") ARE \
+legitimate track titles in live-show setlists — don't discard them just because they're \
+short or generic-sounding.
+  * Once you have a clean candidate list, cross-check it against your web research (the \
+artist's actual setlist for that date, or their general repertoire if the exact show \
+isn't findable) to raise your confidence and correct spelling/capitalization. Compare the \
+candidate count to the number of audio files as a sanity check, but a mismatch alone is \
+not a reason to withhold them — flag it in verify_items instead.
 - Dates are ISO (YYYY-MM-DD, partial ok). Venue = the real physical venue \
 (canonicalize nicknames). Location = city, state (US only), country.
 - Split your notes: verify_items = things the human should double-check (transient); \
@@ -166,8 +203,15 @@ def run_ai_assist(folder_path, current, api_key, model):
 
     content = [
         {"type": "text", "text": _metadata_summary(current, os.path.basename(folder_path))},
-        {"type": "text", "text": "Research this recording and call submit_analysis with your findings."},
     ]
+    info_text = (current.get("info_file_content") or "").strip()
+    if info_text:
+        content.append({"type": "text", "text":
+            "Info file contents, as found in the recording's folder (may contain an "
+            "unnumbered setlist — see the info-file parsing rules above):\n---\n"
+            + info_text + "\n---"})
+    content.append({"type": "text",
+                     "text": "Research this recording and call submit_analysis with your findings."})
 
     _log("start folder=%r model=%s" % (os.path.basename(folder_path), model))
 

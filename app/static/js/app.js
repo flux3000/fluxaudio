@@ -40,6 +40,17 @@ const App = (() => {
   const NON_MUSIC_FLAGS = TRACK_FLAGS.filter(f => f.nonMusic).map(f => f.key)
   const FLAG_LABELS     = Object.fromEntries(TRACK_FLAGS.map(f => [f.key, f.label]))
 
+  /** Official badge + flag chips ("bubble tags") for a track — shared between
+   *  View Recording's track title and Add Recording's track list, so the two
+   *  stay visually identical as flags/official evolve. */
+  function trackBadgesHtml(t) {
+    const officialBadge = t.is_official
+      ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
+    const flagChips = (t.flags || []).map(f =>
+      `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`).join('')
+    return officialBadge + flagChips
+  }
+
   /** Apply/remove the skip-filter visual state to all track rows in the current view. */
   function applySkipFilter() {
     document.querySelectorAll('.track-row[data-flags]').forEach(row => {
@@ -59,7 +70,7 @@ const App = (() => {
   // ── Waveform RAF loop ─────────────────────────────────────────────────────
   // Cancelled whenever we navigate away from the recording view.
   let _waveformRAF     = null   // requestAnimationFrame handle
-  let _waveformMap     = {}     // trackId → Float32Array of 300 normalised RMS values
+  let _waveformMap     = {}     // trackId → waveform data: {min:[...], max:[...]} (v2) or a flat array (v1, pre-bump)
   let _waveformTrackId = null   // which track is currently displayed
   let _waveformBg      = null   // offscreen ImageData — waveform without playhead
 
@@ -94,34 +105,42 @@ const App = (() => {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke()
     }
 
-    if (!waveform || !waveform.length) {
+    // Two shapes on disk: v2 = {min:[...], max:[...]} real peak envelope;
+    // v1 = a flat array of mirrored RMS-magnitude values (pre-bump tracks that
+    // haven't been re-analysed yet). Normalise both into top/bottom arrays.
+    const isV2 = waveform && !Array.isArray(waveform) && waveform.max
+    const top  = isV2 ? waveform.max : waveform
+    const bot  = isV2 ? waveform.min : waveform   // v1: same array, drawn mirrored
+
+    if (!top || !top.length) {
       _waveformBg = ctx.getImageData(0, 0, W, H)
       return
     }
 
-    const n = waveform.length
+    const n = top.length
 
-    // Style B — thin outline only, no fill
-    // Top edge
+    // Top edge (max / positive peaks)
     ctx.beginPath()
-    ctx.strokeStyle = 'rgba(0,210,185,0.75)'
-    ctx.lineWidth   = 1.5
+    ctx.strokeStyle = 'rgba(0,210,185,0.85)'
+    ctx.lineWidth   = 1.2
     ctx.lineJoin    = 'round'
     for (let i = 0; i < n; i++) {
       const x   = (i / (n - 1)) * W
-      const amp = waveform[i] * (mid - 4)
+      const amp = top[i] * (mid - 4)
       if (i === 0) ctx.moveTo(x, mid - amp); else ctx.lineTo(x, mid - amp)
     }
     ctx.stroke()
 
-    // Bottom edge (mirror)
+    // Bottom edge. v2's min values are already signed negative, so the same
+    // "mid - value*scale" formula as the top edge naturally pushes them down.
+    // v1 has no real min — mirror the magnitude downward instead.
     ctx.beginPath()
-    ctx.strokeStyle = 'rgba(0,210,185,0.35)'
-    ctx.lineWidth   = 1
+    ctx.strokeStyle = 'rgba(0,210,185,0.5)'
+    ctx.lineWidth   = 1.2
     for (let i = 0; i < n; i++) {
-      const x   = (i / (n - 1)) * W
-      const amp = waveform[i] * (mid - 4)
-      if (i === 0) ctx.moveTo(x, mid + amp); else ctx.lineTo(x, mid + amp)
+      const x = (i / (n - 1)) * W
+      const y = isV2 ? mid - bot[i] * (mid - 4) : mid + top[i] * (mid - 4)
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
     }
     ctx.stroke()
 
@@ -274,6 +293,11 @@ const App = (() => {
     return h ? `${h}h ${m}m` : `${m}m`
   }
 
+  // Compact "date added" (ingest timestamp) for the catalog column — ISO date only.
+  function fmtDateAdded(iso) {
+    return iso ? iso.slice(0, 10) : ''
+  }
+
   function sourceBadge(source) {
     if (!source) return ''
     const cls = ['SBD','AUD','MTX','FM'].includes(source) ? `badge-${source}` : 'badge-src'
@@ -309,9 +333,16 @@ const App = (() => {
     return s.split(' ').map((w, i) => {
       if (!w) return w
       const lo = w.toLowerCase()
-      return (i === 0 || !_lcWords.has(lo))
-        ? lo.charAt(0).toUpperCase() + lo.slice(1)
-        : lo
+      // Words can start with punctuation ("(Bill", "\"Song", "-Encore") — find
+      // the first actual letter to capitalize instead of blindly upper-casing
+      // index 0, which no-ops on the punctuation and leaves the real first
+      // letter (and everything else) lowercase. Minor-word lowering only
+      // applies to the plain no-punctuation case, same as before.
+      const m = lo.match(/[a-z]/)
+      if (!m) return lo
+      const idx = m.index
+      if (idx === 0 && i !== 0 && _lcWords.has(lo)) return lo
+      return lo.slice(0, idx) + lo.charAt(idx).toUpperCase() + lo.slice(idx + 1)
     }).join(' ')
   }
 
@@ -697,6 +728,7 @@ const App = (() => {
     nav.innerHTML = `
       <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recording</a>
       <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
+      <a class="nav-item nav-top" data-nav="recent" href="#/recent"><span class="nav-icon">◷</span> Recently Added</a>
       ${_dimSection('collections', null, 'Collections', true)}
       ${_dimSection('venues', '◎', 'Venues')}
       ${_dimSection('performers', '✦', 'Performers')}
@@ -741,8 +773,43 @@ const App = (() => {
         <span class="rec-rating">${rating}</span>
         <span class="rec-runtime">${runtime}</span>
         <span class="rec-tracks">${r.track_count}t${inc ? ' ' + inc : ''}</span>
+        <span class="rec-date-added">${esc(fmtDateAdded(r.created_at))}</span>
         <button class="rec-play-btn" data-rec-id="${r.id}" title="Play">▶</button>
       </div>`
+  }
+
+  // Minimal header row paired with flatRowHtml's grid — every cell is blank
+  // except "Added", which doubles as a click-to-sort toggle (default: unsorted,
+  // i.e. whatever order the page already puts rows in).
+  function recTableHeadHtml(showPerformer) {
+    return `
+      <div class="rec-table-head ${showPerformer ? 'with-performer' : ''}">
+        ${showPerformer ? '<span></span>' : ''}
+        <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+        <button class="rec-th-added" type="button" title="Sort by date added">Added <span class="rec-th-arrow"></span></button>
+        <span></span>
+      </div>`
+  }
+
+  // Wires the "Added" header's sort toggle for a rendered rec-table. `rows` is the
+  // page's row-data array (left in its original/default order); sorting is purely
+  // a display-time re-render, it doesn't touch how the page loads next time.
+  function wireDateAddedSort(mountEl, rows, showPerformer) {
+    const head = mountEl?.previousElementSibling
+    const btn  = head?.querySelector('.rec-th-added')
+    const arrow = head?.querySelector('.rec-th-arrow')
+    if (!mountEl || !btn) return
+    let dir = null   // null = default order; 'asc' | 'desc' once clicked
+    btn.addEventListener('click', () => {
+      dir = dir === 'desc' ? 'asc' : 'desc'
+      const sorted = rows.slice().sort((a, b) => {
+        const av = a.created_at || '', bv = b.created_at || ''
+        return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
+      })
+      mountEl.innerHTML = sorted.map(r => flatRowHtml(r, showPerformer)).join('')
+      wireRecordingRows(mountEl)
+      arrow.textContent = dir === 'asc' ? '▲' : '▼'
+    })
   }
 
   function wireRecordingRows(container) {
@@ -893,7 +960,8 @@ const App = (() => {
     let c
     try { c = await API.collections.get(id) }
     catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Collection not found</div></div>`); return }
-    const rows = (c.recordings || []).map(r => flatRowHtml(r, true)).join('')
+    const colRows = c.recordings || []
+    const rows = colRows.map(r => flatRowHtml(r, true)).join('')
     const descText = c.description && c.description.trim()
     setMainHTML(`
       <div class="performer-page">
@@ -905,9 +973,11 @@ const App = (() => {
           <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="col-desc" title="Click to edit">${descText ? esc(c.description) : 'Add a description…'}</div>
           <div class="subtitle">${c.recordings.length} recording${c.recordings.length !== 1 ? 's' : ''}</div>
         </div>
-        <div class="rec-table">${rows || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>
+        ${colRows.length ? recTableHeadHtml(true) : ''}
+        <div class="rec-table" id="rec-table-collection">${rows || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>
       </div>`)
     wireRecordingRows(mainContent)
+    if (colRows.length) wireDateAddedSort(document.getElementById('rec-table-collection'), colRows, true)
 
     const refreshSidebar = () => { _dimCache.collections = null; if (state.expandedDims.has('collections')) _renderDimRecords('collections') }
     async function saveField(patch) {
@@ -965,7 +1035,7 @@ const App = (() => {
           id: r.id, performer: p.performer_name,
           start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
           venue: p.venue_name, city: p.city, state: p.state, country: p.country,
-          source: r.source, source_modifier: r.source_modifier, quality: r.quality,
+          source: r.source, quality: r.quality,
           rating: r.rating, is_complete: r.is_complete,
           track_count: r.track_count, duration_sec: r.duration_sec,
         }, false)).join('')).join('')
@@ -1075,28 +1145,60 @@ const App = (() => {
     const totalRecordings = allArtists.reduce((n, a) => n + a.recording_count, 0)
 
     // Flatten to one row per recording — performer + date + venue on every line,
-    // already ordered by performer (backend) then chronologically old→new. No headers.
-    const rowsHtml = allArtists.map(artist =>
-      artist.performances.map(p =>
-        p.recordings.map(r => flatRowHtml({
+    // already ordered by performer (backend) then chronologically old→new.
+    const rows = allArtists.flatMap(artist =>
+      artist.performances.flatMap(p =>
+        p.recordings.map(r => ({
           id: r.id, performer: artist.performer_name,
           start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
           venue: p.venue_name, city: p.city, state: p.state, country: p.country,
-          source: r.source, source_modifier: r.source_modifier, quality: r.quality,
+          source: r.source, quality: r.quality,
           rating: r.rating, is_complete: r.is_complete,
-          track_count: r.track_count, duration_sec: r.duration_sec,
-        }, true)).join('')
-      ).join('')
-    ).join('')
+          track_count: r.track_count, duration_sec: r.duration_sec, created_at: r.created_at,
+        }))
+      )
+    )
+    const rowsHtml = rows.map(r => flatRowHtml(r, true)).join('')
 
     setMainHTML(`
       <div class="artist-header">
         <h1>Library</h1>
         <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${allArtists.length} performer${allArtists.length !== 1 ? 's' : ''}</div>
       </div>
-      <div class="rec-table">${rowsHtml}</div>`)
+      ${rows.length ? recTableHeadHtml(true) : ''}
+      <div class="rec-table" id="rec-table-library">${rowsHtml}</div>`)
 
     wireRecordingRows(mainContent)
+    if (rows.length) wireDateAddedSort(document.getElementById('rec-table-library'), rows, true)
+  }
+
+  /** Recently Added — virtual view, the N most recently ingested recordings.
+   *  Not a collection; just a live query, always exactly correct. */
+  async function renderRecentView() {
+    setActiveNav('recent')
+    setActiveArtist(null)
+    state.selectedArtist = null
+    setLoading()
+
+    let rows
+    try {
+      rows = await API.recordings.recent(50)
+    } catch (e) {
+      setMainHTML(`<div class="empty-state"><div class="empty-title">Failed to load recent recordings</div></div>`)
+      return
+    }
+    const rowsHtml = rows.map(r => flatRowHtml(r, true)).join('')
+
+    setMainHTML(`
+      <div class="artist-header">
+        <h1>Recently Added</h1>
+        <div class="subtitle">${rows.length} most recently added recording${rows.length !== 1 ? 's' : ''}</div>
+      </div>
+      ${rows.length ? recTableHeadHtml(true) : ''}
+      <div class="rec-table" id="rec-table-recent">${rowsHtml || '<div class="empty-state" style="min-height:120px"><div class="empty-title">No recordings yet</div></div>'}</div>`)
+
+    wireRecordingRows(mainContent)
+    if (rows.length) wireDateAddedSort(document.getElementById('rec-table-recent'), rows, true)
   }
 
   /** Performer page — editable info + member Artists + recording catalog. */
@@ -1131,16 +1233,17 @@ const App = (() => {
       (a.start_year || 0) - (b.start_year || 0) ||
       (a.start_month || 0) - (b.start_month || 0) ||
       (a.start_day || 0) - (b.start_day || 0))
-    const rowsHtml = ordered.map(p =>
-      p.recordings.map(r => flatRowHtml({
+    const perfRows = ordered.flatMap(p =>
+      p.recordings.map(r => ({
         id: r.id, performer: p.performer_name,
         start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
         venue: p.venue_name, city: p.city, state: p.state, country: p.country,
-        source: r.source, source_modifier: r.source_modifier, quality: r.quality,
+        source: r.source, quality: r.quality,
         rating: r.rating, is_complete: r.is_complete,
-        track_count: r.track_count, duration_sec: r.duration_sec,
-      }, false)).join('')
-    ).join('')
+        track_count: r.track_count, duration_sec: r.duration_sec, created_at: r.created_at,
+      }))
+    )
+    const rowsHtml = perfRows.map(r => flatRowHtml(r, false)).join('')
 
     const descText = performer.bio && performer.bio.trim()
     setMainHTML(`
@@ -1164,10 +1267,12 @@ const App = (() => {
 
           <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${withRecs.length} performance${withRecs.length !== 1 ? 's' : ''}</div>
         </div>
-        <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
+        ${perfRows.length ? recTableHeadHtml(false) : ''}
+        <div class="rec-table" id="rec-table-performer">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
       </div>`)
 
     wireRecordingRows(mainContent)
+    if (perfRows.length) wireDateAddedSort(document.getElementById('rec-table-performer'), perfRows, false)
 
     const refreshSidebar = () => { _dimCache.performers = null; if (state.expandedDims.has('performers')) _renderDimRecords('performers') }
 
@@ -1290,8 +1395,9 @@ const App = (() => {
   }
 
   // AI Assist on the saved-recording page — open the AI tab, run a research job,
-  // render read-only findings. Apply anything worthwhile via the inline editors.
-  async function startRecAiAssist(recordingId, rec) {
+  // render interactive findings (same Apply/auto-update experience as Add
+  // Recording, adapted for a live record — see renderRecAiResults).
+  async function startRecAiAssist(recordingId, rec, perf) {
     // The button lives inside the (already-open) AI pane; running replaces it.
     const body = document.getElementById('ai-results')
     if (!body) return
@@ -1300,7 +1406,8 @@ const App = (() => {
     try {
       const { job_id } = await API.ingest.aiAssistRecording(recordingId)
       const result = await pollAiJob(job_id, t0)
-      renderRecAiResults(result, body)
+      if (rec) rec.ai_research = result   // keep local state in sync (server has already saved it)
+      renderRecAiResults(result, body, recordingId, rec, perf)
     } catch (e) {
       const secs = Math.round((Date.now() - t0) / 1000)
       const msg = /no_api_key/.test(e.message)
@@ -1310,38 +1417,232 @@ const App = (() => {
         <p class="ai-res-note" style="color:var(--red)">${msg}</p>
         <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist-retry">✨ Try again</button>
       </div>`
-      document.getElementById('btn-ai-assist-retry')?.addEventListener('click', () => startRecAiAssist(recordingId, rec))
+      document.getElementById('btn-ai-assist-retry')?.addEventListener('click', () => startRecAiAssist(recordingId, rec, perf))
     }
   }
 
-  // Read-only render of AI findings on the recording page (proposals shown with
-  // confidence + source links; edit fields inline to apply anything worth keeping).
-  function renderRecAiResults(r, body) {
-    if (!body) return
-    const props = (r.proposals || []).map(p => `
+  // ── Checksums pane — .ffp/.md5/.st5 fingerprint verification (View Recording) ──
+  // Track.checksum is {type, expected, status, verified_at} or null (no
+  // fingerprint file could be matched to that track). "status" is one of
+  // match / mismatch / unverified, set by app/utils/checksums.py.
+  const CKSUM_STATUS_LABEL = { match: '✓ Match', mismatch: '✗ Mismatch', unverified: '— Unverified' }
+
+  function buildChecksumsPaneHtml(tracks) {
+    tracks = tracks || []
+    const withData = tracks.filter(t => t.checksum)
+    if (!withData.length) {
+      return `<div class="info-panel-empty">No checksums on file for this recording yet — click Re-validate to check the library folder for a fingerprint file.</div>`
+    }
+    const mismatches = withData.filter(t => t.checksum.status === 'mismatch').length
+    const summary = mismatches
+      ? `<div class="cksum-summary cksum-summary--warn">⚠ ${mismatches} track${mismatches === 1 ? '' : 's'} did not match ${mismatches === 1 ? 'its' : 'their'} recorded checksum.</div>`
+      : `<div class="cksum-summary cksum-summary--ok">✓ All checked tracks match their recorded checksum.</div>`
+    const rows = tracks.map(t => {
+      const c = t.checksum
+      const num = esc(String(t.track_number).padStart(2, '0'))
+      const title = esc(t.title)
+      if (!c) {
+        return `<div class="cksum-row"><span class="cksum-num">${num}</span><span class="cksum-title">${title}</span><span class="cksum-type">—</span><span class="cksum-status">no fingerprint</span></div>`
+      }
+      return `
+        <div class="cksum-row">
+          <span class="cksum-num">${num}</span>
+          <span class="cksum-title">${title}</span>
+          <span class="cksum-type">${esc((c.type || '').toUpperCase())}</span>
+          <span class="cksum-status cksum-status--${esc(c.status || '')}">${CKSUM_STATUS_LABEL[c.status] || esc(c.status || '')}</span>
+        </div>
+        ${c.status === 'mismatch' ? `<div class="cksum-detail">expected ${esc(c.expected || '')}</div>` : ''}`
+    }).join('')
+    const md5Note = withData.some(t => t.checksum.type === 'md5')
+      ? `<p class="cksum-hint">MD5 checks the whole file, tags included — any tag edit (including Write Tags to Files) will flip a match to a mismatch. Expected, not corruption.</p>` : ''
+    const st5Note = withData.some(t => t.checksum.type === 'st5')
+      ? `<p class="cksum-hint">ST5 verification is best-effort — treat a mismatch as worth a second look, not a hard failure.</p>` : ''
+    return `${summary}<div class="cksum-rows">${rows}</div>${md5Note}${st5Note}`
+  }
+
+  // Add Recording's Checksums pane is detection-only — the files haven't been
+  // copied yet at review time, so there's nothing to verify against; real
+  // verification happens automatically on Confirm (see api/ingest.py
+  // _do_confirm) once the copy exists at a stable library path.
+  function buildChecksumsPreviewHtml(fingerprints) {
+    fingerprints = fingerprints || []
+    if (!fingerprints.length) {
+      return `<div class="info-panel-empty">No checksum/fingerprint files (.ffp / .md5 / .st5) found in this folder.</div>`
+    }
+    const rows = fingerprints.map(fp => `
+      <div class="cksum-row">
+        <span class="cksum-type">${esc((fp.type || '').toUpperCase())}</span>
+        <span class="cksum-title">${esc(fp.filename)}</span>
+      </div>`).join('')
+    return `<div class="cksum-summary">Found ${fingerprints.length} fingerprint file${fingerprints.length === 1 ? '' : 's'} — verified automatically against the copied files when you confirm.</div>
+      <div class="cksum-rows">${rows}</div>`
+  }
+
+  // ── Shared AI Assist results template — Add Recording + View Recording ────────
+  // One HTML builder for both surfaces so they stay visually/structurally in
+  // sync as the feature evolves; each caller wires its own Apply behavior
+  // (draft form state vs. live API writes — see renderAiResults / renderRecAiResults).
+  // city/state/country are attributes of the Venue record, not the show
+  // (Ryan's call, 2026-07-13) — split into a distinct sub-group so that reads
+  // clearly regardless of where the proposal ends up getting applied.
+  const AI_VENUE_FIELDS = ['city', 'state', 'country']
+
+  function buildAiResultsHtml(r, opts = {}) {
+    const proposals = r.proposals || []
+    const row = (p, i) => `
       <div class="ai-res-row">
         <span class="ai-res-field">${esc(p.field)}</span>
         <span class="ai-res-value">${esc(p.proposed)}
           <span class="ai-res-conf">${esc(p.confidence || '')}</span>${p.url ? ` <a class="ai-link" href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ''}</span>
-      </div>`).join('')
+        <button class="btn btn-ghost btn-xs ai-apply-btn" data-idx="${i}">Apply</button>
+      </div>`
+    const indexed    = proposals.map((p, i) => ({ p, i }))
+    const perfRows   = indexed.filter(x => !AI_VENUE_FIELDS.includes(x.p.field))
+    const venueRows  = indexed.filter(x =>  AI_VENUE_FIELDS.includes(x.p.field))
+    const propsHtml  = perfRows.map(x => row(x.p, x.i)).join('')
+      + (venueRows.length
+          ? `<div class="ai-res-subhead">Venue details <span class="ai-res-subhead-note">— the venue record, not this show</span></div>${venueRows.map(x => row(x.p, x.i)).join('')}`
+          : '')
+
     const tt = r.track_titles || []
     const trackSection = tt.length
-      ? `<div class="ai-res-section"><div class="ai-res-title">Track Listing</div><div class="ai-tt-list">${tt.map(t =>
-          `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div></div>` : ''
+      ? `<div class="ai-res-section">
+           <div class="ai-res-title">Track Listing <button class="btn btn-ghost btn-xs" id="ai-apply-tracks">Apply to tracks</button></div>
+           <div class="ai-tt-list">${tt.map(t =>
+             `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div>
+         </div>` : ''
+
     const notes = (title, items) => items && items.length
       ? `<div class="ai-res-section"><div class="ai-res-title">${title}</div>${items.map(v => `<p class="ai-res-note">${esc(v)}</p>`).join('')}</div>` : ''
     const sources = (r.sources || []).length
       ? `<div class="ai-res-section"><div class="ai-res-title">Sources</div>${r.sources.map(s => `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''
-    body.innerHTML = `
+
+    const rerunBtn = opts.showRerun
+      ? `<button class="btn btn-ghost btn-xs" id="btn-ai-rerun" title="Run AI Assist again">↻ Run again</button>` : ''
+
+    return `
       <div class="ai-res-section">
-        <div class="ai-res-title">Metadata Review</div>
+        <div class="ai-res-title">Metadata Review ${rerunBtn}</div>
         ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
-        ${props || '<p class="ai-res-empty">No field changes proposed.</p>'}
+        ${propsHtml || '<p class="ai-res-empty">No field changes proposed.</p>'}
       </div>
       ${trackSection}
       ${notes('Verify', r.verify_items)}
       ${notes('Provenance', r.provenance_notes)}
       ${sources}`
+  }
+
+  // Apply a single AI proposal to the live, saved recording via the same
+  // endpoints the page's own inline editors use. city/state/country land on
+  // the linked Venue when one exists, otherwise on the Performance's own
+  // fallback location fields — mirrors how the app resolves location for
+  // display everywhere else. `venueRef` is a small mutable holder so a
+  // 'venue' proposal applied earlier in the same batch is visible to a
+  // 'city'/'state'/'country' proposal applied right after it.
+  async function applyRecProposal(field, value, perf, recordingId, venueRef) {
+    const perfId = perf.id
+    switch (field) {
+      case 'artist':
+        await API.performances.update(perfId, { performer_name: value })
+        invalidateDims('performers', 'artists')
+        break
+      case 'date': {
+        const p = String(value).split('-')
+        await API.performances.update(perfId, {
+          start_year:  p[0] ? parseInt(p[0]) : null,
+          start_month: p[1] ? parseInt(p[1]) : null,
+          start_day:   p[2] ? parseInt(p[2]) : null,
+        })
+        break
+      }
+      case 'venue': {
+        const existing = await API.venues.list(value)
+        let venueId = (existing || []).find(v => v.name.toLowerCase() === value.toLowerCase())?.id
+        if (!venueId) { const c = await API.venues.create({ name: value }); venueId = c.id; invalidateDims('venues') }
+        await API.performances.update(perfId, { venue_id: venueId })
+        venueRef.venue_id = venueId
+        break
+      }
+      case 'event': {
+        const existing = await API.events.search(value)
+        let eventId = (existing || []).find(e => e.name.toLowerCase() === value.toLowerCase())?.id
+        if (!eventId) { const c = await API.events.create({ name: value }); eventId = c.id }
+        await API.performances.update(perfId, { event_id: eventId })
+        break
+      }
+      case 'source':
+        await API.recordings.update(recordingId, { source: value, change_note: 'AI Assist' })
+        break
+      case 'city': case 'state': case 'country':
+        if (venueRef.venue_id) await API.venues.update(venueRef.venue_id, { [field]: value })
+        else await API.performances.update(perfId, { [field]: value })
+        break
+    }
+  }
+
+  // Apply the AI's researched setlist onto a saved recording's tracks.
+  async function applyRecTrackTitles(titles, rec, recordingId) {
+    const jobs = (titles || [])
+      .map(tt => {
+        const track = (rec.tracks || []).find(t => String(t.track_number) === String(tt.number))
+        return (track && tt.title) ? API.tracks.update(track.id, { title: tt.title }) : null
+      })
+      .filter(Boolean)
+    if (jobs.length) await Promise.all(jobs)
+    renderRecordingView(recordingId)
+  }
+
+  // Applied fields land immediately (matches every other field on this page's
+  // click-to-edit/auto-save pattern) — no Revert toggle; a full reload
+  // refreshes every affected field at once, so "undo" is just editing again.
+  // High-confidence proposals auto-apply, sequentially and priority-ordered
+  // so a 'venue' proposal lands before any 'city'/'state'/'country' proposal
+  // that depends on it, then one reload for the whole batch.
+  const AI_APPLY_PRIORITY = { artist: 0, date: 1, venue: 2, event: 3, source: 4, city: 5, state: 6, country: 7 }
+
+  function renderRecAiResults(r, body, recordingId, rec, perf) {
+    if (!body) return
+    body.innerHTML = buildAiResultsHtml(r, { showRerun: true })
+    const venueRef = { venue_id: perf?.venue_id || null }
+
+    async function applyOne(idx, btn) {
+      const p = (r.proposals || [])[idx]
+      if (!p) return
+      if (btn) { btn.disabled = true; btn.textContent = '…' }
+      try {
+        await applyRecProposal(p.field, p.proposed, perf, recordingId, venueRef)
+        if (btn) { btn.textContent = '✓ Applied'; btn.classList.add('applied') }
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Apply' }
+        alert('Failed to apply: ' + e.message)
+        throw e
+      }
+    }
+
+    body.querySelectorAll('.ai-apply-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try { await applyOne(parseInt(btn.dataset.idx), btn) }
+        catch (_) { return }
+        renderRecordingView(recordingId)
+      })
+    })
+    document.getElementById('ai-apply-tracks')?.addEventListener('click', () =>
+      applyRecTrackTitles(r.track_titles || [], rec, recordingId))
+    document.getElementById('btn-ai-rerun')?.addEventListener('click', () =>
+      startRecAiAssist(recordingId, rec, perf))
+
+    const highConf = (r.proposals || []).map((p, i) => ({ p, i }))
+      .filter(x => x.p.confidence === 'high')
+      .sort((a, b) => (AI_APPLY_PRIORITY[a.p.field] ?? 9) - (AI_APPLY_PRIORITY[b.p.field] ?? 9))
+    if (highConf.length) {
+      ;(async () => {
+        for (const x of highConf) {
+          try { await applyOne(x.i, body.querySelector(`.ai-apply-btn[data-idx="${x.i}"]`)) }
+          catch (_) { /* one failed auto-apply shouldn't block the rest or the reload */ }
+        }
+        renderRecordingView(recordingId)
+      })()
+    }
   }
 
   /** Recording detail — split panel: tracks + info file */
@@ -1373,9 +1674,7 @@ const App = (() => {
     const venueId    = perf?.venue_id   || null
     const locStr     = perf ? fmtLocation(perf.city, perf.state, perf.country) : ''
     const perfName   = perf?.performer || ''
-    const modifier   = rec.source_modifier
-      ? `<span class="badge-modifier">${esc(rec.source_modifier)}</span>` : ''
-
+    const eventStr   = perf?.event_name || ''
     // Date line — venue is a clickable link if we have a venue_id
     const venueHtml  = venueId
       ? `<span class="venue-link" data-venue-id="${venueId}">${esc(venueStr)}</span>`
@@ -1399,11 +1698,8 @@ const App = (() => {
     // + inline note. Factored so the right-click quick-edit menu can refresh a
     // single row in place after changing flags or notes.
     function trackTitleInnerHtml(t) {
-      const officialBadge = t.is_official
-        ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
-      const flagChips = (t.flags || []).map(f =>
-        `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`).join('')
-      return `<span class="track-title-text">${esc(t.title)}</span>${officialBadge}${flagChips ? ' ' + flagChips : ''}`
+      const badges = trackBadgesHtml(t)
+      return `<span class="track-title-text">${esc(t.title)}</span>${badges ? ' ' + badges : ''}`
     }
 
     // Flat track list — no disc/set grouping. Right-click a row to quick-edit
@@ -1431,10 +1727,14 @@ const App = (() => {
       ? `<pre class="info-file-content">${esc(rec.info_file_content)}</pre>`
       : `<div class="info-panel-empty">No info file attached</div>`
 
-    // Build per-track waveform map for the RAF loop
+    // Build per-track waveform map for the RAF loop. Two shapes on disk:
+    // v2 = {min:[...], max:[...]} (real peak envelope), v1 = a flat array
+    // (mirrored RMS magnitude) for tracks not yet re-analysed since the bump.
     _waveformMap = {}
     ;(rec.tracks || []).forEach(t => {
-      if (t.analysis?.waveform?.length) _waveformMap[t.id] = t.analysis.waveform
+      const wf = t.analysis?.waveform
+      const hasWf = Array.isArray(wf) ? wf.length > 0 : !!(wf && wf.max && wf.max.length)
+      if (hasWf) _waveformMap[t.id] = wf
     })
     const hasAnalysis = Object.keys(_waveformMap).length > 0
 
@@ -1496,7 +1796,7 @@ const App = (() => {
 
     // Right panel: collapsible sections — Recording info + Fidelity metrics
     const trunc          = (s, n) => s && s.length > n ? s.slice(0, n) + '…' : s
-    const sourceDisplay  = [rec.source, rec.source_modifier].filter(Boolean).join(' · ')
+    const sourceDisplay  = rec.source || ''
     const lineageDisplay = rec.lineage ? trunc(rec.lineage, 220) : null
 
     // Top-right panel: always show Source + Lineage + Quality + Rating, then Fidelity if analysed.
@@ -1549,9 +1849,12 @@ const App = (() => {
             <span class="rec-f rec-f-date${canEdit ? ' pp-editable' : ''}" id="rec-f-date">${dateStr ? esc(dateStr) : (canEdit ? '<span class="pp-empty">Add date</span>' : '')}</span>
             <span class="rec-dot">·</span>
             ${canEdit
-              ? `<span class="rec-f rec-f-venue pp-editable" id="rec-f-venue">${venueStr ? esc(venueStr) : '<span class="pp-empty">Add venue</span>'}</span>`
+              ? `<span class="rec-f rec-f-venue pp-editable" id="rec-f-venue">${venueStr ? esc(venueStr) : '<span class="pp-empty">Add venue</span>'}</span>${venueId ? `<a class="rec-venue-edit-link" href="#/venue/${venueId}" title="Edit this venue's own details (city/state/country/bio)">✎</a>` : ''}`
               : (venueHtml || '')}
             ${locStr ? `<span class="rec-dot">·</span><span class="rec-f-loc">${esc(locStr)}</span>` : ''}
+            ${canEdit
+              ? `<span class="rec-dot">·</span><span class="rec-f rec-f-event pp-editable${eventStr ? '' : ' pp-empty'}" id="rec-f-event" title="Click to set the festival/event this show is part of">${eventStr ? esc(eventStr) : 'Add event'}</span>`
+              : (eventStr ? `<span class="rec-dot">·</span><span class="rec-f-loc">${esc(eventStr)}</span>` : '')}
           </div>
           <div class="rec-artists-row" id="rec-artists"></div>
           <div class="rec-header-notes${canEdit ? ' pp-editable' : ''}${rec.notes ? '' : ' pp-empty'}" id="rec-notes"${canEdit ? ' title="Click to edit notes"' : ''}>${rec.notes ? esc(rec.notes) : (canEdit ? 'Add notes…' : '')}</div>
@@ -1616,10 +1919,18 @@ const App = (() => {
               </div>
             </div>
 
+            <!-- Checksums pane — .ffp/.md5/.st5 fingerprint verification -->
+            <div class="slide-pane" id="sp-checksums">
+              <div class="slide-pane-header">Checksums
+                <button class="btn btn-ghost btn-xs" id="btn-cksum-revalidate" title="Re-check against the files on disk">↻ Re-validate</button>
+              </div>
+              <div class="slide-pane-scroll" id="sp-checksums-body">${buildChecksumsPaneHtml(rec.tracks)}</div>
+            </div>
+
             ${canEdit ? `
             <!-- AI Assist pane (results of a web-research pass) -->
             <div class="slide-pane" id="sp-ai">
-              <div class="slide-pane-header">AI Assist <span class="ai-assist-note">Not saved — update fields yourself with anything useful.</span></div>
+              <div class="slide-pane-header">AI Assist <span class="ai-assist-note">Saved with this recording — Apply writes straight to the record.</span></div>
               <div class="slide-pane-scroll"><div class="ai-results" id="ai-results">
                 <div class="ai-assist-cta">
                   <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
@@ -1634,6 +1945,7 @@ const App = (() => {
           <div class="slide-tabs">
             <button class="slide-tab" data-pane="info">Info File</button>
             <button class="slide-tab" data-pane="filetags">File Tags</button>
+            <button class="slide-tab" data-pane="checksums">Checksums</button>
             <button class="slide-tab" data-pane="spectrogram">Spectrogram</button>
             ${canEdit ? `<button class="slide-tab slide-tab--ai" data-pane="ai">AI Assist</button>` : ''}
           </div>
@@ -1700,7 +2012,7 @@ const App = (() => {
     // ── Quick edit: recording metadata (Source/Lineage/Quality/Rating) ────────
     // Click an editable value → inline input → Enter saves, Esc cancels.
     function metaCellDisplay(field) {
-      if (field === 'source')  return esc([rec.source, rec.source_modifier].filter(Boolean).join(' · ') || '—')
+      if (field === 'source')  return esc(rec.source || '—')
       if (field === 'lineage') { const l = rec.lineage; return esc(l ? (l.length > 220 ? l.slice(0, 220) + '…' : l) : '—') }
       if (field === 'rating')  return rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'
       return esc(rec.quality || '—')  // quality
@@ -1909,6 +2221,34 @@ const App = (() => {
         })
       })
 
+      // Festival / Event → picker (search existing / create new / clear)
+      const eventEl = document.getElementById('rec-f-event')
+      eventEl?.addEventListener('click', () => {
+        if (eventEl.querySelector('input')) return
+        eventEl.innerHTML = `<span class="event-picker-wrap" style="display:inline-block; min-width:160px">
+          <input type="text" class="pp-inline-input" id="rec-event-input" value="${esc(perf.event_name || '')}" autocomplete="off" />
+          <div class="event-dropdown" id="rec-event-dd" style="display:none"></div></span>`
+        const input = document.getElementById('rec-event-input')
+        input.focus(); input.select()
+        let committed = false
+        const commitEvent = async ({ id, name }) => {
+          if (committed) return; committed = true
+          try {
+            let eventId = id
+            if (!eventId && name) { const c = await API.events.create({ name }); eventId = c.id }
+            await API.performances.update(perf.id, { event_id: eventId || null })
+          } catch (e) { alert('Failed: ' + e.message) }
+          reload()
+        }
+        wirePickerDropdown(input, document.getElementById('rec-event-dd'), API.events.search,
+          ({ id, name }) => commitEvent({ id, name }), 'Create new event')
+        input.addEventListener('keydown', e => {
+          e.stopPropagation()
+          if (e.key === 'Enter') { e.preventDefault(); commitEvent({ id: null, name: input.value.trim() }) }
+          else if (e.key === 'Escape') { committed = true; reload() }
+        })
+      })
+
       // Notes → inline multiline (recording-level)
       makeInlineEditable(document.getElementById('rec-notes'), {
         multiline: true, placeholder: 'Add notes…',
@@ -1949,10 +2289,16 @@ const App = (() => {
           }, 'Create new artist')
       }
       renderRecArtists()
-    }
 
-    // AI Assist (top-right) — research the web to verify/fill this recording.
-    document.getElementById('btn-ai-assist')?.addEventListener('click', () => startRecAiAssist(recordingId, rec))
+      // AI Assist (top-right) — research the web to verify/fill this recording.
+      // Scoped inside this block (like the header editors above) since applying
+      // a proposal needs perf.id. Non-editors never get the pane in the DOM.
+      document.getElementById('btn-ai-assist')?.addEventListener('click', () => startRecAiAssist(recordingId, rec, perf))
+      // Saved research from a prior run — render it immediately instead of the CTA.
+      if (rec.ai_research) {
+        renderRecAiResults(rec.ai_research, document.getElementById('ai-results'), recordingId, rec, perf)
+      }
+    }
 
     // Analyze Audio — run Librosa analysis on all tracks
     document.getElementById('btn-analyze-audio')?.addEventListener('click', async () => {
@@ -1974,6 +2320,19 @@ const App = (() => {
         btn.textContent = 'Analyze Audio'
         alert('Analysis failed: ' + e.message)
       }
+    })
+
+    // Re-validate checksums — re-checks against the files on disk now, and
+    // opportunistically picks up any fingerprint file that was never parsed
+    // (e.g. this recording predates the checksum feature). Not gated on
+    // canEdit — re-checking integrity is a read-only action.
+    document.getElementById('btn-cksum-revalidate')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget
+      btn.disabled = true
+      btn.textContent = '…'
+      try { await API.recordings.verifyChecksums(recordingId) }
+      catch (err) { alert('Re-validate failed: ' + err.message) }
+      renderRecordingView(recordingId)
     })
 
     // Skip non-music toggle (action bar instance)
@@ -2061,6 +2420,7 @@ const App = (() => {
         document.getElementById(`sp-${pane}`)?.classList.add('active')
         document.querySelector(`.slide-tab[data-pane="${pane}"]`)?.classList.add('active')
         activePane = pane
+        state.recLastPane = pane   // survives the reload an Apply/edit triggers
         if (pane === 'spectrogram' && defaultTrackId) {
           const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
           loadSpectrogram(defaultTrackId, defaultTrack?.title)
@@ -2077,14 +2437,16 @@ const App = (() => {
             document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
             document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
             activePane = null
+            state.recLastPane = null
           } else {
             openPane(pane)
           }
         })
       })
 
-      // Default: Info File open.
-      openPane('info')
+      // Default: whichever pane was open before the last reload (e.g. an AI
+      // Assist Apply), falling back to Info File on a fresh visit.
+      openPane(state.recLastPane || 'info')
     })()
 
     // ── Waveform canvas — start RAF loop ────────────────────────────────────
@@ -2198,11 +2560,22 @@ const App = (() => {
     results:     null,   // full scan response
     ingestedIds: new Map(), // path → recording_id for items ingested this session
     expandedPaths: new Set(), // expanded row paths
+    behavior:    null,   // 'copy' | 'move' — synced with the shared ingest_file_behavior pref
   }
 
   async function renderBatchImportView() {
     setActiveNav('ingest')   // Batch is reached from Add Recording; keep it lit
-    if (!batch.results) { renderBatchPickerView(); return }
+    if (!batch.sourceDir) { renderBatchPickerView(); return }
+    // Re-scan the last directory every time we land on this route (not just
+    // the first time) — so returning here always reflects current disk + DB
+    // state and anything ingested (this session or otherwise) drops off the list.
+    setMainHTML(`<div class="empty-state">Refreshing <code>${esc(batch.sourceDir)}</code>…</div>`)
+    try {
+      batch.results = await API.ingest.batchScan(batch.sourceDir)
+    } catch (e) {
+      setMainHTML(`<div class="empty-state" style="color:var(--red)">Scan failed: ${esc(e.message)}</div>`)
+      return
+    }
     renderBatchResultsView()
   }
 
@@ -2256,45 +2629,44 @@ const App = (() => {
     ].filter(Boolean).join('-')
   }
 
-  function _batchTierLabel(tier) {
-    return tier === 'green' ? '🟢' : tier === 'yellow' ? '🟡' : '🔴'
-  }
-
-  // Render a single compact row (all tiers share this shell)
+  // Render a single compact row — score-driven only; no tier dots/border.
   function _batchRow(item) {
     const e       = item.extracted
     const conf    = item.confidence
+    const health  = item.health || { score: 0, band: 'red' }
     const ingestedId = batch.ingestedIds.get(item.path)
     const ingested   = ingestedId != null
     const expanded = batch.expandedPaths.has(item.path)
     const dateStr  = _batchDateStr(e)
     const loc      = [e.city, e.state].filter(Boolean).join(', ')
 
-    // Confidence flags (yellow/red only)
-    const confFlags = []
-    if (conf.artist && conf.artist !== 'high') confFlags.push(`artist: ${conf.artist}`)
-    if (conf.date   && conf.date   !== 'high') confFlags.push(`date: ${conf.date}`)
-    if (conf.tracks && conf.tracks !== 'high') confFlags.push(`tracks: ${conf.tracks}`)
-
     // Issue chips
     const issueChips = item.issues.map(iss =>
       `<span class="batch-issue-${iss.severity}">${esc(iss.msg)}</span>`
     ).join('')
 
-    // Action button
+    // Action buttons — every uningested row gets both: Auto-Ingest (trust the
+    // bot) or Review (open the full wizard, pre-scanned), regardless of score.
     let actionBtn = ''
     if (ingested) {
       actionBtn = `<span class="batch-done-check">✓ Ingested</span>
                    <a class="batch-rec-link" href="#/recording/${ingestedId}">View →</a>`
-    } else if (item.tier === 'green') {
-      actionBtn = `<button class="btn btn-primary btn-sm batch-ingest-btn" data-path="${esc(item.path)}">Ingest</button>`
-    } else if (item.tier === 'yellow') {
-      actionBtn = `<button class="btn btn-secondary btn-sm batch-review-btn" data-path="${esc(item.path)}">Review →</button>`
     } else {
-      actionBtn = `<button class="btn btn-ghost btn-sm batch-review-btn" data-path="${esc(item.path)}">Manual →</button>`
+      actionBtn = `<button class="btn btn-primary btn-sm batch-ingest-btn" data-path="${esc(item.path)}">Auto-Ingest</button>
+                   <button class="btn btn-ghost btn-sm batch-review-btn" data-path="${esc(item.path)}">Review →</button>`
     }
 
-    // Expanded detail panel
+    // Full inferred per-track listing — exactly what Auto-Ingest would write,
+    // so a person can eyeball the setlist before deciding Review vs Auto-Ingest.
+    const trackRows = (e.tracks || []).map(t => `
+      <div class="batch-track-row">
+        <span class="batch-track-num">${t.number}</span>
+        <span class="batch-track-title ${!t.title ? 'batch-val-uncertain' : ''}">${esc(t.title || '(no title)')}</span>
+        <span class="batch-track-src">${t.source ? (t.source === 'tags' ? 'tag' : 'info file') : ''}</span>
+      </div>`).join('')
+
+    // Expanded detail panel — the full inferred data for every field, so a
+    // person can decide whether to trust Auto-Ingest or hand-review.
     const detail = expanded ? `
       <div class="batch-expand-panel">
         <div class="batch-expand-grid">
@@ -2302,7 +2674,9 @@ const App = (() => {
           <div class="batch-expand-row"><span class="batch-expand-label">Date</span><span class="batch-expand-val ${conf.date !== 'high' ? 'batch-val-uncertain' : ''}">${esc(dateStr || '—')}</span></div>
           <div class="batch-expand-row"><span class="batch-expand-label">Venue</span><span class="batch-expand-val">${esc(e.venue || '—')}</span></div>
           <div class="batch-expand-row"><span class="batch-expand-label">Location</span><span class="batch-expand-val">${esc(loc || '—')}</span></div>
+          <div class="batch-expand-row"><span class="batch-expand-label">Country</span><span class="batch-expand-val">${esc(e.country || '—')}</span></div>
           <div class="batch-expand-row"><span class="batch-expand-label">Source</span><span class="batch-expand-val">${esc(e.source || '—')}</span></div>
+          <div class="batch-expand-row"><span class="batch-expand-label">Lineage</span><span class="batch-expand-val">${esc(e.lineage || '—')}</span></div>
           <div class="batch-expand-row"><span class="batch-expand-label">Tracks</span><span class="batch-expand-val">${(() => {
             const audio = e.track_count
             const tagged = e.tracks_titled
@@ -2316,6 +2690,8 @@ const App = (() => {
             }
             return `${audio} audio · ${tagLine} · no info file track list`
           })()}</span></div>
+          ${trackRows ? `
+          <div class="batch-expand-row batch-expand-tracklist"><span class="batch-expand-label">Listing</span><div class="batch-track-list">${trackRows}</div></div>` : ''}
           ${issueChips ? `
           <div class="batch-expand-row"><span class="batch-expand-label">Issues</span><span class="batch-expand-val">${issueChips}</span></div>` : ''}
           <div class="batch-expand-row"><span class="batch-expand-label">Path</span><span class="batch-expand-val batch-path-mono">${esc(item.path)}</span></div>
@@ -2329,22 +2705,19 @@ const App = (() => {
     summaryParts.push(`${item.audio_count} tracks`)
 
     return `
-      <div class="batch-item-row batch-item-${item.tier} ${ingested ? 'batch-item-ingested' : ''}"
+      <div class="batch-item-row ${ingested ? 'batch-item-ingested' : ''}"
            data-path="${esc(item.path)}">
         <div class="batch-item-main">
           <button class="batch-expand-btn" data-path="${esc(item.path)}" title="${expanded ? 'Collapse' : 'Expand'}">
             ${expanded ? '▾' : '▸'}
           </button>
           <div class="batch-item-info">
-            <div class="batch-item-name">
-              <span class="batch-tier-icon">${_batchTierLabel(item.tier)}</span>
-              ${esc(item.name)}
-            </div>
+            <div class="batch-item-name">${esc(item.name)}</div>
             <div class="batch-item-summary">
               ${summaryParts.map(p => `<span class="batch-meta-field">${esc(p)}</span>`).join('<span class="batch-meta-sep">·</span>')}
-              ${confFlags.map(f => `<span class="batch-conf-flag">${esc(f)}</span>`).join('')}
             </div>
           </div>
+          <span class="batch-score batch-score--${health.band}" title="Completeness score">${health.score}</span>
           <div class="batch-item-actions">
             <span class="batch-ingest-status" id="batch-status-${item.path.replace(/[^a-zA-Z0-9]/g,'_')}"></span>
             ${actionBtn}
@@ -2354,9 +2727,17 @@ const App = (() => {
       </div>`
   }
 
-  function renderBatchResultsView() {
+  async function renderBatchResultsView() {
     const r = batch.results
     if (!r) { renderBatchPickerView(); return }
+
+    // Default the file-behavior choice from the shared preference, once per session.
+    if (batch.behavior == null) {
+      try {
+        const prefs = await API.preferences.get()
+        batch.behavior = prefs.ingest_file_behavior || 'copy'
+      } catch (_) { batch.behavior = 'copy' }
+    }
 
     const greens  = r.items.filter(i => i.tier === 'green')
     const yellows = r.items.filter(i => i.tier === 'yellow')
@@ -2376,6 +2757,13 @@ const App = (() => {
             <span class="batch-dir-label">${esc(r.source_dir)}</span>
             <button class="btn btn-ghost btn-sm" id="batch-rescan-btn">↺ New Scan</button>
           </div>
+          <div class="batch-behavior-row">
+            <label class="batch-behavior-label" for="batch-behavior-select">File handling</label>
+            <select id="batch-behavior-select">
+              <option value="copy" ${batch.behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
+              <option value="move" ${batch.behavior === 'move' ? 'selected' : ''}>Move into library (source removed)</option>
+            </select>
+          </div>
           <div class="batch-tier-pills" style="margin-top:10px">
             ${tierPill('green', greens.length, 'green')}
             ${tierPill('yellow', yellows.length, 'yellow')}
@@ -2383,7 +2771,7 @@ const App = (() => {
             ${nDone > 0 ? `<span class="batch-tier-pill batch-tier-done">${nDone} ingested</span>` : ''}
             ${greens.filter(i => !batch.ingestedIds.has(i.path)).length > 0
               ? `<button class="btn btn-primary btn-sm" id="batch-ingest-all-btn" style="margin-left:8px">
-                   ⇉ Ingest All Green (${greens.filter(i => !batch.ingestedIds.has(i.path)).length})
+                   ⇉ Auto-Ingest All Green (${greens.filter(i => !batch.ingestedIds.has(i.path)).length})
                  </button>`
               : ''}
             <span class="batch-tier-pill batch-tier-total">${r.total} total</span>
@@ -2395,9 +2783,16 @@ const App = (() => {
 
     // ── Events ──────────────────────────────────────────────────────────────
 
+    document.getElementById('batch-behavior-select')?.addEventListener('change', async e => {
+      batch.behavior = e.target.value
+      try { await API.preferences.update({ ingest_file_behavior: batch.behavior }) } catch (_) {}
+    })
+
     document.getElementById('batch-rescan-btn')?.addEventListener('click', () => {
+      // Explicit "start over" — let the user reconsider the directory, rather
+      // than silently reusing it (that's what returning-to-the-page already does).
       batch.results = null
-      renderBatchImportView()
+      renderBatchPickerView()
     })
 
     // Ingest All Green
@@ -2425,7 +2820,7 @@ const App = (() => {
           if (rowBtn) rowBtn.textContent = '✓ Done'
         } catch (err) {
           if (statusEl) statusEl.textContent = '✗ failed'
-          if (rowBtn) { rowBtn.disabled = false; rowBtn.textContent = 'Ingest' }
+          if (rowBtn) { rowBtn.disabled = false; rowBtn.textContent = 'Auto-Ingest' }
           console.error('Bulk ingest failed for', item.name, err)
           // Continue to next item rather than aborting the whole run
         }
@@ -2447,7 +2842,7 @@ const App = (() => {
       })
     })
 
-    // Green: direct ingest
+    // Auto-Ingest — available on every row now, regardless of score
     mainContent.querySelectorAll('.batch-ingest-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const path = btn.dataset.path
@@ -2462,7 +2857,7 @@ const App = (() => {
           loadArtistList()          // refresh sidebar — may be a new artist
         } catch (err) {
           btn.disabled = false
-          btn.textContent = 'Ingest'
+          btn.textContent = 'Auto-Ingest'
           const msg = err.message || 'Unknown error'
           // Show inline (ID now uses raw path — no esc() mismatch)
           const sid = 'batch-status-' + path.replace(/[^a-zA-Z0-9]/g,'_')
@@ -2475,7 +2870,7 @@ const App = (() => {
       })
     })
 
-    // Yellow/red: open wizard
+    // Review (any tier): open the same wizard used by Add Recording, pre-scanned
     mainContent.querySelectorAll('.batch-review-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const path = btn.dataset.path
@@ -2502,7 +2897,10 @@ const App = (() => {
       }
     })
 
-    const result = await API.ingest.confirm({
+    // /api/ingest/confirm returns a job id immediately — the actual copy + DB
+    // work runs in the background. Poll it to completion so we never report
+    // "ingested" (or silently do nothing) before the job has actually finished.
+    const { job_id } = await API.ingest.confirm({
       source_folder_path: item.path,
       artist_name:        e.artist,
       start_year:         e.year,
@@ -2515,11 +2913,12 @@ const App = (() => {
       source:             e.source  || null,
       lineage:            e.lineage || null,
       is_complete:        true,
-      behavior:           'copy',   // batch import is non-destructive by default
+      behavior:           batch.behavior || 'copy',   // synced with the shared preference
       info_file_content:  scan.info_file_content || null,
       fingerprints:       scan.fingerprints || [],
       tracks,
     })
+    const result = await pollConfirmJob(job_id)
     return result.recording_id
   }
 
@@ -2633,6 +3032,7 @@ const App = (() => {
       ingest.scan = scan
       ingest.step = 'review'
       renderIngestStep()
+      window.fluxDebug?.refresh()   // update the debug panel's Paula section if it's already open
     } catch (e) {
       statusEl.innerHTML = `
         <div style="color:var(--red); font-size:13px; margin-top:12px; padding:12px 16px; background:rgba(224,85,85,0.08); border-radius:var(--r-sm);">
@@ -2668,6 +3068,16 @@ const App = (() => {
     red:    'Significant gaps — manual review needed',
   }
 
+  // Paula's purple-border threshold — a starting point, meant to be tuned
+  // once this has run against more real folders (Ryan, 2026-07-16: "let's
+  // give it a try and see how it plays out"). The raw per-field subscore is
+  // always visible in the debug panel regardless of where this line sits.
+  const PAULA_THRESHOLD = 0.70
+  function paulaCls(attrName) {
+    const sub = ingest.scan?.paula?.attributes?.[attrName]?.subscore
+    return (typeof sub === 'number' && sub >= PAULA_THRESHOLD) ? 'paula-recommend' : ''
+  }
+
   // AI Assist tab body: the health score folded in (current + band message),
   // a Run button, and a container that fills with clean results after a run.
   // File Tags JSON (raw Vorbis per track) for the scan — same shape/formatting as
@@ -2697,6 +3107,7 @@ const App = (() => {
       tracks:  (ingest.tracks || []).map(t => ({
         number: t.track_number, title: t.title, duration: t.duration,
       })),
+      info_file_content: ingest.scan.info_file_content || '',
     }
   }
 
@@ -2779,8 +3190,7 @@ const App = (() => {
     if (g('f-venue-name')) L.push(g('f-venue-name'))
     if (loc)               L.push(loc)
     if (g('f-source'))     L.push(g('f-source'))
-    if (g('f-modifier') || g('f-lineage') || g('f-event-name')) L.push('')
-    if (g('f-modifier'))   L.push('Source: ' + g('f-modifier'))
+    if (g('f-lineage') || g('f-event-name')) L.push('')
     if (g('f-lineage'))    L.push('Lineage: ' + g('f-lineage'))
     if (g('f-event-name')) L.push('Event: ' + g('f-event-name'))
     L.push('', 'Setlist:', '')
@@ -2843,6 +3253,17 @@ const App = (() => {
       const active = (track.flags || []).includes(f.key)
       return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" type="button">${f.label}</button>`
     }).join('')
+    // Official-release toggle — opt-in (opts.showOfficial) since View Recording
+    // manages that per-track flag elsewhere; Add Recording has no other place
+    // for it once the expand row goes away, so it lives here for that caller.
+    const officialRow = opts.showOfficial
+      ? `<div class="et-detail-field" style="margin-top:6px">
+           <label class="check-label check-inline" title="Mark this track as an official release">
+             <input type="checkbox" class="track-qmenu-official" ${track.is_official ? 'checked' : ''} />
+             <span>Official release</span>
+           </label>
+         </div>`
+      : ''
     menu.innerHTML = `
       <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
       <div class="et-detail-grid2">
@@ -2856,8 +3277,14 @@ const App = (() => {
         </div>
       </div>
       <div class="track-qmenu-label">Flags</div>
-      <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>`
+      <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>
+      ${officialRow}`
     document.body.appendChild(menu)
+
+    menu.querySelector('.track-qmenu-official')?.addEventListener('change', function () {
+      track.is_official = this.checked
+      onChange(track)
+    })
 
     // Position at cursor, clamped to the viewport
     const r = menu.getBoundingClientRect()
@@ -2911,41 +3338,11 @@ const App = (() => {
     const body = document.getElementById('ai-results')
     if (!body) return
 
-    const props = (r.proposals || []).map((p, i) => `
-      <div class="ai-res-row">
-        <span class="ai-res-field">${esc(p.field)}</span>
-        <span class="ai-res-value">${esc(p.proposed)}
-          <span class="ai-res-conf">${esc(p.confidence)}</span>${p.url ? ` <a class="ai-link" href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ''}</span>
-        <button class="btn btn-ghost btn-xs ai-apply-btn" data-idx="${i}">Apply</button>
-      </div>`).join('')
-
-    const tt = r.track_titles || []
-    const trackSection = tt.length
-      ? `<div class="ai-res-section">
-           <div class="ai-res-title">Track Listing <button class="btn btn-ghost btn-xs" id="ai-apply-tracks">Apply to tracks</button></div>
-           <div class="ai-tt-list">${tt.map(t =>
-             `<div class="ai-tt-row"><span class="ai-tt-num">${esc(String(t.number).padStart(2, '0'))}</span><span class="ai-tt-title">${esc(t.title)}</span></div>`).join('')}</div>
-         </div>` : ''
-
-    const notes = (title, items) => items && items.length
-      ? `<div class="ai-res-section"><div class="ai-res-title">${title}</div>${items.map(v => `<p class="ai-res-note">${esc(v)}</p>`).join('')}</div>` : ''
-    const sources = (r.sources || []).length
-      ? `<div class="ai-res-section"><div class="ai-res-title">Sources</div>${r.sources.map(s => `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''
-
-    body.innerHTML = `
-      <div class="ai-res-section">
-        <div class="ai-res-title">Metadata Review</div>
-        ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
-        ${props || '<p class="ai-res-empty">No field changes proposed.</p>'}
-      </div>
-      ${trackSection}
-      ${notes('Verify', r.verify_items)}
-      ${notes('Provenance', r.provenance_notes)}
-      ${sources}`
+    body.innerHTML = buildAiResultsHtml(r)
 
     body.querySelectorAll('.ai-apply-btn').forEach(b =>
       b.addEventListener('click', () => { toggleApplyProposal(r.proposals[parseInt(b.dataset.idx)], b); reScore() }))
-    document.getElementById('ai-apply-tracks')?.addEventListener('click', () => applyAiTrackTitles(tt))
+    document.getElementById('ai-apply-tracks')?.addEventListener('click', () => applyAiTrackTitles(r.track_titles || []))
     // Auto-apply high-confidence scalar proposals (server already filtered).
     ;(r.proposals || []).forEach((p, i) => {
       if (p.confidence === 'high') toggleApplyProposal(p, body.querySelector(`.ai-apply-btn[data-idx="${i}"]`))
@@ -2979,6 +3376,26 @@ const App = (() => {
       }
       if (msgEl) msgEl.textContent = HEALTH_MSG[h.band] || ''
     } catch (_) {}
+  }
+
+  // Poll a background /api/ingest/confirm job until it finishes. `onProgress`
+  // (optional) is called on each running tick with (copied, total) bytes — the
+  // copy step can take a while for big folders. Used by both the Add Recording
+  // confirm step and batch import, so neither one can silently move on before
+  // the ingest is actually done.
+  async function pollConfirmJob(jobId, onProgress) {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    while (true) {
+      await sleep(600)
+      const s = await API.ingest.confirmStatus(jobId)
+      if (s.status === 'running') {
+        if (onProgress) onProgress(s.copied || 0, s.total || 0)
+      } else if (s.status === 'done') {
+        return s.result
+      } else if (s.status === 'error') {
+        throw new Error(s.error)
+      }
+    }
   }
 
   // Poll a background AI job until it finishes. The synchronous call is too slow
@@ -3070,24 +3487,31 @@ const App = (() => {
       const infoMap    = {}
       infoTracks.forEach(t => { infoMap[t.number] = t.title })
 
-      // Build a map from filename → set label + rel_path (from scan subdir detection)
-      const audioSetMap  = {}
-      const audioRelPath = {}  // filename → rel_path (preserves subdir prefix if any)
+      // Build a map from rel_path (unique — unlike bare filename, which
+      // collides across a multi-disc source where each disc's "01.flac"
+      // shares a name) → set label, from scan's subdir detection.
+      const audioSetByRelPath = {}
       ;(ingest.scan.audio_files || []).forEach(af => {
-        if (af.set)      audioSetMap[af.filename]  = af.set
-        if (af.rel_path) audioRelPath[af.filename] = af.rel_path
+        if (af.set && af.rel_path) audioSetByRelPath[af.rel_path] = af.set
       })
       const setsDetected = ingest.scan.sets_detected || false
 
       ingest.tracks = tagTracks.map(t => {
-        const title = titleCase(t.title || infoMap[t.index]) || `Track ${t.index}`
+        const title   = titleCase(t.title || infoMap[t.index]) || `Track ${t.index}`
+        const relPath = t.rel_path || t.filename
         return {
-          track_number: t.track_number ? parseInt(t.track_number) : t.index,
+          // Multi-disc sources often reset TRACKNUMBER per disc (1..N on
+          // disc 1, 1..M on disc 2) — trusting the tag directly collides
+          // (two tracks numbered "1", etc). When sets are detected, the
+          // scan's own index is already continuous across discs in the
+          // right order, so it's the reliable number; the tag is only
+          // trusted when there's just one set to begin with.
+          // (Ryan, 2026-07-14 — this was the CD1/CD2 duplicate-numbering bug.)
+          track_number: (!setsDetected && t.track_number) ? parseInt(t.track_number) : t.index,
           title,
-          set:          audioSetMap[t.filename] || '',
+          set:          audioSetByRelPath[relPath] || '',
           duration:     t.duration,
-          // Use rel_path so the DB file_path includes any subdir prefix (e.g. "flac/01.flac")
-          filename:     t.rel_path || audioRelPath[t.filename] || t.filename,
+          filename:     relPath,
           // Pre-suggested from the title text — archivist approves/removes via flag pills
           flags:        detectTrackFlags(title),
         }
@@ -3101,7 +3525,7 @@ const App = (() => {
           return {
             track_number: t.number,
             title,
-            set:          audioSetMap[scanFile.filename] || '',
+            set:          audioSetByRelPath[scanFile.rel_path] || '',
             duration:     null,
             filename:     scanFile.rel_path || scanFile.filename || '',
             flags:        detectTrackFlags(title),
@@ -3131,7 +3555,6 @@ const App = (() => {
       f.state           = tags.state   || info.state   || ''
       f.country         = tags.country || info.country || ''
       f.source          = pick(tags, info, 'source') || ''
-      f.source_modifier = ''
       f.quality         = ''
       f.rating          = ''
       f.lineage         = tags?.lineage || ''
@@ -3224,9 +3647,18 @@ const App = (() => {
                     data-idx="${i}">${esc(tf.filename)}</button>`).join('')}
          </div>`
       : ''
-    const infoText = ingest.scan.info_file_content
-      ? `${textSwitcher}<pre class="rev-info-text">${esc(ingest.scan.info_file_content)}</pre>`
-      : `<div class="rev-raw-empty">No info file found</div>`
+    // Editable — the archivist can fix up the parsed text, or type one in from
+    // scratch when the folder had no info file. Edits flow straight into
+    // ingest.scan.info_file_content (the value sent on Confirm); no re-parse.
+    // "Save to file" writes it to disk independent of Confirm, so a re-run of
+    // AI Assist picks up the correction — Confirm still sends whatever's in
+    // memory either way, saving to disk is just for round-tripping with AI.
+    const infoSaveRow = `<div class="info-file-save-row">
+        <button class="btn btn-ghost btn-sm" id="btn-save-info-file">Save to file</button>
+        <span class="info-file-save-status" id="info-file-save-status"></span>
+      </div>`
+    const infoText = `${textSwitcher}<textarea class="rev-info-text rev-info-edit" id="rev-info-edit"
+      placeholder="No info file found — paste or type one in.">${esc(ingest.scan.info_file_content || '')}</textarea>${infoSaveRow}`
 
     // Track count mismatch detection
     const audioCount     = ingest.scan.audio_file_count
@@ -3237,52 +3669,25 @@ const App = (() => {
         ⚠ ${audioCount} audio file${audioCount !== 1 ? 's' : ''} on disk · ${infoTrackCount} track${infoTrackCount !== 1 ? 's' : ''} in info file — use playback to verify
       </div>` : ''
 
-    // Track table rows — play preview + is_official + expandable optional details
-    const trackRows = ingest.tracks.map((t, i) => {
-      const flagPills = TRACK_FLAGS.map(f => {
-        const active = (t.flags || []).includes(f.key)
-        return `<button class="flag-pill ${active ? 'active' : ''}" data-flag="${f.key}" data-idx="${i}" type="button">${f.label}</button>`
-      }).join('')
-      return `
-        <tr>
+    // Track table rows — play preview, title, and the same Note/Songwriter/
+    // flag-chip layout as View Recording. Right-click a row for the same
+    // note/songwriter/flags/official popup used there (openTrackMenu) — here
+    // it just stages the change into ingest.tracks in memory (no API call;
+    // Confirm sends it all at once) instead of saving immediately.
+    const trackRows = ingest.tracks.map((t, i) => `
+        <tr class="track-review-row" data-idx="${i}" title="Right-click for note, songwriter &amp; flags">
           <td class="num">${t.track_number}</td>
           <td class="play-cell">
             <button class="btn-preview-track" data-filename="${esc(t.filename || '')}" title="${esc(t.filename || 'no file')}">▶</button>
           </td>
-          <td><input type="text" class="t-title" data-idx="${i}" value="${esc(t.title)}" /></td>
+          <td class="title-cell">
+            <input type="text" class="t-title" data-idx="${i}" value="${esc(t.title)}" />
+            <div class="track-chip-row" id="t-chips-${i}">${trackBadgesHtml(t)}</div>
+          </td>
+          <td class="note-cell truncate" id="t-note-${i}" title="${esc(t.notes || '')}">${esc(t.notes || '')}</td>
+          <td class="sw-cell truncate" id="t-sw-${i}" title="${esc(t.songwriter || '')}">${esc(t.songwriter || '')}</td>
           <td class="dur">${fmtDur(t.duration)}</td>
-          <td class="et-expand-cell">
-            <button class="it-expand-btn" data-idx="${i}" type="button" title="Track details">+</button>
-          </td>
-        </tr>
-        <tr class="it-detail-row" id="it-detail-${i}" style="display:none">
-          <td colspan="5">
-            <div class="et-detail-body">
-              <div class="et-detail-label">Track details</div>
-              <div class="et-detail-grid2">
-                <div class="et-detail-field">
-                  <label>Track notes</label>
-                  <textarea class="t-track-notes" data-idx="${i}" style="min-height:32px">${esc(t.notes || '')}</textarea>
-                </div>
-                <div class="et-detail-field">
-                  <label>Songwriter</label>
-                  <input type="text" class="t-songwriter" data-idx="${i}" value="${esc(t.songwriter || '')}" placeholder="" />
-                </div>
-              </div>
-              <div class="et-detail-field" style="margin-top:6px">
-                <label>Flags</label>
-                <div class="flag-pill-row">${flagPills}</div>
-              </div>
-              <div class="et-detail-field" style="margin-top:6px">
-                <label class="check-label check-inline" title="Mark this track as an official release">
-                  <input type="checkbox" class="t-official" data-idx="${i}" ${t.is_official ? 'checked' : ''} />
-                  <span>Official release</span>
-                </label>
-              </div>
-            </div>
-          </td>
-        </tr>`
-    }).join('')
+        </tr>`).join('')
 
     setMainHTML(`
       <div class="ingest-review-outer">
@@ -3299,13 +3704,13 @@ const App = (() => {
             <div class="ingest-field">
               <label>Performer <span style="color:var(--t3); font-weight:400">— the act (FLAC ARTIST tag)</span></label>
               <div class="artist-picker-wrap">
-                <input type="text" id="f-artist" value="${esc(f.artist_name)}" autocomplete="off" placeholder="Search or type the act…" />
+                <input type="text" id="f-artist" class="${paulaCls('performer')}" value="${esc(f.artist_name)}" autocomplete="off" placeholder="Search or type the act…" />
                 <div class="artist-dropdown" id="f-artist-dropdown" style="display:none"></div>
               </div>
             </div>
 
             <div class="ingest-field" style="margin-top:6px">
-              <label>Artists <span style="color:var(--t3); font-weight:400">— the people in this act</span></label>
+              <label>Artists <span style="color:var(--t3); font-weight:400">— performing artists who also may appear with other outfits</span></label>
               <div class="members-field" id="f-members-field">
                 <div class="artist-picker-wrap" style="flex:1; min-width:120px">
                   <input type="text" id="f-member-input" class="member-input" autocomplete="off" placeholder="Add an artist…" />
@@ -3316,9 +3721,9 @@ const App = (() => {
 
             <!-- Date: Year / Month / Day (no "Start") -->
             <div class="ingest-field-grid date-grid" style="margin-top:5px">
-              <div class="ingest-field"><label>Year</label><input type="number" id="f-year" value="${esc(f.start_year)}" min="1900" max="2099" /></div>
-              <div class="ingest-field"><label>Mo</label><input type="number" id="f-month" value="${esc(f.start_month)}" min="1" max="12" /></div>
-              <div class="ingest-field"><label>Day</label><input type="number" id="f-day" value="${esc(f.start_day)}" min="1" max="31" /></div>
+              <div class="ingest-field"><label>Year</label><input type="number" id="f-year" class="${paulaCls('date')}" value="${esc(f.start_year)}" min="1900" max="2099" /></div>
+              <div class="ingest-field"><label>Mo</label><input type="number" id="f-month" class="${paulaCls('date')}" value="${esc(f.start_month)}" min="1" max="12" /></div>
+              <div class="ingest-field"><label>Day</label><input type="number" id="f-day" class="${paulaCls('date')}" value="${esc(f.start_day)}" min="1" max="31" /></div>
             </div>
             <div id="end-date-toggle-row" style="margin-top:2px">
               <a class="field-toggle-link" id="btn-toggle-end-date" href="#">+ End date</a>
@@ -3329,18 +3734,26 @@ const App = (() => {
               <div class="ingest-field"><label>Day</label><input type="number" id="f-end-day" value="${esc(f.end_day)}" min="1" max="31" /></div>
             </div>
 
+            <!-- Non-blocking: already-in-library warning for this performer+date
+                 (checked once both are known — see wireDupCheck). Multiple
+                 recordings per show are legitimate, so this never blocks Confirm. -->
+            <div class="dup-warn" id="dup-warn" style="display:none">
+              <div class="dup-warn-title">⚠ Already in your library</div>
+              <div class="dup-warn-body" id="dup-warn-body"></div>
+            </div>
+
             <!-- Venue + Festival/Event on one row -->
             <div class="ingest-field-grid" style="grid-template-columns:1fr 1fr; gap:8px; margin-top:8px">
               <div class="ingest-field">
                 <label>Venue</label>
                 <div class="venue-picker-wrap">
-                  <input type="text" id="f-venue-name" value="${esc(f.venue_name)}" autocomplete="off" placeholder="Search or type venue name…" />
+                  <input type="text" id="f-venue-name" class="${paulaCls('venue_name')}" value="${esc(f.venue_name)}" autocomplete="off" placeholder="Search or type venue name…" />
                   <input type="hidden" id="f-venue-id" value="${esc(String(f.venue_id || ''))}" />
                   <div class="venue-dropdown" id="f-venue-dropdown" style="display:none"></div>
                 </div>
               </div>
               <div class="ingest-field">
-                <label>Festival / Event <span style="font-weight:400; opacity:0.6">(optional)</span></label>
+                <label>Festival / Event</label>
                 <div class="event-picker-wrap">
                   <input type="text" id="f-event-name" value="${esc(f.event_name || '')}" autocomplete="off" />
                   <input type="hidden" id="f-event-id" value="${esc(String(f.event_id || ''))}" />
@@ -3351,13 +3764,13 @@ const App = (() => {
 
             <!-- City / State / Country — state is narrow -->
             <div class="ingest-field-grid" style="grid-template-columns:1fr 58px 1fr; gap:6px; margin-top:5px" id="f-location-row">
-              <div class="ingest-field"><label>City</label><input type="text" id="f-city" value="${esc(f.city)}" /></div>
-              <div class="ingest-field"><label>St</label><input type="text" id="f-state" value="${esc(f.state)}" maxlength="6" /></div>
-              <div class="ingest-field"><label>Country</label><input type="text" id="f-country" value="${esc(f.country)}" /></div>
+              <div class="ingest-field"><label>City</label><input type="text" id="f-city" class="${paulaCls('city')}" value="${esc(f.city)}" /></div>
+              <div class="ingest-field"><label>St</label><input type="text" id="f-state" class="${paulaCls('state')}" value="${esc(f.state)}" maxlength="6" /></div>
+              <div class="ingest-field"><label>Country</label><input type="text" id="f-country" class="${paulaCls('country')}" value="${esc(f.country)}" /></div>
             </div>
 
-            <!-- Source / Detail / Lineage / Quality / Rating — matches Edit form -->
-            <div class="ingest-field-grid" style="grid-template-columns:76px 104px minmax(120px,1.5fr) 58px 72px; gap:10px; margin-top:8px">
+            <!-- Source / Lineage / Quality / Rating — matches Edit form -->
+            <div class="ingest-field-grid" style="grid-template-columns:76px minmax(160px,2fr) 58px 72px; gap:10px; margin-top:8px">
               <div class="ingest-field">
                 <label>Source</label>
                 <select id="f-source">
@@ -3368,11 +3781,7 @@ const App = (() => {
                 </select>
               </div>
               <div class="ingest-field">
-                <label>Source Detail</label>
-                <input type="text" id="f-modifier" value="${esc(f.source_modifier)}" />
-              </div>
-              <div class="ingest-field">
-                <label>Lineage</label>
+                <label>Lineage <span style="color:var(--t3); font-weight:400">— transfer chain, taper, or anything distinguishing this tape</span></label>
                 <input type="text" id="f-lineage" value="${esc(f.lineage)}" />
               </div>
               <div class="ingest-field">
@@ -3397,11 +3806,12 @@ const App = (() => {
                     <th style="width:32px">#</th>
                     <th style="width:28px"></th>
                     <th>Title</th>
+                    <th>Note</th>
+                    <th>Songwriter</th>
                     <th style="width:44px">Time</th>
-                    <th style="width:24px"></th>
                   </tr>
                 </thead>
-                <tbody>${trackRows || '<tr><td colspan="5" style="color:var(--t2);padding:12px">No tracks found</td></tr>'}</tbody>
+                <tbody>${trackRows || '<tr><td colspan="6" style="color:var(--t2);padding:12px">No tracks found</td></tr>'}</tbody>
               </table>
             </div>
 
@@ -3438,6 +3848,21 @@ const App = (() => {
             <span class="iq-msg" id="iq-msg">${esc(HEALTH_MSG[ingest.scan.health?.band || 'yellow'] || '')}</span>
             <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
           </div>
+          <!-- Paula — free, non-AI confidence scorer. Runs once at scan time
+               (not live-rescored on edit — she's assessing the raw tag/txt
+               inputs, which don't change after the scan). Purple field
+               borders mark what she pre-filled with confidence; see
+               wirePaulaClearOnEdit for the "clears on manual edit" behavior. -->
+          <div class="paula-bar" title="Paula: free, regex/tag-based confidence scoring (no AI). Purple field borders mark her recommendations.">
+            <span class="paula-badge">
+              <span class="paula-badge-score">${ingest.scan.paula?.score ?? '—'}</span>
+              <span class="paula-badge-label">fields</span>
+            </span>
+            <span class="paula-badge">
+              <span class="paula-badge-score">${ingest.scan.paula?.track_completeness?.score ?? '—'}</span>
+              <span class="paula-badge-label">tracks</span>
+            </span>
+          </div>
           <div class="ingest-tabs">
             <div class="slide-panel-body" id="ingest-panes">
               <div class="slide-pane active" id="isp-info">
@@ -3448,10 +3873,15 @@ const App = (() => {
                 <div class="slide-pane-header">File Tags <span class="filetags-hint">(Vorbis, on disk)</span></div>
                 <div class="slide-pane-scroll"><pre class="filetags-json">${esc(scanFileTagsJson())}</pre></div>
               </div>
+              <div class="slide-pane" id="isp-checksums">
+                <div class="slide-pane-header">Checksums</div>
+                <div class="slide-pane-scroll">${buildChecksumsPreviewHtml(ingest.scan.fingerprints)}</div>
+              </div>
             </div>
             <div class="slide-tabs" id="ingest-tab-rail">
               <button class="slide-tab active" data-ipane="isp-info">Info File</button>
               <button class="slide-tab" data-ipane="isp-filetags">File Tags</button>
+              <button class="slide-tab" data-ipane="isp-checksums">Checksums</button>
             </div>
           </div>
         </div>
@@ -3549,6 +3979,34 @@ const App = (() => {
       })
     })()
 
+    // Right-click a track row → same note/songwriter/flags/official popup as
+    // View Recording (openTrackMenu), but staged: onChange just updates the
+    // in-memory ingest.tracks entry (already mutated by openTrackMenu itself)
+    // and repaints this row's chips/note/songwriter cells. Nothing is sent to
+    // the server until Confirm.
+    function refreshIngestTrackRow(i) {
+      const t = ingest.tracks[i]
+      if (!t) return
+      const chipsEl = document.getElementById(`t-chips-${i}`)
+      if (chipsEl) chipsEl.innerHTML = trackBadgesHtml(t)
+      const noteEl = document.getElementById(`t-note-${i}`)
+      if (noteEl) { noteEl.textContent = t.notes || ''; noteEl.title = t.notes || '' }
+      const swEl = document.getElementById(`t-sw-${i}`)
+      if (swEl) { swEl.textContent = t.songwriter || ''; swEl.title = t.songwriter || '' }
+    }
+    mainContent.querySelectorAll('.track-review-row[data-idx]').forEach(row => {
+      const idx = parseInt(row.dataset.idx)
+      row.addEventListener('contextmenu', ev => {
+        ev.preventDefault()
+        const t = ingest.tracks[idx]
+        if (!t) return
+        openTrackMenu(t, ev.clientX, ev.clientY, {
+          showOfficial: true,
+          onChange: () => refreshIngestTrackRow(idx),
+        })
+      })
+    })
+
     // Right panel — collapsible panels
     ;(function () {
       mainContent.querySelectorAll('.rev-panel-toggle').forEach(btn => {
@@ -3585,39 +4043,49 @@ const App = (() => {
       })
     })()
 
-    // Ingest track expand buttons — optional detail rows
-    mainContent.querySelectorAll('.it-expand-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const row = document.getElementById(`it-detail-${btn.dataset.idx}`)
-        if (!row) return
-        const open = row.style.display !== 'none'
-        row.style.display = open ? 'none' : ''
-        btn.classList.toggle('active', !open)
-        btn.textContent = open ? '+' : '−'
-      })
+    // Info File textarea — editable; updates in memory only (no re-parse, no
+    // re-render, so typing doesn't lose focus/cursor position).
+    document.getElementById('rev-info-edit')?.addEventListener('input', e => {
+      ingest.scan.info_file_content = e.target.value
     })
 
-    // Ingest flag pill toggles — update ingest.tracks in memory on click
-    mainContent.querySelectorAll('.flag-pill[data-idx]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        btn.classList.toggle('active')
-        const idx = parseInt(btn.dataset.idx)
-        const flag = btn.dataset.flag
-        const t = ingest.tracks[idx]
-        if (!t) return
-        t.flags = t.flags || []
-        if (btn.classList.contains('active')) {
-          if (!t.flags.includes(flag)) t.flags.push(flag)
-        } else {
-          t.flags = t.flags.filter(f => f !== flag)
+    // "Save to file" — write the (possibly edited) info file back to disk,
+    // independent of Confirm, so a re-run of AI Assist sees the fix. Confirm
+    // itself still always sends whatever's in memory, saved or not.
+    document.getElementById('btn-save-info-file')?.addEventListener('click', async () => {
+      const btn      = document.getElementById('btn-save-info-file')
+      const status   = document.getElementById('info-file-save-status')
+      const candList = ingest.scan.text_file_candidates || []
+      const filename = candList[ingest._activeTextIdx || 0]?.filename || 'info.txt'
+      btn.disabled = true
+      status.textContent = 'Saving…'
+      try {
+        const res = await API.ingest.saveInfoFile({
+          folder_path: ingest.folderPath,
+          filename,
+          content: ingest.scan.info_file_content || '',
+        })
+        // A from-scratch file gets a filename back — track it so the next
+        // save (and a future Confirm-time re-scan) target the same file.
+        if (res?.filename && !candList.length) {
+          ingest.scan.text_file_candidates = [{ filename: res.filename, content: ingest.scan.info_file_content }]
+          ingest._activeTextIdx = 0
         }
-      })
+        status.textContent = 'Saved ✓'
+        setTimeout(() => { if (status.textContent === 'Saved ✓') status.textContent = '' }, 2500)
+      } catch (e) {
+        status.textContent = 'Save failed: ' + e.message
+      } finally {
+        btn.disabled = false
+      }
     })
 
-    // is_official checkbox on recording form — cascade to all track checkboxes
+    // is_official checkbox on recording form — cascade to every track (flags/
+    // note/songwriter/official all live on ingest.tracks now; right-click a
+    // row — via openTrackMenu — to edit an individual track).
     document.getElementById('f-is-official')?.addEventListener('change', function () {
       if (this.checked) {
-        mainContent.querySelectorAll('.t-official').forEach(cb => { cb.checked = true })
+        ingest.tracks.forEach((t, i) => { t.is_official = true; refreshIngestTrackRow(i) })
       }
     })
 
@@ -3680,6 +4148,62 @@ const App = (() => {
       })
     })()
 
+    // Duplicate-in-library check — fires once performer + year are both
+    // known. Non-blocking: a second source for the same show (SBD + AUD) is
+    // legitimate, so this only informs, never prevents Confirm. Debounced so
+    // it doesn't hammer the API on every keystroke. (Ryan, 2026-07-14.)
+    ;(function () {
+      const artistEl = document.getElementById('f-artist')
+      const yearEl   = document.getElementById('f-year')
+      const monthEl  = document.getElementById('f-month')
+      const dayEl    = document.getElementById('f-day')
+      const warnEl   = document.getElementById('dup-warn')
+      const bodyEl   = document.getElementById('dup-warn-body')
+      if (!artistEl || !yearEl || !warnEl) return
+
+      let debounce = null
+      async function runCheck() {
+        const artist_name = artistEl.value.trim()
+        const year  = parseInt(yearEl.value)  || null
+        const month = parseInt(monthEl.value) || null
+        const day   = parseInt(dayEl.value)   || null
+        if (!artist_name || !year) { warnEl.style.display = 'none'; return }
+        try {
+          const res   = await API.ingest.checkExisting({ artist_name, year, month, day })
+          const perfs = res.performances || []
+          if (!perfs.length) { warnEl.style.display = 'none'; return }
+          bodyEl.innerHTML = perfs.map(p => `
+            <div class="dup-warn-perf">
+              <span class="dup-warn-perf-head">${esc(p.date)}${p.venue ? ' · ' + esc(p.venue) : ''}</span>
+              ${p.recordings.map(r => `
+                <div class="dup-warn-rec">${esc(r.source || 'Unknown source')}${r.quality ? ' · ' + esc(r.quality) : ''} \
+· ${r.track_count} track${r.track_count !== 1 ? 's' : ''}${r.created_at ? ' · added ' + esc(r.created_at.slice(0, 10)) : ''}</div>`).join('')}
+            </div>`).join('')
+          warnEl.style.display = ''
+        } catch (_) { /* best-effort — a failed check should never block ingest */ }
+      }
+
+      ;[artistEl, yearEl, monthEl, dayEl].forEach(el => {
+        el.addEventListener('input', () => {
+          clearTimeout(debounce)
+          debounce = setTimeout(runCheck, 500)
+        })
+      })
+      runCheck()   // also on load — covers AI Assist auto-fill / back-nav restore
+    })()
+
+    // Paula's purple border means "I pre-filled this with confidence" — the
+    // moment a human edits that specific field it's their entry, not hers,
+    // so the border clears immediately (no re-scoring involved, just a
+    // one-time visual cue that's done its job).
+    ;(function () {
+      ['f-artist', 'f-year', 'f-month', 'f-day',
+       'f-venue-name', 'f-city', 'f-state', 'f-country'].forEach(id => {
+        const el = document.getElementById(id)
+        if (el) el.addEventListener('input', () => el.classList.remove('paula-recommend'), { once: true })
+      })
+    })()
+
     // Venue picker — autocomplete with lock/unlock of city/state/country
     ;(function () {
       const nameEl  = document.getElementById('f-venue-name')
@@ -3705,9 +4229,27 @@ const App = (() => {
         cntryEl.disabled = false
       }
 
-      // Restore lock on back-nav if a venue was previously selected
+      // Restore lock on back-nav if a venue was previously selected. On a
+      // fresh scan (no venue_id yet — just a tag/info-derived name), check
+      // whether that name already matches an existing venue: if so, treat it
+      // like a manual pick and lock city/state/country to the venue's own
+      // stored values rather than the tag/info guess, which may be stale or
+      // just less precise (e.g. "Ottawa, ON" in tags vs. the venue's actual
+      // "Gatineau, QC"). A genuinely new venue name is left as the tag/info
+      // prefill, editable. (Ryan, 2026-07-14.)
       if (ingest.form.venue_id) {
         API.venues.get(ingest.form.venue_id).then(v => lockLocation(v)).catch(() => {})
+      } else if (nameEl.value.trim().length >= 2) {
+        const typed = nameEl.value.trim()
+        API.venues.list(typed).then(venues => {
+          if (idEl.value) return   // user already picked something while this was in flight
+          const exact = venues.find(v => v.name.toLowerCase() === typed.toLowerCase())
+          if (exact) {
+            idEl.value = exact.id
+            ingest.form.venue_id = exact.id
+            lockLocation(exact)
+          }
+        }).catch(() => {})
       }
 
       function closeDropdown() { dropEl.style.display = 'none'; dropEl.innerHTML = '' }
@@ -3871,7 +4413,6 @@ const App = (() => {
       f.event_id        = parseInt(document.getElementById('f-event-id').value) || null
       f.is_official     = document.getElementById('f-is-official').checked
       f.source          = document.getElementById('f-source').value
-      f.source_modifier = document.getElementById('f-modifier').value.trim()
       f.quality         = document.getElementById('f-quality').value.trim()
       f.rating          = document.getElementById('f-rating').value.trim()
       f.lineage         = document.getElementById('f-lineage').value.trim()
@@ -3879,20 +4420,12 @@ const App = (() => {
 
       if (!f.artist_name) { alert('Artist name is required.'); return }
 
-      // Collect all track field edits into ingest.tracks
+      // Title is still a live input — collect its current value. Notes,
+      // songwriter, flags, and official are already staged directly on
+      // ingest.tracks by openTrackMenu's onChange (right-click popup).
       mainContent.querySelectorAll('.t-title').forEach(el => {
         const t = ingest.tracks[parseInt(el.dataset.idx)]; if (t) t.title = el.value.trim()
       })
-      mainContent.querySelectorAll('.t-official').forEach(el => {
-        const t = ingest.tracks[parseInt(el.dataset.idx)]; if (t) t.is_official = el.checked
-      })
-      mainContent.querySelectorAll('.t-songwriter').forEach(el => {
-        const t = ingest.tracks[parseInt(el.dataset.idx)]; if (t) t.songwriter = el.value.trim() || null
-      })
-      mainContent.querySelectorAll('.t-track-notes').forEach(el => {
-        const t = ingest.tracks[parseInt(el.dataset.idx)]; if (t) t.notes = el.value.trim() || null
-      })
-      // Flags are already kept live in ingest.tracks by the pill click handler
 
       ingest.step = 'confirm'
       renderIngestStep()
@@ -3907,66 +4440,11 @@ const App = (() => {
     )
   }
 
-  // ── Step 3: Track list review ──────────────────────────────────────────────
-
+  // fmtDur is shared by the review-step track table and the confirm summary.
   function fmtDur(s) {
     if (!s) return '—'
     const m = Math.floor(s / 60), sec = Math.floor(s % 60)
     return `${m}:${String(sec).padStart(2,'0')}`
-  }
-
-  function renderIngestTracks() {
-    const rows = ingest.tracks.map((t, i) => `
-      <tr>
-        <td class="num">${t.track_number}</td>
-        <td><input type="text" class="t-title" data-idx="${i}" value="${esc(t.title)}" /></td>
-        <td class="dur">${fmtDur(t.duration)}</td>
-        <td class="fname">${esc(t.filename)}</td>
-      </tr>`).join('')
-
-    setMainHTML(`
-      <div class="ingest-view" style="max-width:760px">
-        <div class="ingest-step-header">
-          <h2>Review tracks</h2>
-          ${stepDots('tracks')}
-        </div>
-        <div class="sub" style="margin-bottom:16px">
-          Edit track titles. Changes are saved when you continue.
-        </div>
-
-        <div class="ingest-section" style="padding:0; overflow:auto; max-height:460px">
-          <table class="track-review-table">
-            <thead>
-              <tr>
-                <th style="width:32px">#</th>
-                <th>Title</th>
-                <th style="width:44px">Time</th>
-                <th style="width:160px">Filename</th>
-              </tr>
-            </thead>
-            <tbody id="track-tbody">${rows}</tbody>
-          </table>
-        </div>
-
-        <div class="ingest-actions" style="margin-top:16px">
-          <button class="btn btn-ghost btn-sm" id="btn-back-review">← Back</button>
-          <button class="btn btn-primary" id="btn-next-confirm">Confirm →</button>
-        </div>
-      </div>`)
-
-    document.getElementById('btn-back-review').addEventListener('click', () => {
-      ingest.step = 'review'
-      renderIngestStep()
-    })
-
-    document.getElementById('btn-next-confirm').addEventListener('click', () => {
-      // Collect current title edits back into ingest.tracks
-      mainContent.querySelectorAll('.t-title').forEach(el => {
-        ingest.tracks[parseInt(el.dataset.idx)].title = el.value.trim()
-      })
-      ingest.step = 'confirm'
-      renderIngestStep()
-    })
   }
 
   // ── Step 4: Confirm & submit ───────────────────────────────────────────────
@@ -3985,17 +4463,23 @@ const App = (() => {
     const loc   = f.city && f.state ? `${f.city}, ${f.state}`
                 : f.city ? f.city
                 : f.state || 'Unknown Location'
-    const src   = f.source
-      ? (f.source_modifier ? `${f.source} - ${f.source_modifier}` : f.source)
-      : null
+    const src   = f.source || null
     let name = `${f.artist_name || 'Unknown Artist'} - ${date} - ${venue} - ${loc}`
     if (src) name += ` (${src})`
     return name
   }
 
-  function renderIngestConfirm() {
+  async function renderIngestConfirm() {
     const f          = ingest.form
     const folderName = buildFolderName()
+
+    // Default the file-behavior choice from the saved preference, once per session.
+    if (ingest.form.behavior == null) {
+      try {
+        const prefs = await API.preferences.get()
+        ingest.form.behavior = prefs.ingest_file_behavior || 'copy'
+      } catch (_) { ingest.form.behavior = 'copy' }
+    }
 
     const trackRows = ingest.tracks.map(t => `
       <div class="confirm-track-row">
@@ -4017,7 +4501,13 @@ const App = (() => {
           <div class="confirm-folder-name">${esc(folderName)}</div>
           <div class="confirm-row" style="margin-top:10px; border-top:none">
             <span class="label">File behavior</span>
-            <span class="value">Copy files <span style="color:var(--t3)">— originals stay where they are</span></span>
+            <span class="value">
+              <select id="confirm-behavior">
+                <option value="copy" ${ingest.form.behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
+                <option value="move" ${ingest.form.behavior === 'move' ? 'selected' : ''}>Move into library (source removed)</option>
+              </select>
+              <div class="confirm-behavior-hint" id="confirm-behavior-hint">${ingest.form.behavior === 'move' ? 'Removes the original folder after the move.' : 'Originals stay where they are.'}</div>
+            </span>
           </div>
         </div>
 
@@ -4052,7 +4542,7 @@ const App = (() => {
           </div>` : ''}
           <div class="confirm-row">
             <span class="label">Source</span>
-            <span class="value">${esc([f.source, f.source_modifier].filter(Boolean).join(' · ') || '—')}</span>
+            <span class="value">${esc(f.source || '—')}</span>
           </div>
           <div class="confirm-row">
             <span class="label">Quality</span>
@@ -4089,6 +4579,14 @@ const App = (() => {
       renderIngestStep()
     })
 
+    document.getElementById('confirm-behavior')?.addEventListener('change', e => {
+      ingest.form.behavior = e.target.value
+      const hint = document.getElementById('confirm-behavior-hint')
+      if (hint) hint.textContent = e.target.value === 'move'
+        ? 'Removes the original folder after the move.'
+        : 'Originals stay where they are.'
+    })
+
     document.getElementById('btn-add-library').addEventListener('click', async () => {
       const btn    = document.getElementById('btn-add-library')
       const errEl  = document.getElementById('confirm-error')
@@ -4099,12 +4597,16 @@ const App = (() => {
       const payload = {
         source_folder_path: ingest.folderPath,
         ...ingest.form,
-        behavior: 'copy',   // always copy — never move/delete the user's originals
+        behavior: ingest.form.behavior || 'copy',
         tracks: ingest.tracks,
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
         // Performer members → ordered artist (person) names for the backend.
         members: (ingest.form.members || []).map(m => m.name),
+        // AI Assist may have already been run on this draft (pre-save) — carry
+        // the result along so it lands on the new recording instead of being
+        // lost the moment Confirm creates the row (2026-07-14 bug: it wasn't).
+        ai_result: ingest.aiResult || null,
       }
 
       // Progress UI under the button (copy can take a while for big folders)
@@ -4124,22 +4626,29 @@ const App = (() => {
 
       try {
         const { job_id } = await API.ingest.confirm(payload)
-        const sleep = ms => new Promise(r => setTimeout(r, ms))
-        let result = null
-        while (true) {
-          await sleep(600)
-          const s = await API.ingest.confirmStatus(job_id)
-          if (s.status === 'running') {
-            const pct = s.total ? Math.min(100, Math.round(100 * s.copied / s.total)) : 0
-            if (fill)  fill.style.width = pct + '%'
-            if (label) label.textContent = s.total ? `Copying files… ${pct}% (${fmtMB(s.copied)} / ${fmtMB(s.total)})` : 'Copying files…'
-          } else if (s.status === 'done') { result = s.result; break }
-          else if (s.status === 'error')  { throw new Error(s.error) }
-        }
+        const result = await pollConfirmJob(job_id, (copied, total) => {
+          const pct = total ? Math.min(100, Math.round(100 * copied / total)) : 0
+          if (fill)  fill.style.width = pct + '%'
+          if (label) label.textContent = total ? `Copying files… ${pct}% (${fmtMB(copied)} / ${fmtMB(total)})` : 'Copying files…'
+        })
         if (fill) fill.style.width = '100%'
-        ingest.step        = 'success'
         ingest._lastResult = result
-        renderIngestStep()
+        if (result.recording_id) {
+          // Checksums were auto-verified during confirm (api/ingest.py
+          // _do_confirm) — flag it now, before navigating away, rather than
+          // relying on the archivist to notice the Checksums pane later.
+          if (result.checksum_mismatches > 0) {
+            alert(`⚠ ${result.checksum_mismatches} track checksum${result.checksum_mismatches === 1 ? '' : 's'} did not match the fingerprint file for this show. Check the Checksums pane before trusting this copy.`)
+          }
+          // Skip the success screen — refresh the sidebar (new performer/venue/
+          // artist may exist) and go straight to the new recording.
+          await loadArtistList()
+          window.location.hash = `#/recording/${result.recording_id}`
+        } else {
+          // Fallback, shouldn't normally happen — no recording_id to jump to.
+          ingest.step = 'success'
+          renderIngestStep()
+        }
       } catch (e) {
         errEl.textContent = `Error: ${e.message}`
         errEl.style.display = 'block'
@@ -4210,7 +4719,7 @@ const App = (() => {
       } catch (_) {}
     }
     if (recData) {
-      sourceStr = [recData.source, recData.source_modifier].filter(Boolean).join(' · ')
+      sourceStr = recData.source || ''
     }
     // Player bar line 2: Date · Venue (artist name is redundant here — it's
     // shown on line 3). Line 3: the artist/band name.
@@ -4282,7 +4791,8 @@ const App = (() => {
     const descText = v.bio && v.bio.trim()
     // One row per Recording at this venue (showing the performer, since a venue
     // hosts many different acts). Already ordered chronologically by the API.
-    const rowsHtml = (v.recordings || []).map(r => flatRowHtml(r, true)).join('')
+    const venueRows = v.recordings || []
+    const rowsHtml = venueRows.map(r => flatRowHtml(r, true)).join('')
 
     setMainHTML(`
       <div class="performer-page">
@@ -4298,10 +4808,12 @@ const App = (() => {
           </div>
           <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="vn-bio" title="Click to edit">${descText ? esc(v.bio) : 'Add notes…'}</div>
         </div>
-        <div class="rec-table">${rowsHtml || '<div class="empty-state" style="min-height:140px"><div class="empty-title">No recordings from this venue yet</div></div>'}</div>
+        ${venueRows.length ? recTableHeadHtml(true) : ''}
+        <div class="rec-table" id="rec-table-venue">${rowsHtml || '<div class="empty-state" style="min-height:140px"><div class="empty-title">No recordings from this venue yet</div></div>'}</div>
       </div>`)
 
     wireRecordingRows(mainContent)
+    if (venueRows.length) wireDateAddedSort(document.getElementById('rec-table-venue'), venueRows, true)
 
     const refreshSidebar = () => invalidateDims('venues')
     async function saveField(patch) {
@@ -4589,6 +5101,9 @@ const App = (() => {
       if (id) renderArtistView(id)
       else    renderLibraryView()
 
+    } else if (hash === '#/recent') {
+      renderRecentView()
+
     } else if (hash === '#/batch') {
       renderBatchImportView()
 
@@ -4779,6 +5294,11 @@ const App = (() => {
   window.fluxState = {
     get recordingId() { return state.currentRecId },
     get trackCount()  { return state._lastTrackCount || null },
+    // Paula's full scan-time breakdown (score + every flag/component per
+    // attribute + track completeness) — surfaced to the debug panel's
+    // dedicated Paula section. Null outside the Add Recording flow, or
+    // before a folder's been scanned.
+    get paula()       { return (typeof ingest !== 'undefined' && ingest?.scan?.paula) || null },
   }
 
   return { onTrackChange }

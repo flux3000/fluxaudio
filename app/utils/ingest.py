@@ -22,12 +22,13 @@ from dateutil.parser import ParserError as _ParserError
 import geonamescache as _geonamescache
 
 from app.utils.format import format_partial_date
+from app.utils.health import compute_health
 
 
 # ── File classification ────────────────────────────────────────────────────────
 
 AUDIO_EXTENSIONS    = {".flac", ".mp3", ".wav"}
-FINGERPRINT_MARKERS = {"ffp", "md5", "eac", "shntool", "fingerprint"}
+FINGERPRINT_MARKERS = {"ffp", "md5", "eac", "shntool", "fingerprint", "st5"}
 TEXT_EXTENSION      = ".txt"
 
 # Subdir name patterns that indicate multi-set/disc folder structure.
@@ -115,9 +116,6 @@ def scan_folder(folder_path):
     }
 
     # ── Detect subdir structure ────────────────────────────────────────────────
-    # We intentionally do NOT split by CD/disc/set subdirs — physical media
-    # splits are irrelevant for live recording archival. All audio is treated
-    # as one flat list regardless of how it's organised on disk.
     try:
         top_entries = os.listdir(folder_path)
     except OSError:
@@ -133,12 +131,44 @@ def scan_folder(folder_path):
         and Path(f).suffix.lower() in AUDIO_EXTENSIONS
     ]
 
+    # Multi-set detection: a subdir counts as a "set" (disc) only if its name
+    # matches the CD/Disc/Set/etc pattern AND it actually contains audio —
+    # named-but-empty subdirs (or a stray "Artwork" folder that happens to
+    # match nothing) don't count. Ordered by the number in the name ("CD 2"
+    # before "CD 10"), not alphabetically, so file/track order downstream is
+    # deterministic regardless of filesystem listing order.
+    # (2026-07-14: this detection previously computed a label via
+    # _auto_set_label() but never actually used it — every file got
+    # set=None regardless of folder structure, which is how a CD1/CD2 source
+    # ended up with two tracks numbered 1-5 each: nothing here ever told the
+    # rest of the pipeline the FLAC TRACKNUMBER tags reset per disc.)
+    set_dirs = []   # [(abs_dirpath, label, number)]
+    for e in subdirs:
+        label = _auto_set_label(e)
+        if not label:
+            continue
+        dpath = os.path.join(folder_path, e)
+        try:
+            has_audio = any(
+                Path(f).suffix.lower() in AUDIO_EXTENSIONS
+                for f in os.listdir(dpath)
+                if os.path.isfile(os.path.join(dpath, f))
+            )
+        except OSError:
+            has_audio = False
+        if has_audio:
+            num = int(_SET_PATTERNS.match(e.strip()).group(2))
+            set_dirs.append((dpath, label, num))
+    set_dirs.sort(key=lambda x: x[2])
+    sets_detected = len(set_dirs) >= 2   # one lone "Disc 1" folder isn't multi-anything
+    result["sets_detected"] = sets_detected
+
     # Determine scan mode
-    if len(subdirs) == 1 and not root_audio:
-        # Single transparent subdir (e.g. 'flac/', 'cd1/') — treat as flat
+    if not sets_detected and len(subdirs) == 1 and not root_audio:
+        # Single transparent subdir (e.g. 'flac/') and not a recognized set —
+        # treat as flat.
         scan_dirs = [(folder_path, None), (os.path.join(folder_path, subdirs[0]), None)]
     else:
-        # Flat walk — collect everything (including multiple subdirs like cd1+cd2)
         scan_dirs = None   # sentinel: use os.walk
 
     # ── File collection ────────────────────────────────────────────────────────
@@ -157,8 +187,10 @@ def scan_folder(folder_path):
                 "index":    audio_index,
                 "filename": fname,
                 # rel_path is relative to the scan root — includes any subdir prefix
-                # (e.g. "flac/01 - Dark Star.flac" or "disc1/01.flac").
-                # Use this as file_path in the DB so streams resolve correctly after copy.
+                # (e.g. "flac/01 - Dark Star.flac" or "CD 1/01.flac"). Ingest
+                # flattens audio into the library folder root regardless (see
+                # compute_audio_rename_map / move_to_library) — rel_path here is
+                # only used to locate the original file pre-flatten.
                 "rel_path": os.path.relpath(full, folder_path),
                 "path":     full,
                 "set":      set_label,   # None for flat; "CD 1" etc. for multi-set
@@ -169,6 +201,7 @@ def scan_folder(folder_path):
                     "type":     _detect_fp_type(low),
                     "filename": fname,
                     "path":     full,
+                    "rel_path": os.path.relpath(full, folder_path),
                 })
             else:
                 all_text.append({"filename": fname, "path": full})
@@ -177,11 +210,38 @@ def scan_folder(folder_path):
                 "type":     _detect_fp_type(low),
                 "filename": fname,
                 "path":     full,
+                "rel_path": os.path.relpath(full, folder_path),
             })
         else:
             result["other_files"].append({"filename": fname, "path": full})
 
-    if scan_dirs is not None:
+    if sets_detected:
+        # Deterministic order: root-level loose files first (rare), then each
+        # detected set in numeric order (filenames sorted within each), then
+        # a final sweep for anything else (e.g. "Art/") so other_files and
+        # fingerprints located outside the set folders still get picked up —
+        # skipping the set dirs themselves so nothing is double-counted.
+        for fname in sorted(top_entries):
+            full = os.path.join(folder_path, fname)
+            if os.path.isfile(full):
+                _classify(fname, folder_path, None)
+        for dpath, label, _num in set_dirs:
+            try:
+                for fname in sorted(os.listdir(dpath)):
+                    full = os.path.join(dpath, fname)
+                    if os.path.isfile(full):
+                        _classify(fname, dpath, label)
+            except OSError:
+                pass
+        set_dir_paths = {dpath for dpath, _label, _num in set_dirs}
+        for dirpath, dirnames, filenames in os.walk(folder_path):
+            if dirpath == folder_path:
+                dirnames[:] = [d for d in dirnames
+                               if os.path.join(dirpath, d) not in set_dir_paths]
+                continue   # root files already classified above
+            for fname in sorted(filenames):
+                _classify(fname, dirpath, None)
+    elif scan_dirs is not None:
         # Structured walk: visit each (dir, set_label) pair, non-recursive
         seen_dirs = set()
         for dir_path, set_label in scan_dirs:
@@ -211,6 +271,12 @@ def scan_folder(folder_path):
 
 
 def _detect_fp_type(filename_lower):
+    # st5 checked first: shntool's own checksum is, by design, the same MD5-of-
+    # decoded-audio value as an ffp (see app/utils/checksums.py docstring) — but
+    # a filename like "checksum.st5" or "*_shntool.md5" should still resolve to
+    # st5, not be mistaken for a plain whole-file md5.
+    if filename_lower.endswith(".st5") or "st5" in filename_lower or "shntool" in filename_lower:
+        return "st5"
     if "ffp" in filename_lower:
         return "ffp"
     if "md5" in filename_lower:
@@ -324,9 +390,6 @@ def build_recording_tags(recording):
 
     # ── Source string ─────────────────────────────────────────────────────────
     source_str = recording.source
-    if recording.source_modifier:
-        source_str = (f"{source_str} - {recording.source_modifier}"
-                      if source_str else recording.source_modifier)
 
     # ── Artist / album labels ─────────────────────────────────────────────────
     artist_name = perf.performer.name if (perf and perf.performer) else None
@@ -890,15 +953,24 @@ def parse_info_file(file_path, known_artists=None, known_venues=None):
             result["source"] = val
             break
 
-    # Lineage — collect lines after an explicit lineage label
+    # Lineage — collect the contiguous block of non-blank lines starting at an
+    # explicit lineage label, stopping at the next blank line (or a hard line
+    # cap). This is lower-priority than the core fields — it should only fire
+    # when it's confidently bounded to a real chain description, not guess at
+    # where one ends. Info files routinely have unrelated sections (setlist,
+    # taper notes, footnotes) after the label; without a stop condition this
+    # used to run to EOF and swallow the whole rest of the file.
+    _MAX_LINEAGE_LINES = 8
     lineage_buf = []
-    in_lineage  = False
-    for line in lines:
+    for i, line in enumerate(lines):
         low = line.strip().lower()
         if any(lbl in low for lbl in _LINEAGE_LABELS):
-            in_lineage = True
-        if in_lineage and line.strip():
             lineage_buf.append(line.strip())
+            for follow in lines[i + 1:]:
+                if not follow.strip() or len(lineage_buf) >= _MAX_LINEAGE_LINES:
+                    break
+                lineage_buf.append(follow.strip())
+            break
     if lineage_buf:
         result["lineage"] = " ".join(lineage_buf)
 
@@ -920,20 +992,179 @@ def _titlecase(s):
     return " ".join(out)
 
 
+def build_scan_payload(folder_path):
+    """
+    Non-destructive scan of a source folder — the single shared foundation for
+    every "what's in this folder" question in the app: the Add Recording scan
+    step (POST /api/recordings/scan) AND batch import (POST /api/ingest/batch-scan)
+    both build their metadata suggestions and health score from this, so a
+    folder scores identically no matter which flow scanned it.
+
+    Returns the full scan payload (audio files, parsed tag/info-file
+    suggestions, fingerprints, and a compute_health() score), or None if the
+    folder has no audio files.
+    """
+    files = scan_folder(folder_path)
+    if not files["audio_files"]:
+        return None
+
+    from_tags = read_flac_tags(files["audio_files"])
+
+    # Parse CONCERTLOCATION tag into city/state/country using the same
+    # geonamescache-backed parser as the info file (best-effort, graceful fallback)
+    tag_city = tag_state = tag_country = None
+    tag_location = from_tags["container"].get("location") or ""
+    if tag_location:
+        try:
+            tag_city, tag_state, tag_country = _parse_location(tag_location)
+        except Exception:
+            pass
+
+    # Parse ALL text file candidates (scored/sorted best-first by scan_folder).
+    from_info         = {}
+    info_file_content = None
+    parsed_candidates = []
+    for tf in files["text_files"]:
+        parsed = parse_info_file(tf["path"])
+        entry  = {
+            "filename":    tf["filename"],
+            "score":       tf.get("score", 0),
+            "content":     parsed.get("raw_content", ""),
+            "suggestions": {
+                "artist":       parsed.get("artist"),
+                "artist_match": parsed.get("artist_match"),
+                "year":         parsed.get("year"),
+                "month":        parsed.get("month"),
+                "day":          parsed.get("day"),
+                "venue":        parsed.get("venue"),
+                "venue_match":  parsed.get("venue_match"),
+                "city":         parsed.get("city"),
+                "state":        parsed.get("state"),
+                "country":      parsed.get("country"),
+                "source":       parsed.get("source"),
+                "lineage":      parsed.get("lineage"),
+                "tracks": [
+                    {"number": t["number"], "title": t["title"]}
+                    for t in parsed.get("tracks", [])
+                ],
+            },
+        }
+        parsed_candidates.append(entry)
+    if parsed_candidates:
+        from_info         = parsed_candidates[0]["suggestions"]
+        info_file_content = parsed_candidates[0]["content"]
+
+    # Read fingerprint file contents
+    fingerprints = []
+    for fp in files["fingerprints"]:
+        try:
+            with open(fp["path"], "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError:
+            content = None
+        fingerprints.append({
+            "type":     fp["type"],
+            "filename": fp["filename"],
+            "content":  content,
+        })
+
+    resp = {
+        "folder_path":      folder_path,
+        "folder_name":      os.path.basename(folder_path),
+        "audio_file_count": len(files["audio_files"]),
+        "sets_detected":    files.get("sets_detected", False),
+        "audio_files": [
+            {
+                "index":    f["index"],
+                "filename": f["filename"],
+                "rel_path": f.get("rel_path", f["filename"]),
+                "set":      f.get("set"),
+            }
+            for f in files["audio_files"]
+        ],
+        "info_file_content": info_file_content,
+        "text_file_candidates": parsed_candidates,
+        "fingerprints":      fingerprints,
+        "suggestions": {
+            "from_tags": {
+                "artist":       from_tags["container"].get("artist"),
+                "concert_date": from_tags["container"].get("concert_date"),
+                "venue":        from_tags["container"].get("venue"),
+                "location":     from_tags["container"].get("location"),
+                "city":         tag_city,
+                "state":        tag_state,
+                "country":      tag_country,
+                "source":       from_tags["container"].get("source"),
+                "lineage":      from_tags["container"].get("lineage"),
+                "tracks": [
+                    {
+                        "index":        t["index"],
+                        "filename":     t["filename"],
+                        "rel_path":     t.get("rel_path", t["filename"]),
+                        "track_number": t["track_number"],
+                        "title":        t["title"],
+                        "duration":     t["duration"],
+                        "raw":          t.get("raw", {}),
+                    }
+                    for t in from_tags["tracks"]
+                ],
+            },
+            "from_info_file": {
+                "artist":       from_info.get("artist"),
+                "artist_match": from_info.get("artist_match"),
+                "year":         from_info.get("year"),
+                "month":        from_info.get("month"),
+                "day":          from_info.get("day"),
+                "venue":        from_info.get("venue"),
+                "venue_match":  from_info.get("venue_match"),
+                "city":         from_info.get("city"),
+                "state":        from_info.get("state"),
+                "country":      from_info.get("country"),
+                "source":       from_info.get("source"),
+                "lineage":      from_info.get("lineage"),
+                "tracks": [
+                    {"number": t["number"], "title": t["title"]}
+                    for t in from_info.get("tracks", [])
+                ],
+            },
+        },
+    }
+    resp["health"] = compute_health(resp)
+    return resp
+
+
 # ── File system operations ─────────────────────────────────────────────────────
 
 def move_to_library(source_folder, library_root, artist_name, folder_name,
-                    behavior="copy", progress_cb=None):
+                    behavior="copy", progress_cb=None, audio_rename_map=None):
     """
     Move or copy a source folder into the library under the artist directory.
 
+    Audio files are always flattened into the destination folder's ROOT and
+    renamed per `audio_rename_map` (original rel_path → new flat filename),
+    regardless of how deeply nested they were in the source (CD1/, Disc 2/,
+    flac/, ...). This keeps Track.file_path free of subdir prefixes and
+    guarantees continuous, collision-free filenames even when a multi-disc
+    source reset filenames independently per disc (the CD1/CD2 bug this
+    replaced — 2026-07-14). Non-audio content (art, text files, etc.) keeps
+    its original relative structure under dest_folder.
+
+    Renaming does not affect fingerprint verification: FFP/MD5/ST5 are
+    content hashes, independent of filename. Fingerprint-file matching is
+    done by the caller against ORIGINAL filenames (before this rename) —
+    see compute_audio_rename_map() and app.api.ingest._do_confirm.
+
     Args:
-        source_folder : str  — absolute path to source folder
-        library_root  : str  — LIBRARY_ROOT from config
-        artist_name   : str  — canonical artist name (used as subdirectory)
-        folder_name   : str  — canonical folder name from build_folder_name()
-        behavior      : "copy" | "move"
-        progress_cb   : callable(copied_bytes, total_bytes) | None — copy progress
+        source_folder     : str  — absolute path to source folder
+        library_root       : str  — LIBRARY_ROOT from config
+        artist_name         : str  — canonical artist name (used as subdirectory)
+        folder_name        : str  — canonical folder name from build_folder_name()
+        behavior           : "copy" | "move"
+        progress_cb         : callable(copied_bytes, total_bytes) | None — progress
+        audio_rename_map   : {rel_path_or_basename: new_filename}, from
+                              compute_audio_rename_map(). An audio file with
+                              no entry keeps its original basename, still
+                              flattened to dest_folder's root.
 
     Returns:
         str — new folder path relative to library_root
@@ -941,40 +1172,103 @@ def move_to_library(source_folder, library_root, artist_name, folder_name,
     dest_dir    = Path(library_root) / _sanitize_path(artist_name)
     dest_folder = dest_dir / folder_name
     dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_folder.mkdir(parents=True, exist_ok=True)
+
+    audio_rename_map = audio_rename_map or {}
+    src   = Path(source_folder)
+    files = [p for p in src.rglob("*") if p.is_file()]
+    total = sum(p.stat().st_size for p in files) or 1
+    done  = 0
+    if progress_cb:
+        progress_cb(0, total)
+
+    for p in files:
+        rel  = str(p.relative_to(src)).replace(os.sep, "/")
+        size = p.stat().st_size
+        if p.suffix.lower() in AUDIO_EXTENSIONS:
+            # Flatten: destination has no subdir, regardless of source nesting.
+            new_name = audio_rename_map.get(rel) or audio_rename_map.get(p.name) or p.name
+            target   = dest_folder / new_name
+        else:
+            # Preserve relative structure for everything else (Art/, loose .txt, ...).
+            target = dest_folder / p.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if behavior == "move":
+            shutil.move(str(p), str(target))
+        else:
+            shutil.copy2(str(p), str(target))
+        done += size
+        if progress_cb:
+            progress_cb(done, total)
 
     if behavior == "move":
-        # A rename on the same volume is instant; copy+delete otherwise. Report
-        # start/finish so the client always gets a terminal progress value.
-        if progress_cb:
-            progress_cb(0, 1)
-        shutil.move(str(source_folder), str(dest_folder))
-        if progress_cb:
-            progress_cb(1, 1)
-    else:
-        _copytree_with_progress(source_folder, dest_folder, progress_cb)
+        # Files are gone from source; clear out the now-empty (or
+        # empty-of-anything-useful) directory tree that's left behind.
+        shutil.rmtree(str(src), ignore_errors=True)
 
     # Return path relative to library_root for storage in DB
     return str(dest_folder.relative_to(library_root))
 
 
-def _copytree_with_progress(source_folder, dest_folder, progress_cb=None):
-    """Copy a folder file-by-file, reporting cumulative bytes copied so a slow
-    copy (large audio + photos) can show a progress bar instead of hanging."""
-    src  = Path(source_folder)
-    dest = Path(dest_folder)
-    files  = [p for p in src.rglob("*") if p.is_file()]
-    total  = sum(p.stat().st_size for p in files) or 1
-    copied = 0
-    if progress_cb:
-        progress_cb(0, total)
-    dest.mkdir(parents=True, exist_ok=True)
-    for p in files:
-        target = dest / p.relative_to(src)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(p), str(target))
-        copied += p.stat().st_size
-        if progress_cb:
-            progress_cb(copied, total)
+def compute_audio_rename_map(tracks):
+    """
+    Build a collision-safe mapping from each track's ORIGINAL rel_path (as
+    scanned from the source folder — may carry a disc/set subdir prefix like
+    "CD1/01.flac") to a new flat filename to use once the recording is moved
+    into the library.
+
+    Library audio is always flattened to the folder root and renamed on
+    ingest (Ryan's "always flatten + rename" decision, 2026-07-14) — this is
+    what fixes multi-disc sources whose per-disc TRACKNUMBER tags reset and
+    collide (e.g. two files both literally named "01.flac"). Renaming is
+    safe for verification: FFP/MD5/ST5 are content hashes and don't change
+    when a file is renamed — see [[project_checksum_format_preference]].
+
+    Naming pattern: "NN - Title.ext", zero-padded to the width of the
+    highest track_number (min 2 digits) so names sort correctly once a
+    recording has 10+ tracks.
+
+    Args:
+        tracks: list of dicts with at least "track_number", "title", and
+                "filename" (the original rel_path/filename from scan/tags).
+
+    Returns:
+        {original_rel_path_or_filename: new_flat_filename}
+    """
+    if not tracks:
+        return {}
+
+    max_num = max((t.get("track_number") or 0) for t in tracks) or len(tracks)
+    width   = max(2, len(str(max_num)))
+
+    rename_map = {}
+    used_names = set()
+    for t in tracks:
+        orig = t.get("filename") or ""
+        if not orig:
+            continue
+        ext   = os.path.splitext(orig)[1].lower()
+        num   = t.get("track_number") or 0
+        title = _sanitize_filename(t.get("title") or f"Track {num}")
+        base  = f"{str(num).zfill(width)} - {title}{ext}"
+        name  = base
+        n = 2
+        while name.lower() in used_names:
+            name = f"{str(num).zfill(width)} - {title} ({n}){ext}"
+            n += 1
+        used_names.add(name.lower())
+        rename_map[orig] = name
+    return rename_map
+
+
+def _sanitize_filename(name):
+    """Strip characters illegal/awkward in filenames (macOS + Windows-safe,
+    since library folders sometimes get shared to non-Mac drives) and
+    collapse whitespace. Distinct from _sanitize_path(), which is only used
+    for directory names and deliberately leaves "/" untouched."""
+    name = re.sub(r'[\\/:*?"<>|\x00]', '-', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name or "Track"
 
 
 def _sanitize_path(name):

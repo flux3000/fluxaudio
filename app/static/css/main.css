@@ -845,6 +845,14 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .rec-date-line .pp-editable:hover { background: var(--bg-1); }
 .rec-dot { color: var(--t3); margin: 0 5px; }
 .rec-f-loc { color: var(--t2); }
+/* Small "edit the venue record itself" link — clicking the venue name
+   reassigns which venue this performance uses, so this is the only way to
+   reach the venue's own city/state/country/bio from the recording page. */
+.rec-venue-edit-link {
+  color: var(--t3); text-decoration: none; font-size: 10px;
+  margin-left: 2px; opacity: 0.7;
+}
+.rec-venue-edit-link:hover { color: var(--accent); opacity: 1; }
 .rec-date-input {
   background: var(--bg-2); border: 1px solid var(--accent); color: var(--t0);
   border-radius: var(--r-sm); padding: 1px 4px; font-size: 12px; margin-right: 3px;
@@ -890,15 +898,6 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.badge-modifier {
-  font-size: 11px;
-  color: var(--t1);
-  background: var(--bg-3);
-  border: 1px solid var(--bd-1);
-  padding: 2px 7px;
-  border-radius: 3px;
 }
 
 .badge-incomplete {
@@ -1966,6 +1965,24 @@ input[type="range"].progress-bar {
   font-size: 12px;
 }
 
+/* File-handling selector (synced with the shared ingest_file_behavior pref) */
+.batch-behavior-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px;
+}
+.batch-behavior-label {
+  font-size: 11px; color: var(--t2);
+}
+#batch-behavior-select {
+  padding: 4px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  color: var(--t0);
+  font-size: 12px;
+  font-family: var(--font);
+}
+
 /* Tier pills */
 .batch-tier-pills { display: flex; gap: 6px; flex-wrap: wrap; }
 
@@ -1997,9 +2014,6 @@ input[type="range"].progress-bar {
 }
 .batch-item-row:last-child { border-bottom: none; }
 
-.batch-item-green  { border-left: 3px solid var(--green); }
-.batch-item-yellow { border-left: 3px solid var(--amber); }
-.batch-item-red    { border-left: 3px solid var(--red);   }
 .batch-item-ingested { opacity: 0.5; }
 
 /* Main row line */
@@ -2017,8 +2031,8 @@ input[type="range"].progress-bar {
   border: none;
   color: var(--t3);
   cursor: pointer;
-  font-size: 11px;
-  width: 16px;
+  font-size: 17px;
+  width: 22px;
   padding: 0;
   line-height: 1;
 }
@@ -2028,8 +2042,6 @@ input[type="range"].progress-bar {
   flex: 1;
   min-width: 0;
 }
-
-.batch-tier-icon { margin-right: 4px; }
 
 .batch-item-name {
   font-size: 12px;
@@ -2052,14 +2064,20 @@ input[type="range"].progress-bar {
 .batch-meta-field { font-size: 11px; color: var(--t2); }
 .batch-meta-sep   { font-size: 11px; color: var(--t3); }
 
-.batch-conf-flag {
-  font-size: 10px;
-  background: rgba(230,180,50,0.15);
-  color: var(--amber);
-  border-radius: 3px;
-  padding: 1px 5px;
+/* Just the number — no badge chrome, no dots, no tier bar. Colored text only,
+   sized to match the rest of the row (this used to double up with .iq-score's
+   22px rule and lose the cascade, which is why it looked huge before). */
+.batch-score {
+  flex-shrink: 0;
+  font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 22px;
+  text-align: right;
 }
+.batch-score--green  { color: var(--green); }
+.batch-score--yellow { color: var(--amber); }
+.batch-score--red    { color: var(--red); }
 
 .batch-issue-error {
   font-size: 10px;
@@ -2148,6 +2166,37 @@ input[type="range"].progress-bar {
 .batch-track-preview {
   color: var(--t2);
   font-size: 11px;
+  font-style: italic;
+}
+
+.batch-expand-tracklist { align-items: flex-start; }
+
+.batch-track-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.batch-track-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.batch-track-num {
+  color: var(--t3);
+  width: 18px;
+  flex-shrink: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-track-title { color: var(--t1); }
+
+.batch-track-src {
+  color: var(--t3);
+  font-size: 10px;
   font-style: italic;
 }
 
@@ -2420,9 +2469,39 @@ input[type="range"].progress-bar {
 .ai-res-conf { color: var(--t3); font-size: 10px; }
 .ai-res-note { margin: 0 0 5px; font-size: 11.5px; line-height: 1.5; color: var(--t1); }
 
+/* Sub-grouping within Metadata Review — city/state/country are attributes of
+   the Venue record, not the show, so they're visually split out. */
+.ai-res-subhead {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--t3); margin: 10px 0 2px; padding-top: 6px; border-top: 1px dashed var(--bd-0);
+}
+.ai-res-subhead-note { text-transform: none; letter-spacing: 0; font-style: italic; }
+
 /* Neutral, theme-aware links (never blue) */
 .ai-link { color: var(--t2); text-decoration: underline; text-underline-offset: 2px; }
 .ai-link:hover { color: var(--t0); }
+
+/* ── Checksums pane (.ffp / .md5 / .st5 fingerprint verification) ───────────── */
+.cksum-summary {
+  padding: 8px 16px; font-size: 11.5px; font-weight: 600; border-bottom: 1px solid var(--bd-0);
+}
+.cksum-summary--ok   { color: var(--green); }
+.cksum-summary--warn { color: var(--red); }
+.cksum-rows { padding: 4px 16px; }
+.cksum-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 0; border-bottom: 1px solid var(--bd-0);
+  font-size: 11.5px;
+}
+.cksum-num   { flex-shrink: 0; width: 20px; color: var(--t3); font-variant-numeric: tabular-nums; text-align: right; }
+.cksum-title { flex: 1; min-width: 0; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cksum-type  { flex-shrink: 0; width: 32px; color: var(--t3); font-size: 10px; }
+.cksum-status { flex-shrink: 0; color: var(--t2); }
+.cksum-status--match      { color: var(--green); }
+.cksum-status--mismatch   { color: var(--red); font-weight: 600; }
+.cksum-status--unverified { color: var(--t3); }
+.cksum-detail { padding: 0 0 4px 28px; font-size: 10px; color: var(--t3); font-family: var(--font-mono); }
+.cksum-hint { margin: 8px 16px 0; font-size: 10.5px; color: var(--t3); font-style: italic; line-height: 1.5; }
 
 /* ── Members multi-select (Add/Edit forms) ───────────────────────────────────── */
 
@@ -2511,7 +2590,7 @@ input[type="range"].progress-bar {
 .rec-table { padding: 4px 0 20px; }
 .rec-row--flat {
   display: grid;
-  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 28px;
+  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 28px;
   align-items: center;
   gap: 10px;
   padding: 5px 20px;
@@ -2520,10 +2599,31 @@ input[type="range"].progress-bar {
   font-size: 12px;
 }
 .rec-row--flat.with-performer {
-  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 28px;
+  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 28px;
 }
 .rec-row--flat:hover { background: var(--bg-1); }
 .rec-performer-cell { color: var(--t0); font-weight: 450; }
+.rec-date-added { text-align: right; color: var(--t3); font-variant-numeric: tabular-nums; }
+
+/* Header row paired with .rec-row--flat — same grid, mostly blank; "Added" sorts. */
+.rec-table-head {
+  display: grid;
+  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 28px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px 4px;
+  font-size: 10px;
+}
+.rec-table-head.with-performer {
+  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 28px;
+}
+.rec-th-added {
+  background: none; border: none; padding: 0; margin: 0;
+  color: var(--t3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  text-align: right; cursor: pointer; font-family: var(--font);
+}
+.rec-th-added:hover { color: var(--t1); }
+.rec-th-arrow { display: inline-block; width: 8px; }
 
 /* Add-to-collection menu items */
 .col-menu-item { padding: 6px 10px; font-size: 12px; cursor: pointer; border-radius: 4px; }
@@ -2821,6 +2921,32 @@ input[type="range"].progress-bar {
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
+/* Add Recording track rows — right-click for note/songwriter/flags/official
+   (same popup as View Recording, .track-qmenu), so hint at that on hover. */
+.track-review-row { cursor: context-menu; }
+
+/* Title is an editable <input>, not the read-only <span> View Recording
+   uses, so flag chips/official badge can't share its line — they sit in
+   their own row underneath instead, reusing the same chip/badge classes. */
+.track-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 12px;   /* keeps row height steady whether or not chips exist */
+  padding: 0 7px;
+}
+.track-chip-row .track-flag-chip,
+.track-chip-row .track-official-badge {
+  margin-left: 0;
+}
+
+.track-review-table td.note-cell,
+.track-review-table td.sw-cell {
+  font-size: 11px;
+  color: var(--t2);
+  max-width: 140px;   /* .truncate (already on these cells) handles the ellipsis */
+}
+
 /* ── Official release badge + track flags ─────────────────────────────────── */
 
 .badge-official {
@@ -2947,9 +3073,7 @@ input[type="range"].progress-bar {
 }
 .track-qmenu-songwriter:focus { border-color: var(--accent); }
 
-/* ── Expandable track detail row (edit view + ingest) ────────────────────── */
-.et-expand-cell { text-align: center; }
-.et-official-cell { text-align: center; }
+/* ── Expandable track detail row (edit view) ─────────────────────────────── */
 
 /* Play button — audition a track from within the edit view */
 .et-play-cell { text-align: center; }
@@ -2968,25 +3092,6 @@ input[type="range"].progress-bar {
 .et-row.playing .et-play { color: var(--accent-lit); }
 .et-row.playing td { background: var(--accent-dim); }
 
-.et-expand-btn {
-  font-size: 14px; color: var(--t2); padding: 0 4px;
-  background: none; border: none; cursor: pointer; border-radius: 3px;
-  line-height: 1;
-}
-.et-expand-btn:hover, .et-expand-btn.active { color: var(--accent-lit); background: var(--bg-4); }
-
-.et-detail-row td { padding: 0 !important; }
-.et-detail-body {
-  padding: 10px 12px 12px;
-  background: var(--bg-2);
-  border-top: 1px solid var(--bd-0);
-  border-bottom: 1px solid var(--bd-1);
-}
-.et-detail-label {
-  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--t2); margin-bottom: 8px;
-  padding-bottom: 6px; border-bottom: 1px dashed var(--bd-1);
-}
 /* Top row: Track notes (left) + Songwriter (right), each half width */
 .et-detail-grid2 {
   display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start;
@@ -3046,7 +3151,13 @@ input[type="range"].progress-bar {
 .ingest-review-form {
   display: flex;
   flex-direction: column;
-  flex: 2 1 0;          /* main area ~2/3 */
+  /* grow/shrink both 0: the JS drag handler (wireResizablePanel) sets an
+     explicit pixel width once dragging starts, and a nonzero flex-grow here
+     would keep fighting that value — pulling the panel wider than the mouse
+     position and making the divider feel like it jumps. Fixed 66% basis
+     gives the same "main area ~2/3" starting look; .ingest-review-raw's
+     flex:1 absorbs whatever's left. */
+  flex: 0 0 66%;
   min-width: 260px;
   overflow: hidden;
 }
@@ -3117,6 +3228,36 @@ input[type="range"].progress-bar {
 .iq-score--red    { color: #e06060; }
 .iq-msg { flex: 1; min-width: 0; font-size: 11px; color: var(--t1); line-height: 1.3; }
 .iq-ai-btn { flex-shrink: 0; white-space: nowrap; }
+
+/* Paula — the free, non-AI completeness/confidence scorer (2026-07-16).
+   Two small badges (Primary Attribute Score, Track Completeness Score)
+   sit under the main quality bar; purple input borders mark fields she's
+   confident enough in to have pre-filled (see .paula-recommend below). */
+.paula-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 14px 8px;
+  border-bottom: 1px solid var(--bd-0);
+  flex-shrink: 0;
+}
+.paula-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--t2);
+}
+.paula-badge-score {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--purple);
+}
+.paula-recommend {
+  border-color: var(--purple) !important;
+  box-shadow: 0 0 0 1px var(--purple);
+}
 
 /* Row holding the reference panes + vertical tab rail */
 .ingest-tabs {
@@ -3270,9 +3411,15 @@ input[type="range"].progress-bar {
   text-overflow: ellipsis;
 }
 
-/* Raw tag key-value display */
+/* Raw tag key-value display. Also wraps the Info File pane's editable
+   textarea — flex column + min-height:100% so that textarea (flex:1) can
+   stretch to fill the pane instead of sitting in a short fixed-height box
+   with its own internal scrollbar. */
 .rev-raw-section {
   padding: 8px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
 
 /* FLAC tracks sub-section within the FLAC Tags panel */
@@ -3329,6 +3476,18 @@ input[type="range"].progress-bar {
 }
 .info-file-btn:hover:not(.active) { background: var(--bg-4); }
 
+.info-file-save-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 6px;
+}
+.info-file-save-status {
+  font-size: 10px;
+  color: var(--t2);
+}
+
 .rev-info-text {
   font-size: 11px;
   font-family: var(--font-mono);
@@ -3340,6 +3499,28 @@ input[type="range"].progress-bar {
   user-select: text;
   -webkit-user-select: text;
 }
+
+/* Editable variant of .rev-info-text — Add Recording form's Info File pane.
+   Same mono look; a visible box only appears on focus so it reads as plain
+   text until you click in to edit. */
+.rev-info-edit {
+  display: block;
+  width: 100%;
+  flex: 1;              /* fill the pane's available height, not just min-height */
+  min-height: 260px;     /* floor when the pane itself is short */
+  resize: vertical;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 4px;
+  margin: -4px;
+}
+.rev-info-edit:focus {
+  border-color: var(--bd-2);
+  background: var(--bg-1);
+  outline: none;
+}
+.rev-info-edit::placeholder { color: var(--t3); }
 
 .rev-venue-note {
   font-size: 10px;
@@ -3408,6 +3589,23 @@ input[type="range"].progress-bar {
   padding: 5px 10px;
   margin-bottom: 8px;
 }
+
+/* Non-blocking "already in your library" warning — same amber language as
+   the track-count mismatch banner, since both are "look before you leap"
+   nudges rather than errors. */
+.dup-warn {
+  font-size: 11px;
+  color: #b8860b;
+  background: rgba(200, 150, 0, 0.08);
+  border: 1px solid rgba(200, 150, 0, 0.25);
+  border-radius: 4px;
+  padding: 7px 10px;
+  margin-top: 8px;
+}
+.dup-warn-title { font-weight: 600; margin-bottom: 3px; }
+.dup-warn-perf + .dup-warn-perf { margin-top: 6px; }
+.dup-warn-perf-head { color: var(--t0); font-weight: 500; }
+.dup-warn-rec { color: var(--t2); padding-left: 10px; }
 
 /* ── Play button in track table ────────────────────────────────────────────── */
 
@@ -3530,6 +3728,24 @@ input[type="range"].progress-bar {
 .confirm-row:last-child { border-bottom: none; }
 .confirm-row .label { color: var(--t1); }
 .confirm-row .value { color: var(--t0); font-weight: 500; }
+
+#confirm-behavior {
+  padding: 6px 9px;
+  background: var(--bg-1);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  color: var(--t0);
+  font-size: 12px;
+  font-family: var(--font);
+  outline: none;
+}
+.confirm-behavior-hint {
+  margin-top: 4px;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--t3);
+  text-align: right;
+}
 
 /* Track rows in confirm step */
 .confirm-track-row {

@@ -79,12 +79,14 @@ const API = (() => {
     // ── Recordings ───────────────────────────────────────────────────────────
     recordings: {
       get:        (id)       => get(`/api/recordings/${id}`),
+      recent:     (limit)    => get(`/api/recordings/recent?limit=${limit || 50}`),
       scan:       (folder)   => post('/api/recordings/scan', { folder_path: folder }),
       update:     (id, data) => put(`/api/recordings/${id}`, data),
       delete:     (id)       => request('DELETE', `/api/recordings/${id}`),
       writeTags:  (id)       => post(`/api/recordings/${id}/write-tags`),
       fileTags:   (id)       => get(`/api/recordings/${id}/tags`),
       reprocess:  (id)       => post(`/api/recordings/${id}/reprocess`),
+      verifyChecksums: (id)  => post(`/api/recordings/${id}/verify-checksums`),
     },
 
     // ── Tracks ───────────────────────────────────────────────────────────────
@@ -124,6 +126,14 @@ const API = (() => {
       aiAssist:          (payload) => post('/api/ingest/ai-assist', payload),
       aiAssistRecording: (recId)   => post(`/api/ingest/ai-assist-recording/${recId}`),
       aiAssistStatus:    (jobId)   => get(`/api/ingest/ai-assist/${jobId}`),
+      saveInfoFile:   (payload) => post('/api/ingest/save-info-file', payload),
+      checkExisting:  ({ artist_name, year, month, day }) => {
+        const p = new URLSearchParams({ artist_name })
+        p.set('year', year)
+        if (month) p.set('month', month)
+        if (day)   p.set('day', day)
+        return get(`/api/ingest/check-existing?${p.toString()}`)
+      },
       health:         (scan)    => post('/api/ingest/health', scan),
       batchScan:  (source_dir) => post('/api/ingest/batch-scan', { source_dir }),
     },

@@ -11,11 +11,10 @@ Date formats (partial dates degrade gracefully):
   Multi-day:  1977-05-08 to 1977-05-09
 
 Source formats:
-  source only:          SBD
-  source + modifier:    SBD - Charlie Miller
+  source only: SBD
 
 Examples:
-  Grateful Dead - 1977-05-08 - Barton Hall - Ithaca, NY (SBD - Charlie Miller)
+  Grateful Dead - 1977-05-08 - Barton Hall - Ithaca, NY (SBD)
   Bela Fleck - 1998-01-15 - Bill and Claire's Living Room - Hickory, NC (SBD)
   Unknown Artist - 1963 - Unknown Venue - Unknown Location
 """
@@ -49,19 +48,13 @@ def _format_date_range(start_year, start_month, start_day,
     return f"{start} to {end}"
 
 
-def _format_source(source, source_modifier):
+def _format_source(source):
     """
-    Combine source type and optional modifier for the folder name.
-
     "Other" is a catch-all bucket, not a meaningful source label — it loses the
-    context that it's the source field — so it is dropped from the name. If a
-    source detail (modifier) is present with "Other", the detail carries the
-    real info and is used alone.
+    context that it's the source field — so it is dropped from the name.
     """
     if not source or source == "Other":
-        return source_modifier or None
-    if source_modifier:
-        return f"{source} - {source_modifier}"
+        return None
     return source
 
 
@@ -92,7 +85,7 @@ def build_folder_name(
     end_year=None,   end_month=None,   end_day=None,
     venue_name=None,
     city=None, state=None, country=None,
-    source=None, source_modifier=None,
+    source=None,
 ):
     """
     Generate the canonical folder name for a recording.
@@ -103,7 +96,6 @@ def build_folder_name(
         venue_name      : str | None
         city/state/country : str | None
         source          : str | None  — e.g. "SBD", "AUD"
-        source_modifier : str | None  — e.g. "Charlie Miller"
 
     Returns:
         str — folder name safe for macOS filesystem
@@ -113,7 +105,7 @@ def build_folder_name(
                                  end_year,   end_month,   end_day)
     venue   = _sanitize(venue_name or "Unknown Venue")
     loc     = _sanitize(_format_location(city, state, country))
-    src     = _format_source(source, source_modifier)
+    src     = _format_source(source)
 
     # Base: Artist - Date - Venue - Location
     name = f"{artist} - {date} - {venue} - {loc}"
@@ -158,5 +150,4 @@ def build_folder_name_from_recording(recording, performance, performer, venue):
         state           = state,
         country         = country,
         source          = recording.source,
-        source_modifier = recording.source_modifier,
     )

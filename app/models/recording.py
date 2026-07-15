@@ -25,11 +25,13 @@ class Recording(db.Model):
     # Recording method: SBD, AUD, MTX (matrix), FM, etc.
     source          = db.Column(db.String(64),  nullable=True)
 
-    # Optional qualifier appended to source in display and folder naming.
-    # e.g. source="SBD" + source_modifier="Charlie Miller" → "SBD - Charlie Miller"
-    source_modifier = db.Column(db.String(128), nullable=True)
-
-    # Full transfer chain, e.g. "Nakamichi CM300 > Sony D5 DAT > CD > EAC > FLAC"
+    # Free-text technical/distinguishing detail: transfer chain (e.g. "Nakamichi
+    # CM300 > Sony D5 DAT > CD > EAC > FLAC"), taper credit, mic position — anything
+    # that identifies this specific tape or distinguishes it from another recording
+    # of the same source type for the same show. As of 2026-07, this absorbed the
+    # old standalone source_modifier field ("Source Detail") — distinguishing
+    # between two same-source recordings is now done here or in notes, not a
+    # separate structured field.
     lineage         = db.Column(db.Text,        nullable=True)
 
     # Letter grade: A+, A, A-, B+, B, B-, C — expanded in V2
@@ -56,6 +58,13 @@ class Recording(db.Model):
     rating     = db.Column(db.Integer, nullable=True)
 
     notes      = db.Column(db.Text, nullable=True)
+
+    # Latest AI Assist research result (JSON blob: thinking, proposals,
+    # track_titles, verify_items, provenance_notes, sources). Overwritten on
+    # each re-run — no history kept. Persisted so a research pass isn't lost
+    # once the browser tab closes. NULL until AI Assist has been run.
+    ai_research_json = db.Column(db.Text, nullable=True)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
                            onupdate=lambda: datetime.now(timezone.utc))
