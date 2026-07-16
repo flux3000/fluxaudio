@@ -521,6 +521,16 @@ _MONTH_NAMES = {
 # Track line: "01 Title", "1. Title", "1 - Title", "11: Title"
 _TRACK_PATTERN = re.compile(r"^\s*(\d{1,3})[.:\-\s]\s*(.+)$")
 
+# A standalone heading (nothing else on the line) that marks the end of the
+# track list — trailing "Notes:"/"Comments:" sections often contain their own
+# numbered lines (e.g. "1 - Noise at 2:51 from the guys goofing around.")
+# which look exactly like track lines to _TRACK_PATTERN but are not tracks
+# (Ryan, 2026-07-16).
+_TRACKLIST_END_RE = re.compile(
+    r"^(notes?|comments?|credits?|lineage|taping\s*notes?|equipment|thanks|acknowledge?ments?)\s*:?\s*$",
+    re.IGNORECASE,
+)
+
 # Trailing timestamp appended by tapers: "Dark Star 12:34", "Intro :45", "Help > Slip 1:23:45"
 _TRAILING_TS_RE = re.compile(r'\s+\d*:[\d:]+$')
 
@@ -880,10 +890,20 @@ def parse_info_file(file_path, known_artists=None, known_venues=None):
     header_lines = []
     track_pairs  = []       # [(number, title), ...]
     in_tracks    = False
+    tracks_ended = False    # set once a trailing Notes/Comments/etc. heading is seen
+    disc_offset  = 0        # running offset so multi-disc restarts (1, 2, 3... 1, 2, 3...)
+    last_raw_num = None     # come out sequential instead of colliding by number
 
     for line in lines:
         stripped = line.strip()
         if not stripped:
+            continue
+
+        if tracks_ended:
+            continue
+
+        if in_tracks and _TRACKLIST_END_RE.match(stripped):
+            tracks_ended = True
             continue
 
         m = _TRACK_PATTERN.match(stripped)
@@ -892,7 +912,16 @@ def parse_info_file(file_path, known_artists=None, known_venues=None):
             title = _title_case(_TRAILING_TS_RE.sub('', m.group(2).strip()))
             if not _is_track_noise(title) and (in_tracks or len(header_lines) >= 2):
                 in_tracks = True
-                track_pairs.append((num, title))
+                # Multi-disc listings restart numbering at 1 each disc — e.g.
+                # "*** Disc Two ***" followed by "1. Song". Detect the restart
+                # (this number <= the last one seen) and carry a running
+                # offset so the combined list comes out sequential (Ryan,
+                # 2026-07-16: "23 tracks... just split out by disc, the
+                # numbering restarts").
+                if last_raw_num is not None and num <= last_raw_num:
+                    disc_offset += last_raw_num
+                last_raw_num = num
+                track_pairs.append((disc_offset + num, title))
                 continue
 
         if not in_tracks:

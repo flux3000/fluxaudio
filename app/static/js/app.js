@@ -40,15 +40,34 @@ const App = (() => {
   const NON_MUSIC_FLAGS = TRACK_FLAGS.filter(f => f.nonMusic).map(f => f.key)
   const FLAG_LABELS     = Object.fromEntries(TRACK_FLAGS.map(f => [f.key, f.label]))
 
-  /** Official badge + flag chips ("bubble tags") for a track — shared between
-   *  View Recording's track title and Add Recording's track list, so the two
-   *  stay visually identical as flags/official evolve. */
+  // ── Placeholder venue names ("Unknown Venue", "TBD", ...) ──────────────────
+  // These aren't real, canonical physical places — they're a stand-in every
+  // show without a known venue reuses. Must mirror app/utils/venues.py's
+  // PLACEHOLDER_VENUE_NAMES exactly (Ryan, 2026-07-15 — see that module's
+  // docstring for the full contamination story and the confirmed audit).
+  const PLACEHOLDER_VENUE_NAMES = new Set(['unknown venue', 'unknown', 'tbd', 'n/a', 'various'])
+  function isPlaceholderVenue(name) {
+    return !!name && PLACEHOLDER_VENUE_NAMES.has(String(name).trim().toLowerCase())
+  }
+
+  /** Official badge + flag chips ("bubble tags") for a track, as an ordered
+   *  array of individual chip HTML strings — official badge first, then each
+   *  flag. Add Recording's track table (renderIngestReview) uses the array
+   *  directly: first chip stays under the title, any rest go in a dedicated
+   *  full-width row (Ryan, 2026-07-15 — stacking multiples under the title
+   *  in that narrow input-constrained cell was pushing the title text up). */
+  function trackChipsArray(t) {
+    const chips = []
+    if (t.is_official) chips.push(`<span class="track-official-badge" title="Officially released">©</span>`)
+    ;(t.flags || []).forEach(f => chips.push(`<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`))
+    return chips
+  }
+
+  /** Official badge + flag chips joined into one string — View Recording's
+   *  track title shares this one line inline (no width constraint there, so
+   *  no need to split first-chip/rest like Add Recording does). */
   function trackBadgesHtml(t) {
-    const officialBadge = t.is_official
-      ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
-    const flagChips = (t.flags || []).map(f =>
-      `<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`).join('')
-    return officialBadge + flagChips
+    return trackChipsArray(t).join('')
   }
 
   /** Apply/remove the skip-filter visual state to all track rows in the current view. */
@@ -67,142 +86,77 @@ const App = (() => {
     applySkipFilter()
   }
 
-  // ── Waveform RAF loop ─────────────────────────────────────────────────────
-  // Cancelled whenever we navigate away from the recording view.
-  let _waveformRAF     = null   // requestAnimationFrame handle
-  let _waveformMap     = {}     // trackId → waveform data: {min:[...], max:[...]} (v2) or a flat array (v1, pre-bump)
-  let _waveformTrackId = null   // which track is currently displayed
-  let _waveformBg      = null   // offscreen ImageData — waveform without playhead
+  // ── Waveform (wavesurfer.js) ──────────────────────────────────────────────
+  // Officially adopted 2026-07-15 (was a spike prototype) — replaces the old
+  // hand-rolled canvas RAF-loop renderer. Ryan: "fully wired into the
+  // persistent player. It should not be separate." Deliberately does NOT use
+  // wavesurfer's own `media`/`url` binding, though — that mechanism fetches
+  // the whole file as a blob to decode it, which (a) defeats the browser's
+  // native HTTP range-request streaming we rely on for large lossless files
+  // and (b) replaces the shared #audio-el's src with a blob: URL that gets
+  // revoked on destroy(), risking a playback interruption just from
+  // navigating away. Instead: wavesurfer renders purely from our own
+  // precomputed peaks (`_waveformMap`, already computed server-side — no
+  // network fetch at all) and its OWN internal silent audio element, which
+  // we never play. All REAL playback stays owned by Player/#audio-el, the
+  // one true audio channel:
+  //   - click/drag on the waveform → 'interaction' event → we set
+  //     #audio-el's currentTime directly (loading this recording's queue
+  //     first, paused, if it wasn't already the active one)
+  //   - #audio-el's real timeupdate → wsInstance.setTime(...), which only
+  //     moves wavesurfer's own silent cursor/renders progress, never plays
+  //     anything — see the one-time listener below.
+  let _waveformMap      = {}   // trackId → waveform data (also the "has analysis" check)
+  let _trackDurationMap = {}   // trackId → duration, needed alongside peaks when (re)loading wavesurfer
+  let _wsInstance       = null
+  let _wsTrackId        = null
 
   function _cancelWaveform() {
-    if (_waveformRAF) { cancelAnimationFrame(_waveformRAF); _waveformRAF = null }
-    _waveformBg      = null
-    _waveformTrackId = null
+    if (_wsInstance) { try { _wsInstance.destroy() } catch (_) {} }
+    _wsInstance = null
+    _wsTrackId  = null
   }
 
-  function _drawWaveformBg(canvas, waveform) {
-    /** Paint the static waveform (no playhead) onto canvas, cache as ImageData. */
-    const W = canvas.width, H = canvas.height
-    const ctx = canvas.getContext('2d')
-
-    // Background gradient — dark navy, like a DAW
-    const bg = ctx.createLinearGradient(0, 0, 0, H)
-    bg.addColorStop(0, '#0b0e14')
-    bg.addColorStop(1, '#080b10')
-    ctx.fillStyle = bg
-    ctx.fillRect(0, 0, W, H)
-
-    // Horizontal centre line
-    const mid = Math.floor(H / 2)
-    ctx.strokeStyle = 'rgba(80,180,160,0.15)'
-    ctx.lineWidth = 1
-    ctx.beginPath(); ctx.moveTo(0, mid + 0.5); ctx.lineTo(W, mid + 0.5); ctx.stroke()
-
-    // Subtle vertical time grid every ~10%
-    ctx.strokeStyle = 'rgba(80,180,160,0.07)'
-    for (let g = 1; g < 10; g++) {
-      const x = Math.round(g * W / 10) + 0.5
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke()
-    }
-
-    // Two shapes on disk: v2 = {min:[...], max:[...]} real peak envelope;
-    // v1 = a flat array of mirrored RMS-magnitude values (pre-bump tracks that
-    // haven't been re-analysed yet). Normalise both into top/bottom arrays.
-    const isV2 = waveform && !Array.isArray(waveform) && waveform.max
-    const top  = isV2 ? waveform.max : waveform
-    const bot  = isV2 ? waveform.min : waveform   // v1: same array, drawn mirrored
-
-    if (!top || !top.length) {
-      _waveformBg = ctx.getImageData(0, 0, W, H)
-      return
-    }
-
-    const n = top.length
-
-    // Top edge (max / positive peaks)
-    ctx.beginPath()
-    ctx.strokeStyle = 'rgba(0,210,185,0.85)'
-    ctx.lineWidth   = 1.2
-    ctx.lineJoin    = 'round'
-    for (let i = 0; i < n; i++) {
-      const x   = (i / (n - 1)) * W
-      const amp = top[i] * (mid - 4)
-      if (i === 0) ctx.moveTo(x, mid - amp); else ctx.lineTo(x, mid - amp)
-    }
-    ctx.stroke()
-
-    // Bottom edge. v2's min values are already signed negative, so the same
-    // "mid - value*scale" formula as the top edge naturally pushes them down.
-    // v1 has no real min — mirror the magnitude downward instead.
-    ctx.beginPath()
-    ctx.strokeStyle = 'rgba(0,210,185,0.5)'
-    ctx.lineWidth   = 1.2
-    for (let i = 0; i < n; i++) {
-      const x = (i / (n - 1)) * W
-      const y = isV2 ? mid - bot[i] * (mid - 4) : mid + top[i] * (mid - 4)
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-    }
-    ctx.stroke()
-
-    _waveformBg = ctx.getImageData(0, 0, W, H)
+  /** wavesurfer's `peaks` option wants a flat array of -1..1 values per
+   * channel. Our precomputed data is either v2 {min:[...], max:[...]} (real
+   * peak envelope) or v1 a flat mirrored-magnitude array (pre-bump tracks) —
+   * `.max` alone reads fine as a single-channel peaks array either way. */
+  function _peaksForTrack(trackId) {
+    const wf = _waveformMap[trackId]
+    if (!wf) return null
+    const arr = Array.isArray(wf) ? wf : wf.max
+    return (arr && arr.length) ? [arr] : null
   }
 
-  function _drawPlayhead(canvas, pct) {
-    if (!_waveformBg) return
-    const W = canvas.width, H = canvas.height
-    const ctx = canvas.getContext('2d')
-    ctx.putImageData(_waveformBg, 0, 0)
-
-    const x = Math.round(pct * W)
-
-    // Dim overlay to the left of playhead — "played" region
-    ctx.fillStyle = 'rgba(0,0,0,0.28)'
-    ctx.fillRect(0, 0, x, H)
-
-    // Playhead line
-    ctx.strokeStyle = 'rgba(255,220,80,0.95)'
-    ctx.lineWidth   = 1.5
-    ctx.shadowColor = 'rgba(255,220,80,0.7)'
-    ctx.shadowBlur  = 6
-    ctx.beginPath()
-    ctx.moveTo(x + 0.5, 0)
-    ctx.lineTo(x + 0.5, H)
-    ctx.stroke()
-    ctx.shadowBlur = 0
-  }
-
-  function _startWaveformLoop(canvas, trackId) {
-    _cancelWaveform()
-    _waveformTrackId = trackId
-    const waveform = _waveformMap[trackId] || null
-    const dpr = window.devicePixelRatio || 1
-    const cssW = canvas.offsetWidth  || 800
-    const cssH = canvas.offsetHeight || 80
-    canvas.width  = Math.round(cssW * dpr)
-    canvas.height = Math.round(cssH * dpr)
-    _drawWaveformBg(canvas, waveform)
-
+  // One-time sync: whenever the REAL shared audio element advances, mirror
+  // its position onto wavesurfer's own (silent, unplayed) cursor so the
+  // waveform's progress indicator always matches actual playback — without
+  // wavesurfer ever touching the real audio itself.
+  ;(function () {
     const audio = document.getElementById('audio-el')
-
-    function tick() {
-      const isThisTrack = Player.currentId() === trackId
-      const pct = (isThisTrack && audio && audio.duration)
-        ? audio.currentTime / audio.duration
-        : 0
-      _drawPlayhead(canvas, pct)
-      _waveformRAF = requestAnimationFrame(tick)
-    }
-    tick()
-  }
+    if (!audio) return
+    audio.addEventListener('timeupdate', () => {
+      if (_wsInstance && _wsTrackId != null && Player.currentId() === _wsTrackId) {
+        _wsInstance.setTime(audio.currentTime)
+      }
+    })
+  })()
 
   // Ingest wizard state — persists across step renders
   const ingest = {
-    step:       'folder',  // 'folder' | 'review' | 'tracks' | 'confirm'
+    step:       'folder',  // 'folder' | 'review' | 'success' (Confirm step removed 2026-07-15 —
+                           // review's own "Add Recording →" button now submits directly)
     folderPath: null,
     scan:       null,      // full scan API response
     behavior:   'copy',    // 'copy' | 'move' — default copy: never destroy source unless asked
     form: {},              // resolved metadata (populated on review step)
     tracks:     [],        // array of { track_number, title, set, duration, filename }
+    // True when this review was opened via Bulk Import's "Review →" (see
+    // _batchOpenReview) rather than a fresh Add Recording nav — drives the
+    // standardized back-link (top of the review page) and the post-submit
+    // redirect target (Ryan, 2026-07-15: bulk reviewers need a fast way back
+    // to the queue, not a forced detour through the new recording's page).
+    fromBatch:  false,
   }
 
   // ── DOM refs ───────────────────────────────────────────────────────────────
@@ -549,7 +503,8 @@ const App = (() => {
   }
 
   function setMainHTML(html) {
-    _cancelWaveform()   // stop any running waveform RAF before replacing DOM
+    _cancelWaveform()        // destroy any wavesurfer instance from the page we're leaving
+    Player.setFallbackPlay(null)   // only the recording page currently shown gets to set this
     mainContent.innerHTML = html
   }
 
@@ -1407,7 +1362,7 @@ const App = (() => {
       const { job_id } = await API.ingest.aiAssistRecording(recordingId)
       const result = await pollAiJob(job_id, t0)
       if (rec) rec.ai_research = result   // keep local state in sync (server has already saved it)
-      renderRecAiResults(result, body, recordingId, rec, perf)
+      renderRecAiResults(result, body, recordingId, rec, perf, { autoApply: true })
     } catch (e) {
       const secs = Math.round((Date.now() - t0) / 1000)
       const msg = /no_api_key/.test(e.message)
@@ -1534,11 +1489,13 @@ const App = (() => {
 
   // Apply a single AI proposal to the live, saved recording via the same
   // endpoints the page's own inline editors use. city/state/country land on
-  // the linked Venue when one exists, otherwise on the Performance's own
-  // fallback location fields — mirrors how the app resolves location for
-  // display everywhere else. `venueRef` is a small mutable holder so a
-  // 'venue' proposal applied earlier in the same batch is visible to a
-  // 'city'/'state'/'country' proposal applied right after it.
+  // the linked Venue when one exists (and it's a real venue — see
+  // isPlaceholderVenue), otherwise on the Performance's own fallback location
+  // fields — mirrors how the app resolves location for display everywhere
+  // else. `venueRef` is a small mutable holder tracking both the linked
+  // venue's id AND name, so a 'venue' proposal applied earlier in the same
+  // batch is visible to a 'city'/'state'/'country' proposal applied right
+  // after it (and so we know whether that venue is a placeholder).
   async function applyRecProposal(field, value, perf, recordingId, venueRef) {
     const perfId = perf.id
     switch (field) {
@@ -1556,11 +1513,17 @@ const App = (() => {
         break
       }
       case 'venue': {
+        if (isPlaceholderVenue(value)) {
+          // AI proposing "Unknown Venue"/"TBD" isn't a real answer — don't
+          // create or link a shared placeholder row. Leave venueRef as-is.
+          break
+        }
         const existing = await API.venues.list(value)
         let venueId = (existing || []).find(v => v.name.toLowerCase() === value.toLowerCase())?.id
         if (!venueId) { const c = await API.venues.create({ name: value }); venueId = c.id; invalidateDims('venues') }
         await API.performances.update(perfId, { venue_id: venueId })
         venueRef.venue_id = venueId
+        venueRef.venue_name = value
         break
       }
       case 'event': {
@@ -1574,8 +1537,15 @@ const App = (() => {
         await API.recordings.update(recordingId, { source: value, change_note: 'AI Assist' })
         break
       case 'city': case 'state': case 'country':
-        if (venueRef.venue_id) await API.venues.update(venueRef.venue_id, { [field]: value })
-        else await API.performances.update(perfId, { [field]: value })
+        // A placeholder-named linked venue ("Unknown Venue", ...) isn't a
+        // real canonical place — never write location onto it (that row is
+        // shared across unrelated shows). Route to the Performance's own
+        // fallback fields instead, same as the no-venue-at-all case.
+        if (venueRef.venue_id && !isPlaceholderVenue(venueRef.venue_name)) {
+          await API.venues.update(venueRef.venue_id, { [field]: value })
+        } else {
+          await API.performances.update(perfId, { [field]: value })
+        }
         break
     }
   }
@@ -1600,10 +1570,19 @@ const App = (() => {
   // that depends on it, then one reload for the whole batch.
   const AI_APPLY_PRIORITY = { artist: 0, date: 1, venue: 2, event: 3, source: 4, city: 5, state: 6, country: 7 }
 
-  function renderRecAiResults(r, body, recordingId, rec, perf) {
+  // autoApply: only true right after a FRESH run just completed (the user
+  // clicked Run/Re-run and wants instant feedback). When re-displaying an
+  // already-SAVED result on a plain page load, this must be false — every
+  // renderRecordingView() call renders whatever's in rec.ai_research
+  // unconditionally (see the `if (rec.ai_research)` call site), so leaving
+  // auto-apply on there re-applied the same high-confidence proposals, then
+  // reloaded, then re-applied again — an infinite GET/PUT loop (Ryan,
+  // 2026-07-14 bug report — surfaced by the AI-persistence revival, since
+  // before that there was no rec.ai_research for a plain load to find).
+  function renderRecAiResults(r, body, recordingId, rec, perf, { autoApply = false } = {}) {
     if (!body) return
     body.innerHTML = buildAiResultsHtml(r, { showRerun: true })
-    const venueRef = { venue_id: perf?.venue_id || null }
+    const venueRef = { venue_id: perf?.venue_id || null, venue_name: perf?.venue || null }
 
     async function applyOne(idx, btn) {
       const p = (r.proposals || [])[idx]
@@ -1634,7 +1613,7 @@ const App = (() => {
     const highConf = (r.proposals || []).map((p, i) => ({ p, i }))
       .filter(x => x.p.confidence === 'high')
       .sort((a, b) => (AI_APPLY_PRIORITY[a.p.field] ?? 9) - (AI_APPLY_PRIORITY[b.p.field] ?? 9))
-    if (highConf.length) {
+    if (autoApply && highConf.length) {
       ;(async () => {
         for (const x of highConf) {
           try { await applyOne(x.i, body.querySelector(`.ai-apply-btn[data-idx="${x.i}"]`)) }
@@ -1702,10 +1681,11 @@ const App = (() => {
       return `<span class="track-title-text">${esc(t.title)}</span>${badges ? ' ' + badges : ''}`
     }
 
-    // Flat track list — no disc/set grouping. Right-click a row to quick-edit
-    // its flags and note (admin/archivist).
+    // Flat track list — no disc/set grouping. Note/Songwriter are click-to-edit
+    // directly in the row; right-click is Flags (+ Official) only — matches
+    // Add Recording's track table treatment (Ryan, 2026-07-15).
     const canEdit  = canEditLibrary()
-    const editHint = canEdit ? ' title="Click title to rename · right-click for songwriter, note & flags"' : ''
+    const editHint = canEdit ? ' title="Click title to rename · right-click for flags"' : ''
     const trackRows = (rec.tracks || []).map(t => {
       const isPlaying  = t.id === state.playingTrackId
       const playingCls = isPlaying ? ' playing' : ''
@@ -1717,24 +1697,32 @@ const App = (() => {
           <span class="track-title-wrap">
             <span class="track-title truncate${canEdit ? ' track-title--editable' : ''}">${trackTitleInnerHtml(t)}</span>
           </span>
-          <span class="track-note-col truncate" title="${esc(t.notes || '')}">${esc(t.notes || '')}</span>
-          <span class="track-sw-col truncate" title="${esc(t.songwriter || '')}">${esc(t.songwriter || '')}</span>
+          <span class="track-note-col truncate${canEdit ? ' pp-editable' : ''}${t.notes ? '' : ' pp-empty'}" id="t-note-${t.id}" title="${esc(t.notes || (canEdit ? 'Click to add a note' : ''))}">${esc(t.notes || (canEdit ? '—' : ''))}</span>
+          <span class="track-sw-col truncate${canEdit ? ' pp-editable' : ''}${t.songwriter ? '' : ' pp-empty'}" id="t-sw-${t.id}" title="${esc(t.songwriter || (canEdit ? 'Click to add a songwriter' : ''))}">${esc(t.songwriter || (canEdit ? '—' : ''))}</span>
           <span class="track-dur">${fmtDuration(t.duration)}</span>
         </div>`
     }).join('')
 
-    const infoContent = rec.info_file_content
-      ? `<pre class="info-file-content">${esc(rec.info_file_content)}</pre>`
-      : `<div class="info-panel-empty">No info file attached</div>`
+    // Editable for admins/archivists — same textarea treatment as Add
+    // Recording's Info File pane (looks like plain text until you click in;
+    // Ryan, 2026-07-15: "match the info file editing capability and UX
+    // treatment we have in Add Recording"). Read-only <pre> for viewers.
+    const infoContent = canEdit
+      ? `<textarea class="rev-info-text rev-info-edit" id="rec-info-edit"
+          placeholder="No info file found — paste or type one in.">${esc(rec.info_file_content || '')}</textarea>`
+      : (rec.info_file_content
+          ? `<pre class="info-file-content">${esc(rec.info_file_content)}</pre>`
+          : `<div class="info-panel-empty">No info file attached</div>`)
 
-    // Build per-track waveform map for the RAF loop. Two shapes on disk:
-    // v2 = {min:[...], max:[...]} (real peak envelope), v1 = a flat array
-    // (mirrored RMS magnitude) for tracks not yet re-analysed since the bump.
-    _waveformMap = {}
+    // Per-track "has analysis" map (gates the waveform banner + Fidelity tab)
+    // and duration lookup (needed alongside peaks whenever wavesurfer (re)loads).
+    _waveformMap      = {}
+    _trackDurationMap = {}
     ;(rec.tracks || []).forEach(t => {
       const wf = t.analysis?.waveform
       const hasWf = Array.isArray(wf) ? wf.length > 0 : !!(wf && wf.max && wf.max.length)
       if (hasWf) _waveformMap[t.id] = wf
+      _trackDurationMap[t.id] = t.duration || 0
     })
     const hasAnalysis = Object.keys(_waveformMap).length > 0
 
@@ -1750,14 +1738,22 @@ const App = (() => {
     const fmtSr  = hz => hz ? `${(hz / 1000).toFixed(1).replace(/\.0$/, '')} kHz` : '—'
     const fmtBit = bd => bd ? `${bd}-bit` : (bitrateK ? `${bitrateK} kbps` : '—')
 
-    // Flag likely transcodes: cutoff more than 2 kHz below Nyquist
-    const nyquist         = srHz ? srHz / 2 : 22050
-    const looksTranscoded = cutoffHz && cutoffHz < (nyquist - 2000)
-    const fmtCutoff = hz => {
-      if (!hz) return '—'
-      const khz = `${(hz / 1000).toFixed(1)} kHz`
-      return looksTranscoded ? `${khz} ⚠` : khz
-    }
+    // Cutoff is informational only now — NOT a transcode detector (Ryan,
+    // 2026-07-15: "I don't buy them really... every recording in the
+    // collection has said Possible Transcode"). Checked against the real
+    // library: 99% of analysed tracks tripped the old "within 2kHz of
+    // Nyquist" rule. That's not a rare warning sign, it's just what live/
+    // audience recordings look like — natural mic/room/tape rolloff pushes
+    // the -40dB cutoff well below Nyquist on almost everything, with no
+    // relation to whether a file was ever lossy-transcoded. A single cutoff
+    // frequency can't tell a gradual natural rolloff apart from a lossy
+    // codec's hard bandwidth wall — that would need the actual rolloff
+    // shape, which isn't captured here. So: no more warning icon, no more
+    // "possible transcode" accusation — just the number, plus a positive
+    // callout on the rare track that's genuinely full-spectrum.
+    const nyquist    = srHz ? srHz / 2 : 22050
+    const cutoffFull = cutoffHz && srHz && (cutoffHz >= nyquist - 500)
+    const fmtCutoff  = hz => hz ? `${(hz / 1000).toFixed(1)} kHz` : '—'
 
     // ── Interpretive hints ────────────────────────────────────────────────────
     const hint = s => `<span class="hm-hint">${s}</span>`
@@ -1767,7 +1763,7 @@ const App = (() => {
       if (!bitDepth) return ''
       if (srHz >= 88200)                       return hint('Hi-Res')
       if (bitDepth >= 24)                      return hint('Studio')
-      if (bitDepth <= 16 && srHz <= 44100)     return hint('CD Quality')
+      if (bitDepth <= 16 && srHz <= 44100)     return hint('Standard')
       return hint('Lossless')
     })()
 
@@ -1792,40 +1788,54 @@ const App = (() => {
       return hint('Heavily limited')
     })()
 
-    const cutoffHint = looksTranscoded ? hint('Possible transcode') : (cutoffHz ? hint('Full spectrum') : '')
+    const cutoffHint = cutoffFull ? hint('Full spectrum') : ''
 
-    // Right panel: collapsible sections — Recording info + Fidelity metrics
+    // Top-right box: a vertical-tab panel now (Ryan, 2026-07-15 — "turn the
+    // box into a multi-vertical tab element like the lower right one is"),
+    // mirroring the lower-right slide-panel's look. Two tabs: Source (Source/
+    // Lineage/Quality/Rating — shown by default, quick-editable in place for
+    // admin/archivist: click the value → type → Enter to save) and Fidelity
+    // (the analysis metrics + this track's spectrogram, dimmed/empty until
+    // analysis exists).
     const trunc          = (s, n) => s && s.length > n ? s.slice(0, n) + '…' : s
     const sourceDisplay  = rec.source || ''
     const lineageDisplay = rec.lineage ? trunc(rec.lineage, 220) : null
 
-    // Top-right panel: always show Source + Lineage + Quality + Rating, then Fidelity if analysed.
-    // Source/Lineage/Quality/Rating are quick-editable in place (admin/archivist):
-    // click the value (or the dash) → type → Enter to save.
     const qEditable = canEditLibrary()
     const qc  = qEditable ? ' hm-val--editable' : ''
     const qa  = f => qEditable ? ` data-qedit="${f}" title="Click to edit"` : ''
-    const infoRows = `
+    const sourcePane = `
       <div class="hm-row"><span class="hm-label">Source</span><span class="hm-val${qc}"${qa('source')}>${esc(sourceDisplay || '—')}</span></div>
       <div class="hm-row"><span class="hm-label">Lineage</span><span class="hm-val${qc}"${qa('lineage')}>${esc(lineageDisplay || rec.lineage || '—')}</span></div>
       <div class="hm-row"><span class="hm-label">Quality</span><span class="hm-val ${qualityClass(rec.quality)}${qc}"${qa('quality')}>${esc(rec.quality || '—')}</span></div>
       <div class="hm-row"><span class="hm-label">Rating</span><span class="hm-val${qc}"${qa('rating')}>${rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'}</span></div>`
 
-    const metricsSection = firstAnalysed
-      ? `<hr class="hm-divider">
-         <div class="hm-section-header">
-           <button class="rev-panel-toggle" data-panel="hm-panel-metrics">▾</button>
-           <span class="hm-section-title">Fidelity</span>
-         </div>
-         <div id="hm-panel-metrics">
-           <div class="hm-row"><span class="hm-label">Format</span><span class="hm-val hm-metric">${fmtBit(bitDepth)} / ${fmtSr(srHz)}</span>${formatLabel}</div>
-           <div class="hm-row"><span class="hm-label">Cutoff</span><span class="hm-val hm-metric${looksTranscoded ? ' hm-warn' : ''}">${fmtCutoff(cutoffHz)}</span>${cutoffHint}</div>
-           <div class="hm-row"><span class="hm-label">RMS</span><span class="hm-val hm-metric">${fmtDb(rmsDb)}</span>${rmsHint}</div>
-           <div class="hm-row"><span class="hm-label">Dyn Range</span><span class="hm-val hm-metric">${fmtDb(dynDb)}</span>${dynHint}</div>
-         </div>`
+    // Spectrogram now lives here (below Dyn Range) instead of its own tab in
+    // the lower-right panel, which was getting crowded (Ryan, 2026-07-15).
+    // Same element ids as before — loadSpectrogram() and its wiring are
+    // unchanged, just relocated.
+    // Re-Analyze lives here now, not in the bottom action row (Ryan,
+    // 2026-07-15) — it regenerates exactly the data this pane shows, so it
+    // belongs next to it.
+    const reanalyzeBtn = canEdit
+      ? `<button class="btn btn-ghost btn-sm hm-reanalyze-btn" id="btn-analyze-audio">Re-Analyze</button>`
       : ''
-
-    const headerMetaRows = infoRows + metricsSection
+    const fidelityPane = firstAnalysed
+      ? `${reanalyzeBtn}
+         <div class="hm-row"><span class="hm-label">Format</span><span class="hm-val hm-metric">${fmtBit(bitDepth)} / ${fmtSr(srHz)}</span>${formatLabel}</div>
+         <div class="hm-row"><span class="hm-label">Cutoff</span><span class="hm-val hm-metric">${fmtCutoff(cutoffHz)}</span>${cutoffHint}</div>
+         <div class="hm-row"><span class="hm-label">RMS</span><span class="hm-val hm-metric">${fmtDb(rmsDb)}</span>${rmsHint}</div>
+         <div class="hm-row"><span class="hm-label">Dyn Range</span><span class="hm-val hm-metric">${fmtDb(dynDb)}</span>${dynHint}</div>
+         <div class="hm-spectrogram">
+           <div class="hm-spectrogram-label">Spectrogram <span class="spectrogram-track-name" id="spectrogram-track-name"></span></div>
+           <div id="spectrogram-wrap">
+             <div class="spectrogram-img-wrap" id="spectrogram-img-wrap">
+               <div class="spectrogram-loading" id="spectrogram-loading">Generating…</div>
+               <img id="spectrogram-img" class="spectrogram-img" style="display:none" />
+             </div>
+           </div>
+         </div>`
+      : `<div class="hm-pane-empty">No analysis yet.${reanalyzeBtn ? ` ${reanalyzeBtn}` : ''}</div>`
 
     // Which track to show by default: currently playing (if in this rec) else first track
     const firstTrack    = rec.tracks?.[0] ?? null
@@ -1833,6 +1843,8 @@ const App = (() => {
       ? state.playingTrackId
       : (firstTrack?.id ?? null)
 
+    // Collections moved out of the box, up to the top row alongside the back
+    // link (Ryan, 2026-07-15).
     const collectionArea = `
       <div class="rec-collections" id="rec-collections">
         ${(rec.collections || []).map(collectionTagHtml).join('')}
@@ -1841,9 +1853,23 @@ const App = (() => {
 
     setMainHTML(`
       <div class="rec-view-shell">
+      ${hasAnalysis ? `
+      <!-- Waveform banner — spans full width above everything, incl. the back
+           link (Ryan, 2026-07-15: "placed at the top of the screen, above
+           everything"). Hidden entirely until analysis exists. Rendered with
+           wavesurfer.js (vendored locally under /js/vendor/ — no CDN, this
+           app runs offline) — adopted officially 2026-07-15 after a spike;
+           replaces the old hand-rolled canvas renderer. -->
+      <div class="rec-waveform-wrap" id="rec-waveform-wrap">
+        <div id="rec-waveform-ws" class="rec-waveform-ws"></div>
+      </div>` : ''}
+      <!-- Back link + collections, one row, horizontally aligned (Ryan, 2026-07-15) -->
+      <div class="rec-top-row">
+        <div class="breadcrumb" id="back-btn">${backLabel}</div>
+        ${collectionArea}
+      </div>
       <div class="rec-detail-header">
         <div class="rec-header-left">
-          <div class="breadcrumb" id="back-btn">${backLabel}</div>
           <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
           <div class="rec-date-line" id="rec-date-line">
             <span class="rec-f rec-f-date${canEdit ? ' pp-editable' : ''}" id="rec-f-date">${dateStr ? esc(dateStr) : (canEdit ? '<span class="pp-empty">Add date</span>' : '')}</span>
@@ -1860,13 +1886,22 @@ const App = (() => {
           <div class="rec-header-notes${canEdit ? ' pp-editable' : ''}${rec.notes ? '' : ' pp-empty'}" id="rec-notes"${canEdit ? ' title="Click to edit notes"' : ''}>${rec.notes ? esc(rec.notes) : (canEdit ? 'Add notes…' : '')}</div>
           ${rec.is_official ? `<div class="badge-row"><span class="badge-official" title="Contains officially released material">© Official</span></div>` : ''}
         </div>
-        <div class="rec-header-right">
-          ${collectionArea}${headerMetaRows || ''}
+        <!-- Source / Fidelity vertical-tab box (Ryan, 2026-07-15 — mirrors the
+             lower-right slide-panel's look). Source shown by default; Fidelity
+             is dimmed until analysis exists, and now also holds this track's
+             spectrogram (moved out of the lower-right panel, which was
+             getting crowded). -->
+        <div class="rec-header-right hm-tabbed-panel">
+          <div class="hm-tabbed-body">
+            <div class="hm-pane active" id="hm-pane-source">${sourcePane}</div>
+            <div class="hm-pane" id="hm-pane-fidelity">${fidelityPane}</div>
+          </div>
+          <div class="hm-tabs">
+            <button class="hm-tab active" data-hmpane="source">Source</button>
+            <button class="hm-tab${firstAnalysed ? '' : ' hm-tab--empty'}" data-hmpane="fidelity">Fidelity</button>
+          </div>
         </div>
       </div>
-      <canvas id="rec-waveform" class="rec-waveform-canvas"
-        title="${hasAnalysis ? 'Click to seek' : 'Click Analyze Audio to generate waveform'}">
-      </canvas>
       <div class="action-bar">
         <!-- Playback actions only — editing/admin actions live at the bottom -->
         <button class="btn btn-ghost btn-sm" id="btn-play-all">▶ Play All</button>
@@ -1888,28 +1923,11 @@ const App = (() => {
             <!-- Info File pane -->
             <div class="slide-pane" id="sp-info">
               <div class="slide-pane-header">Info File</div>
-              <div class="slide-pane-scroll">
-                ${infoContent}
-              </div>
+              <div class="slide-pane-scroll"><div class="rev-raw-section">${infoContent}</div></div>
             </div>
 
-            <!-- Spectrogram pane -->
-            <div class="slide-pane" id="sp-spectrogram">
-              <div class="slide-pane-header">
-                Spectrogram<span class="spectrogram-track-name" id="spectrogram-track-name"></span>
-              </div>
-              <div class="slide-pane-scroll">
-                ${hasAnalysis
-                  ? `<div id="spectrogram-wrap">
-                       <div class="spectrogram-img-wrap" id="spectrogram-img-wrap">
-                         <div class="spectrogram-loading" id="spectrogram-loading">Generating…</div>
-                         <img id="spectrogram-img" class="spectrogram-img" style="display:none" />
-                       </div>
-                     </div>`
-                  : `<div class="info-panel-empty">No analysis yet — click Analyze Audio to generate.</div>`
-                }
-              </div>
-            </div>
+            <!-- Spectrogram moved into the top-right Fidelity tab, 2026-07-15
+                 (Ryan: this panel was getting crowded) — see hm-pane-fidelity. -->
 
             <!-- File Tags pane — actual on-disk Vorbis comments -->
             <div class="slide-pane" id="sp-filetags">
@@ -1930,7 +1948,7 @@ const App = (() => {
             ${canEdit ? `
             <!-- AI Assist pane (results of a web-research pass) -->
             <div class="slide-pane" id="sp-ai">
-              <div class="slide-pane-header">AI Assist <span class="ai-assist-note">Saved with this recording — Apply writes straight to the record.</span></div>
+              <div class="slide-pane-header">AI Assist</div>
               <div class="slide-pane-scroll"><div class="ai-results" id="ai-results">
                 <div class="ai-assist-cta">
                   <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
@@ -1946,7 +1964,6 @@ const App = (() => {
             <button class="slide-tab" data-pane="info">Info File</button>
             <button class="slide-tab" data-pane="filetags">File Tags</button>
             <button class="slide-tab" data-pane="checksums">Checksums</button>
-            <button class="slide-tab" data-pane="spectrogram">Spectrogram</button>
             ${canEdit ? `<button class="slide-tab slide-tab--ai" data-pane="ai">AI Assist</button>` : ''}
           </div>
         </div>
@@ -1954,7 +1971,6 @@ const App = (() => {
       </div>
       ${canEdit ? `
       <div class="rec-bottom-actions">
-        <button class="btn btn-ghost btn-sm" id="btn-analyze-audio">Re-Analyze</button>
         <button class="btn btn-sm ${stagedCount > 0 ? 'btn-staged' : 'btn-ghost'}" id="btn-write-tags">Write Tags to Files</button>
         <button class="btn btn-sm ${rec.is_official ? 'btn-staged' : 'btn-ghost'}" id="btn-official" title="Mark this recording (and its tracks) as an official release">${rec.is_official ? '✓ Official Release' : 'Mark as Official Release'}</button>
         <button class="btn btn-danger btn-sm" id="btn-delete-rec" title="Delete this recording from the database (files are not removed)">Delete Recording</button>
@@ -2071,9 +2087,15 @@ const App = (() => {
       const titleEl = row.querySelector('.track-title')
       if (titleEl) titleEl.innerHTML = trackTitleInnerHtml(t)
       const noteEl = row.querySelector('.track-note-col')
-      if (noteEl) { noteEl.textContent = t.notes || ''; noteEl.title = t.notes || '' }
+      if (noteEl) {
+        noteEl.textContent = t.notes || '—'; noteEl.title = t.notes || 'Click to add a note'
+        noteEl.classList.toggle('pp-empty', !t.notes)
+      }
       const swEl = row.querySelector('.track-sw-col')
-      if (swEl) { swEl.textContent = t.songwriter || ''; swEl.title = t.songwriter || '' }
+      if (swEl) {
+        swEl.textContent = t.songwriter || '—'; swEl.title = t.songwriter || 'Click to add a songwriter'
+        swEl.classList.toggle('pp-empty', !t.songwriter)
+      }
       row.dataset.flags = (t.flags || []).join(',')
       applySkipFilter()
     }
@@ -2113,16 +2135,45 @@ const App = (() => {
           ev.stopPropagation()
           startTrackTitleEdit(row.querySelector('.track-title'), track)
         })
-        // Right-click anywhere on the row → songwriter / note / flags popup
+        // Right-click anywhere on the row → flags (+ Official) popup. Note
+        // and Songwriter used to live here too; they're click-to-edit cells
+        // directly in the row now, matching Add Recording (Ryan, 2026-07-15).
         row.addEventListener('contextmenu', ev => {
           ev.preventDefault()
           openTrackMenu(track, ev.clientX, ev.clientY, {
+            flagsOnly: true,
+            showOfficial: true,
             onChange: async (t) => {
-              try { await API.tracks.update(t.id, { flags: t.flags, songwriter: t.songwriter, notes: t.notes }); markStaged() }
+              try { await API.tracks.update(t.id, { flags: t.flags, is_official: t.is_official }); markStaged() }
               catch (e) { console.error(e) }
               refreshTrackRow(t)
             },
           })
+        })
+
+        // Note / Songwriter — click-to-edit directly in the row, same
+        // treatment as Add Recording's track table.
+        makeInlineEditable(document.getElementById(`t-note-${track.id}`), {
+          placeholder: '—',
+          get: () => track.notes || '',
+          onSave: async v => {
+            v = v.trim() || null
+            track.notes = v
+            try { await API.tracks.update(track.id, { notes: v }); markStaged() }
+            catch (e) { alert('Failed: ' + e.message) }
+            refreshTrackRow(track)
+          },
+        })
+        makeInlineEditable(document.getElementById(`t-sw-${track.id}`), {
+          placeholder: '—',
+          get: () => track.songwriter || '',
+          onSave: async v => {
+            v = v.trim() || null
+            track.songwriter = v
+            try { await API.tracks.update(track.id, { songwriter: v }); markStaged() }
+            catch (e) { alert('Failed: ' + e.message) }
+            refreshTrackRow(track)
+          },
         })
       })
     }
@@ -2259,6 +2310,21 @@ const App = (() => {
           catch (e) { alert('Failed: ' + e.message) }
         },
       })
+
+      // Info File — always-editable textarea (not click-to-reveal like Notes
+      // above), matching Add Recording's treatment. Auto-saves on blur, only
+      // when the text actually changed. Not a tag field, so no markStaged().
+      const infoEditEl = document.getElementById('rec-info-edit')
+      if (infoEditEl) {
+        infoEditEl.addEventListener('blur', async () => {
+          const v = infoEditEl.value
+          if (v === (rec.info_file_content || '')) return
+          try {
+            await API.recordings.update(recordingId, { info_file_content: v || null, change_note: 'Edited info file' })
+            rec.info_file_content = v
+          } catch (e) { alert('Failed to save info file: ' + e.message) }
+        })
+      }
 
       // Artists association pill row
       let recMembers = (perf.members || []).map(m => ({ id: m.id, name: m.name }))
@@ -2421,10 +2487,6 @@ const App = (() => {
         document.querySelector(`.slide-tab[data-pane="${pane}"]`)?.classList.add('active')
         activePane = pane
         state.recLastPane = pane   // survives the reload an Apply/edit triggers
-        if (pane === 'spectrogram' && defaultTrackId) {
-          const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
-          loadSpectrogram(defaultTrackId, defaultTrack?.title)
-        }
         if (pane === 'filetags') loadFileTags(recordingId)
       }
 
@@ -2445,33 +2507,97 @@ const App = (() => {
       })
 
       // Default: whichever pane was open before the last reload (e.g. an AI
-      // Assist Apply), falling back to Info File on a fresh visit.
-      openPane(state.recLastPane || 'info')
+      // Assist Apply), falling back to Info File on a fresh visit. 'spectrogram'
+      // is stale from before it moved into the Fidelity tab (2026-07-15) —
+      // treat it the same as no saved pane.
+      openPane((state.recLastPane && state.recLastPane !== 'spectrogram') ? state.recLastPane : 'info')
     })()
 
-    // ── Waveform canvas — start RAF loop ────────────────────────────────────
-    const waveCanvas = document.getElementById('rec-waveform')
-    if (waveCanvas) {
-      if (hasAnalysis && defaultTrackId) {
-        _startWaveformLoop(waveCanvas, defaultTrackId)
-      } else {
-        // No analysis yet — draw empty placeholder
-        const dpr = window.devicePixelRatio || 1
-        const cssW = waveCanvas.offsetWidth  || 800
-        const cssH = waveCanvas.offsetHeight || 80
-        waveCanvas.width  = Math.round(cssW * dpr)
-        waveCanvas.height = Math.round(cssH * dpr)
-        _drawWaveformBg(waveCanvas, null)
-        _drawPlayhead(waveCanvas, 0)
-      }
-
-      // Click to seek within the current track
-      waveCanvas.addEventListener('click', e => {
-        const audio = document.getElementById('audio-el')
-        if (!audio || !audio.duration || isNaN(audio.duration)) return
-        const pct = e.offsetX / waveCanvas.offsetWidth
-        audio.currentTime = pct * audio.duration
+    // ── Top-right Source/Fidelity tab wiring ────────────────────────────────
+    ;(function () {
+      const tabs  = mainContent.querySelectorAll('.hm-tab')
+      if (!tabs.length) return
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          const pane = tab.dataset.hmpane
+          mainContent.querySelectorAll('.hm-pane').forEach(p => p.classList.remove('active'))
+          mainContent.querySelectorAll('.hm-tab').forEach(t => t.classList.remove('active'))
+          document.getElementById(`hm-pane-${pane}`)?.classList.add('active')
+          tab.classList.add('active')
+          // Spectrogram loads lazily the first time Fidelity is opened.
+          if (pane === 'fidelity' && defaultTrackId) {
+            const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
+            loadSpectrogram(defaultTrackId, defaultTrack?.title)
+          }
+        })
       })
+    })()
+
+    // ── Waveform (wavesurfer.js) — official renderer, fully wired to the
+    // persistent player, adopted 2026-07-15 ─────────────────────────────────
+    // Was a spike, then briefly its own separate audio channel; Ryan: "We
+    // definitely want the thing fully wired into the persistent player. It
+    // should not be separate." Renders from precomputed peaks (no network
+    // fetch), and its OWN internal audio element is never played — see the
+    // big comment above `_waveformMap` for why. All real playback control
+    // routes through the shared #audio-el via Player.
+    ;(function () {
+      const wrap  = document.getElementById('rec-waveform-wrap')
+      if (!wrap || !defaultTrackId) return
+      const wsBox = document.getElementById('rec-waveform-ws')
+      const peaks = _peaksForTrack(defaultTrackId)
+      const duration = _trackDurationMap[defaultTrackId]
+      if (!peaks || !duration) return
+
+      const cs = getComputedStyle(document.documentElement)
+      _wsInstance = window.WaveSurfer.create({
+        container: wsBox,
+        peaks,
+        duration,
+        waveColor: (cs.getPropertyValue('--t2') || '#7a6e64').trim(),
+        progressColor: (cs.getPropertyValue('--accent') || '#c4956a').trim(),
+        cursorColor: (cs.getPropertyValue('--accent-lit') || '#d4aa82').trim(),
+        height: 100,
+        normalize: true,
+        cursorWidth: 1,
+      })
+      _wsTrackId = defaultTrackId
+      _wsInstance.registerPlugin(window.WaveSurfer.Zoom.create({ scale: 0.5, maxZoom: 300 }))
+
+      // Click/drag → seek the REAL shared player, not wavesurfer's own
+      // silent internal audio. If this recording isn't already the one
+      // loaded in the player, ready it first (paused — visiting a page
+      // shouldn't start blaring audio) so the seek has somewhere to land.
+      _wsInstance.on('interaction', async (time) => {
+        const audio = document.getElementById('audio-el')
+        if (!audio) return
+        if (Player.currentId() === _wsTrackId) {
+          audio.currentTime = time
+          return
+        }
+        const idx = rec.tracks.findIndex(t => t.id === defaultTrackId)
+        await playRecording(recordingId, idx < 0 ? 0 : idx, rec.tracks, { autoplay: false })
+        const applySeek = () => { audio.currentTime = time }
+        if (audio.readyState >= 1) applySeek()
+        else audio.addEventListener('loadedmetadata', applySeek, { once: true })
+      })
+
+      const zoomSlider = document.createElement('input')
+      zoomSlider.type = 'range'
+      zoomSlider.min = '10'
+      zoomSlider.max = '400'
+      zoomSlider.value = '50'
+      zoomSlider.className = 'rec-waveform-zoom-slider'
+      zoomSlider.title = 'Zoom'
+      zoomSlider.addEventListener('input', () => _wsInstance.zoom(parseInt(zoomSlider.value, 10)))
+      wrap.appendChild(zoomSlider)
+    })()
+
+    // If nothing is currently loaded in the player, pressing the persistent
+    // bar's play button while viewing this page should start this
+    // recording's first track (Ryan, 2026-07-15) instead of no-op'ing.
+    if ((rec.tracks || []).length) {
+      Player.setFallbackPlay(() => playRecording(recordingId, 0, rec.tracks))
     }
 
     // ── Spectrogram — load for default track, reload when track changes ───────
@@ -2530,8 +2656,8 @@ const App = (() => {
       row.addEventListener('click', () => {
         const tid   = parseInt(row.dataset.trackId)
         const title = row.querySelector('.track-title')?.textContent || ''
-        const spPane = document.getElementById('sp-spectrogram')
-        if (tid && _waveformMap[tid] && spPane?.classList.contains('active')) {
+        const fidelityPaneEl = document.getElementById('hm-pane-fidelity')
+        if (tid && _waveformMap[tid] && fidelityPaneEl?.classList.contains('active')) {
           loadSpectrogram(tid, title)
         }
       })
@@ -2542,7 +2668,7 @@ const App = (() => {
 
   // Step indicators — pass optional steps array; defaults to 3-step wizard
   function stepDots(current, steps) {
-    steps = steps || ['folder', 'review', 'confirm']
+    steps = steps || ['folder', 'review']  // Confirm step removed 2026-07-15
     const idx = steps.indexOf(current)
     return `<div class="step-indicator">
       ${steps.map((s, i) => {
@@ -2749,6 +2875,14 @@ const App = (() => {
 
     const allRows = r.items.map(item => _batchRow(item)).join('')
 
+    // Auto-Ingest All covers green + yellow — yellows are frequently good
+    // enough to trust (Ryan, 2026-07-16: "the user may be just fine with
+    // blank track titles"). Red stays manual — those are missing artist or
+    // date entirely, a real gap worth a human look before it lands in the
+    // library.
+    const autoIngestPending = r.items.filter(i =>
+      (i.tier === 'green' || i.tier === 'yellow') && !batch.ingestedIds.has(i.path))
+
     setMainHTML(`
       <div class="batch-shell">
         <div class="batch-header">
@@ -2769,9 +2903,9 @@ const App = (() => {
             ${tierPill('yellow', yellows.length, 'yellow')}
             ${tierPill('red', reds.length, 'red')}
             ${nDone > 0 ? `<span class="batch-tier-pill batch-tier-done">${nDone} ingested</span>` : ''}
-            ${greens.filter(i => !batch.ingestedIds.has(i.path)).length > 0
+            ${autoIngestPending.length > 0
               ? `<button class="btn btn-primary btn-sm" id="batch-ingest-all-btn" style="margin-left:8px">
-                   ⇉ Auto-Ingest All Green (${greens.filter(i => !batch.ingestedIds.has(i.path)).length})
+                   ⇉ Auto-Ingest All Green + Yellow (${autoIngestPending.length})
                  </button>`
               : ''}
             <span class="batch-tier-pill batch-tier-total">${r.total} total</span>
@@ -2795,10 +2929,11 @@ const App = (() => {
       renderBatchPickerView()
     })
 
-    // Ingest All Green
+    // Ingest All Green + Yellow — red stays manual (missing artist/date entirely).
     document.getElementById('batch-ingest-all-btn')?.addEventListener('click', async () => {
       const btn = document.getElementById('batch-ingest-all-btn')
-      const pending = batch.results.items.filter(i => i.tier === 'green' && !batch.ingestedIds.has(i.path))
+      const pending = batch.results.items.filter(i =>
+        (i.tier === 'green' || i.tier === 'yellow') && !batch.ingestedIds.has(i.path))
       if (!pending.length) return
       btn.disabled = true
 
@@ -2937,6 +3072,7 @@ const App = (() => {
       ingest.folderPath = item.path
       ingest.form       = {}
       ingest.tracks     = []
+      ingest.fromBatch  = true    // drives the back-link + post-submit redirect
       ingest._resume    = true   // one-shot: tell renderIngestView to resume here
       window.location.hash = '#/ingest'
     } catch (err) {
@@ -2964,6 +3100,7 @@ const App = (() => {
       ingest.form       = {}
       ingest.tracks     = []
       ingest.aiResult   = null
+      ingest.fromBatch  = false
     }
     renderIngestStep()
   }
@@ -2973,7 +3110,6 @@ const App = (() => {
       case 'folder':  renderIngestFolder();  break
       case 'review':  renderIngestReview();  break
       case 'tracks':  renderIngestReview();  break  // merged into review step
-      case 'confirm': renderIngestConfirm(); break
       case 'success': renderIngestSuccess(); break
     }
   }
@@ -3246,6 +3382,11 @@ const App = (() => {
   function openTrackMenu(track, clientX, clientY, opts = {}) {
     _closeTrackMenu()
     const onChange = opts.onChange || (() => {})
+    // flagsOnly: Add Recording's table now has Note/Songwriter as click-to-edit
+    // cells directly (Ryan, 2026-07-15), so its right-click popup is Flags
+    // (+ Official, if showOfficial) only. View Recording still gets the full
+    // Note/Songwriter/Flags/Official grid — it doesn't pass this option.
+    const flagsOnly = !!opts.flagsOnly
     const menu = document.createElement('div')
     menu.className = 'track-qmenu'
     menu.id = 'track-qmenu'
@@ -3264,8 +3405,7 @@ const App = (() => {
            </label>
          </div>`
       : ''
-    menu.innerHTML = `
-      <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
+    const detailGrid = flagsOnly ? '' : `
       <div class="et-detail-grid2">
         <div class="et-detail-field">
           <label>Note</label>
@@ -3275,7 +3415,10 @@ const App = (() => {
           <label>Songwriter</label>
           <input class="track-qmenu-songwriter" type="text" placeholder="Songwriter…" value="${esc(track.songwriter || '')}" />
         </div>
-      </div>
+      </div>`
+    menu.innerHTML = `
+      <div class="track-qmenu-title">${esc(String(track.track_number || '').padStart(2, '0'))} · ${esc(track.title || '')}</div>
+      ${detailGrid}
       <div class="track-qmenu-label">Flags</div>
       <div class="flag-pill-row track-qmenu-flags">${flagPills}</div>
       ${officialRow}`
@@ -3300,29 +3443,32 @@ const App = (() => {
       })
     })
 
-    // Songwriter + Note — commit on Enter / on close
+    // Songwriter + Note — commit on Enter / on close. Only present when
+    // !flagsOnly (Add Recording's flagsOnly popup has neither field).
     const swEl   = menu.querySelector('.track-qmenu-songwriter')
     const noteEl = menu.querySelector('.track-qmenu-note')
-    const commit = () => {
-      const sw   = swEl.value.trim() || null
-      const note = noteEl.value.trim() || null
-      let changed = false
-      if (sw !== (track.songwriter || null)) { track.songwriter = sw; changed = true }
-      if (note !== (track.notes || null))     { track.notes = note;    changed = true }
-      if (changed) onChange(track)
+    if (swEl && noteEl) {
+      const commit = () => {
+        const sw   = swEl.value.trim() || null
+        const note = noteEl.value.trim() || null
+        let changed = false
+        if (sw !== (track.songwriter || null)) { track.songwriter = sw; changed = true }
+        if (note !== (track.notes || null))     { track.notes = note;    changed = true }
+        if (changed) onChange(track)
+      }
+      menu._commit = commit
+      // Auto-save on complete: commit when the field loses focus, and on Enter.
+      swEl.addEventListener('blur', commit)
+      noteEl.addEventListener('blur', commit)
+      swEl.addEventListener('keydown', e => {
+        e.stopPropagation()
+        if (e.key === 'Enter') { e.preventDefault(); commit() }
+      })
+      noteEl.addEventListener('keydown', e => {
+        e.stopPropagation()
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); _closeTrackMenu() }
+      })
     }
-    menu._commit = commit
-    // Auto-save on complete: commit when the field loses focus, and on Enter.
-    swEl.addEventListener('blur', commit)
-    noteEl.addEventListener('blur', commit)
-    swEl.addEventListener('keydown', e => {
-      e.stopPropagation()
-      if (e.key === 'Enter') { e.preventDefault(); commit() }
-    })
-    noteEl.addEventListener('keydown', e => {
-      e.stopPropagation()
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); _closeTrackMenu() }
-    })
 
     setTimeout(() => {
       document.addEventListener('mousedown', _trackMenuOutside)
@@ -3669,29 +3815,46 @@ const App = (() => {
         ⚠ ${audioCount} audio file${audioCount !== 1 ? 's' : ''} on disk · ${infoTrackCount} track${infoTrackCount !== 1 ? 's' : ''} in info file — use playback to verify
       </div>` : ''
 
-    // Track table rows — play preview, title, and the same Note/Songwriter/
-    // flag-chip layout as View Recording. Right-click a row for the same
-    // note/songwriter/flags/official popup used there (openTrackMenu) — here
-    // it just stages the change into ingest.tracks in memory (no API call;
-    // Confirm sends it all at once) instead of saving immediately.
-    const trackRows = ingest.tracks.map((t, i) => `
-        <tr class="track-review-row" data-idx="${i}" title="Right-click for note, songwriter &amp; flags">
+    // Track table rows — play preview, title, and the same flag-chip layout
+    // as View Recording. Note/Songwriter are click-to-edit cells right in the
+    // table (staged into ingest.tracks in memory — no API call; Confirm sends
+    // it all at once). Right-click a row for Flags only (openTrackMenu with
+    // flagsOnly — Ryan, 2026-07-15: Note/Songwriter moved out of that popup
+    // now that they're editable inline).
+    // A track's chip row: the FIRST chip (official badge, then flags in
+    // order) stays under the title as before; if there's more than one, the
+    // rest get their own full-width row right underneath, laid out
+    // horizontally — they used to all stack vertically inside the narrow
+    // title-cell and push the title text up (Ryan, 2026-07-15).
+    function _trackChipExpandRowHtml(i, chips) {
+      return `<tr class="track-review-chiprow" data-idx="${i}">
+          <td colspan="6"><div class="track-chip-expand-row">${chips.join('')}</div></td>
+        </tr>`
+    }
+
+    const trackRows = ingest.tracks.map((t, i) => {
+      const chips = trackChipsArray(t)
+      const expandRow = chips.length > 1 ? _trackChipExpandRowHtml(i, chips) : ''
+      return `
+        <tr class="track-review-row" data-idx="${i}" title="Right-click for flags">
           <td class="num">${t.track_number}</td>
           <td class="play-cell">
             <button class="btn-preview-track" data-filename="${esc(t.filename || '')}" title="${esc(t.filename || 'no file')}">▶</button>
           </td>
           <td class="title-cell">
             <input type="text" class="t-title" data-idx="${i}" value="${esc(t.title)}" />
-            <div class="track-chip-row" id="t-chips-${i}">${trackBadgesHtml(t)}</div>
+            <div class="track-chip-row" id="t-chips-${i}">${chips[0] || ''}</div>
           </td>
-          <td class="note-cell truncate" id="t-note-${i}" title="${esc(t.notes || '')}">${esc(t.notes || '')}</td>
-          <td class="sw-cell truncate" id="t-sw-${i}" title="${esc(t.songwriter || '')}">${esc(t.songwriter || '')}</td>
+          <td class="note-cell truncate pp-editable${t.notes ? '' : ' pp-empty'}" id="t-note-${i}" title="${esc(t.notes || 'Click to add a note')}">${esc(t.notes || '—')}</td>
+          <td class="sw-cell truncate pp-editable${t.songwriter ? '' : ' pp-empty'}" id="t-sw-${i}" title="${esc(t.songwriter || 'Click to add a songwriter')}">${esc(t.songwriter || '—')}</td>
           <td class="dur">${fmtDur(t.duration)}</td>
-        </tr>`).join('')
+        </tr>${expandRow}`
+    }).join('')
 
     setMainHTML(`
       <div class="ingest-review-outer">
       <div class="ingest-review-topbar">
+        <a href="#" id="ingest-back-link" class="ingest-back-link">${ingest.fromBatch ? '← Back to Bulk Import' : '← Back'}</a>
         <h2 class="ingest-topbar-title">Add Recording: <span class="rev-header-folder">${esc(ingest.folderPath?.split('/').pop() || '')}</span></h2>
       </div>
       <div class="ingest-review-shell">
@@ -3765,7 +3928,7 @@ const App = (() => {
             <!-- City / State / Country — state is narrow -->
             <div class="ingest-field-grid" style="grid-template-columns:1fr 58px 1fr; gap:6px; margin-top:5px" id="f-location-row">
               <div class="ingest-field"><label>City</label><input type="text" id="f-city" class="${paulaCls('city')}" value="${esc(f.city)}" /></div>
-              <div class="ingest-field"><label>St</label><input type="text" id="f-state" class="${paulaCls('state')}" value="${esc(f.state)}" maxlength="6" /></div>
+              <div class="ingest-field"><label>State</label><input type="text" id="f-state" class="${paulaCls('state')}" value="${esc(f.state)}" maxlength="6" /></div>
               <div class="ingest-field"><label>Country</label><input type="text" id="f-country" class="${paulaCls('country')}" value="${esc(f.country)}" /></div>
             </div>
 
@@ -3775,7 +3938,7 @@ const App = (() => {
                 <label>Source</label>
                 <select id="f-source">
                   <option value="">—</option>
-                  ${['SBD','AUD','MTX','FM','Other'].map(s =>
+                  ${['SBD','AUD','MTX','FM','DVB-S','Other'].map(s =>
                     `<option value="${s}" ${f.source === s ? 'selected' : ''}>${s}</option>`
                   ).join('')}
                 </select>
@@ -3798,16 +3961,17 @@ const App = (() => {
             <!-- Track table -->
             <div class="rev-section-title" style="margin-top:16px; padding-top:12px; border-top:1px solid var(--bd-1)">
               Tracks <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t2)">(${ingest.tracks.length})</span>
+              <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t3); font-size:10px">— right-click track to add flags</span>
             </div>
             <div style="overflow:auto; margin-bottom:4px">
               <table class="track-review-table">
                 <thead>
                   <tr>
-                    <th style="width:32px">#</th>
+                    <th style="width:24px">#</th>
                     <th style="width:28px"></th>
-                    <th>Title</th>
-                    <th>Note</th>
-                    <th>Songwriter</th>
+                    <th style="width:30%">Title</th>
+                    <th style="width:26%; text-align:right">Notes</th>
+                    <th style="width:20%">Songwriter</th>
                     <th style="width:44px">Time</th>
                   </tr>
                 </thead>
@@ -3827,15 +3991,18 @@ const App = (() => {
             </label>
 
           </div>
-          <div class="ingest-actions" style="padding:10px 20px; border-top:1px solid var(--bd-0)">
-            <button class="btn btn-ghost btn-sm" id="btn-back-folder">← Back</button>
-            <!-- Audio preview player lives here so it's always visible above the fold -->
-            <div id="ingest-audio-bar" class="ingest-audio-footer" style="display:none">
-              <span id="ingest-audio-label"></span>
-              <audio id="ingest-preview-audio" preload="none" controls></audio>
+          <div class="ingest-actions">
+            <!-- Audio preview player lives here so it's always visible above the fold —
+                 shown by default (previewing the first track), not just after a play
+                 click (Ryan, 2026-07-15). Centered between the (now-empty) left column
+                 and the Add Recording button on the right. -->
+            <div id="ingest-audio-bar" class="ingest-audio-footer">
+              <span id="ingest-audio-label">Preview Track:</span>
+              <audio id="ingest-preview-audio" preload="metadata" controls></audio>
             </div>
-            <button class="btn btn-primary" id="btn-confirm">Confirm →</button>
+            <button class="btn btn-primary" id="btn-confirm">Add Recording →</button>
           </div>
+          <div id="review-submit-error" class="review-submit-error" style="display:none"></div>
         </div>
 
         <!-- Resize handle -->
@@ -3844,24 +4011,10 @@ const App = (() => {
         <!-- Right: Quality bar (score + blurb + AI Assist) over vertical-tab panel -->
         <div class="ingest-review-raw">
           <div class="ingest-quality-bar">
+            <span class="iq-label">Completeness score</span>
             <span class="iq-score iq-score--${ingest.scan.health?.band || 'yellow'}" id="iq-score">${ingest.scan.health?.score ?? '—'}</span>
             <span class="iq-msg" id="iq-msg">${esc(HEALTH_MSG[ingest.scan.health?.band || 'yellow'] || '')}</span>
             <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
-          </div>
-          <!-- Paula — free, non-AI confidence scorer. Runs once at scan time
-               (not live-rescored on edit — she's assessing the raw tag/txt
-               inputs, which don't change after the scan). Purple field
-               borders mark what she pre-filled with confidence; see
-               wirePaulaClearOnEdit for the "clears on manual edit" behavior. -->
-          <div class="paula-bar" title="Paula: free, regex/tag-based confidence scoring (no AI). Purple field borders mark her recommendations.">
-            <span class="paula-badge">
-              <span class="paula-badge-score">${ingest.scan.paula?.score ?? '—'}</span>
-              <span class="paula-badge-label">fields</span>
-            </span>
-            <span class="paula-badge">
-              <span class="paula-badge-score">${ingest.scan.paula?.track_completeness?.score ?? '—'}</span>
-              <span class="paula-badge-label">tracks</span>
-            </span>
           </div>
           <div class="ingest-tabs">
             <div class="slide-panel-body" id="ingest-panes">
@@ -3888,6 +4041,18 @@ const App = (() => {
 
       </div>
       </div>`)
+
+    // Health score — recompute on any committed field change, not just AI
+    // Assist actions (Ryan, 2026-07-16: the badge must never sit stale
+    // relative to what's actually on screen — this is what let a scan
+    // showing "9 of 23 tracks have a title" still show a 100/"Looks
+    // complete" badge). Delegated on the review container itself, which is
+    // torn down by the next setMainHTML() call, so this doesn't accumulate.
+    // `focusout` (unlike `blur`) bubbles, so one listener covers every field.
+    mainContent.querySelector('.ingest-review-outer')?.addEventListener('focusout', e => {
+      if (e.target.matches('input, textarea, select')) reScore()
+    })
+    reScore()   // also recompute right away, against whatever track list just rendered
 
     // Parsed info file — apply buttons
     ;(function () {
@@ -3922,25 +4087,46 @@ const App = (() => {
             const titles  = (info.tracks || []).map(t => titleCase(t.title))
             const inputs  = [...mainContent.querySelectorAll('.t-title')]
             inputs.forEach((inp, i) => { if (titles[i] != null) inp.value = titles[i] })
+            inputs.forEach((inp, i) => { if (titles[i] != null) ingest.tracks[i].title = titles[i] })
           }
 
           // Quick flash to confirm
           btn.textContent = '✓'
           setTimeout(() => { btn.textContent = '←' }, 800)
+
+          // These buttons set field values programmatically (no real focus
+          // change), so the usual focusout-triggered reScore() below never
+          // fires for them — recompute explicitly (Ryan, 2026-07-16: the
+          // health score must never sit stale against what's on screen).
+          reScore()
         })
       })
     })()
 
-    // Ingest track preview — play/pause individual audio files
+    // Ingest track preview — play/pause individual audio files. Shown by
+    // default (previewing the first track, paused) rather than only
+    // appearing after a play click (Ryan, 2026-07-15).
     ;(function () {
       const audioEl  = document.getElementById('ingest-preview-audio')
-      const audioBar = document.getElementById('ingest-audio-bar')
-      const audioLbl = document.getElementById('ingest-audio-label')
       if (!audioEl) return
 
       let activeBtn = null
+      const previewBtns = mainContent.querySelectorAll('.btn-preview-track')
 
-      mainContent.querySelectorAll('.btn-preview-track').forEach(btn => {
+      function loadTrack(btn, filename, autoplay) {
+        if (activeBtn && activeBtn !== btn) activeBtn.textContent = '▶'
+        const url = `/api/stream/ingest-preview?folder=${encodeURIComponent(ingest.folderPath)}&file=${encodeURIComponent(filename)}`
+        audioEl.src = url
+        activeBtn = btn
+        if (autoplay) {
+          audioEl.play()
+          btn.textContent = '■'
+        } else {
+          btn.textContent = '▶'
+        }
+      }
+
+      previewBtns.forEach(btn => {
         btn.addEventListener('click', e => {
           e.preventDefault()
           const filename = btn.dataset.filename
@@ -3950,32 +4136,27 @@ const App = (() => {
           if (activeBtn === btn && !audioEl.paused) {
             audioEl.pause()
             btn.textContent = '▶'
-            activeBtn = null
             return
           }
 
-          // Stop whatever was playing before
-          if (activeBtn && activeBtn !== btn) {
-            audioEl.pause()
-            activeBtn.textContent = '▶'
-          }
+          // Pausing the main player bar so the two don't talk over each other
+          // (Ryan, 2026-07-15).
+          if (window.Player && Player.isPlaying()) Player.pause()
 
-          const url = `/api/stream/ingest-preview?folder=${encodeURIComponent(ingest.folderPath)}&file=${encodeURIComponent(filename)}`
-          audioEl.src = url
-          audioEl.play()
-          btn.textContent = '■'
-          activeBtn = btn
-          audioLbl.textContent = filename
-          audioBar.style.display = 'flex'
+          loadTrack(btn, filename, true)
         })
       })
 
+      // Default preview: first track, loaded but paused, so the bar has
+      // something ready to go the moment the page opens.
+      if (previewBtns.length) {
+        const firstBtn = previewBtns[0]
+        const filename = firstBtn.dataset.filename
+        if (filename) loadTrack(firstBtn, filename, false)
+      }
+
       audioEl.addEventListener('ended', () => {
-        if (activeBtn) { activeBtn.textContent = '▶'; activeBtn = null }
-      })
-      audioEl.addEventListener('pause', () => {
-        // Only reset button if pause wasn't triggered by our own toggle handler
-        // (that handler sets activeBtn = null itself)
+        if (activeBtn) activeBtn.textContent = '▶'
       })
     })()
 
@@ -3987,12 +4168,36 @@ const App = (() => {
     function refreshIngestTrackRow(i) {
       const t = ingest.tracks[i]
       if (!t) return
+      const chips = trackChipsArray(t)
       const chipsEl = document.getElementById(`t-chips-${i}`)
-      if (chipsEl) chipsEl.innerHTML = trackBadgesHtml(t)
+      if (chipsEl) chipsEl.innerHTML = chips[0] || ''
+
+      // The overflow row (2nd+ chips) doesn't have a stable id — it's a
+      // sibling <tr> right after the main row. Add/update/remove it in place
+      // rather than re-rendering the whole table on every flag toggle.
+      const mainRow = mainContent.querySelector(`.track-review-row[data-idx="${i}"]`)
+      const existingExpand = mainRow?.nextElementSibling?.classList.contains('track-review-chiprow')
+        ? mainRow.nextElementSibling : null
+      if (chips.length > 1) {
+        if (existingExpand) {
+          existingExpand.querySelector('.track-chip-expand-row').innerHTML = chips.join('')
+        } else if (mainRow) {
+          mainRow.insertAdjacentHTML('afterend', _trackChipExpandRowHtml(i, chips))
+        }
+      } else if (existingExpand) {
+        existingExpand.remove()
+      }
+
       const noteEl = document.getElementById(`t-note-${i}`)
-      if (noteEl) { noteEl.textContent = t.notes || ''; noteEl.title = t.notes || '' }
+      if (noteEl) {
+        noteEl.textContent = t.notes || '—'; noteEl.title = t.notes || 'Click to add a note'
+        noteEl.classList.toggle('pp-empty', !t.notes)
+      }
       const swEl = document.getElementById(`t-sw-${i}`)
-      if (swEl) { swEl.textContent = t.songwriter || ''; swEl.title = t.songwriter || '' }
+      if (swEl) {
+        swEl.textContent = t.songwriter || '—'; swEl.title = t.songwriter || 'Click to add a songwriter'
+        swEl.classList.toggle('pp-empty', !t.songwriter)
+      }
     }
     mainContent.querySelectorAll('.track-review-row[data-idx]').forEach(row => {
       const idx = parseInt(row.dataset.idx)
@@ -4002,8 +4207,36 @@ const App = (() => {
         if (!t) return
         openTrackMenu(t, ev.clientX, ev.clientY, {
           showOfficial: true,
+          flagsOnly: true,
           onChange: () => refreshIngestTrackRow(idx),
         })
+      })
+    })
+
+    // Note/Songwriter — click-to-edit directly in the table (Ryan, 2026-07-15:
+    // moved out of the right-click menu, which is Flags-only here now). Staged
+    // into ingest.tracks in memory, same as every other field on this form —
+    // nothing hits the API until Confirm.
+    ingest.tracks.forEach((t, i) => {
+      const noteEl = document.getElementById(`t-note-${i}`)
+      makeInlineEditable(noteEl, {
+        placeholder: '—',
+        get: () => ingest.tracks[i].notes || '',
+        onSave: v => {
+          v = v.trim() || null
+          ingest.tracks[i].notes = v
+          if (noteEl) noteEl.title = v || 'Click to add a note'
+        },
+      })
+      const swEl = document.getElementById(`t-sw-${i}`)
+      makeInlineEditable(swEl, {
+        placeholder: '—',
+        get: () => ingest.tracks[i].songwriter || '',
+        onSave: v => {
+          v = v.trim() || null
+          ingest.tracks[i].songwriter = v
+          if (swEl) swEl.title = v || 'Click to add a songwriter'
+        },
       })
     })
 
@@ -4215,6 +4448,12 @@ const App = (() => {
       let debounce  = null
 
       function lockLocation(venue) {
+        // Placeholder venues ("Unknown Venue", "TBD", ...) aren't one real
+        // canonical place — their stored city/state/country is leftover from
+        // whichever other show wrote there last, not this show's location.
+        // Don't lock/prefill from it; leave the tag/info guess editable.
+        // (Ryan, 2026-07-15 — see app/utils/venues.py for the full story.)
+        if (isPlaceholderVenue(venue?.name)) return
         cityEl.value  = venue.city    || ''
         stateEl.value = venue.state   || ''
         cntryEl.value = venue.country || ''
@@ -4382,9 +4621,19 @@ const App = (() => {
       })
     })
 
-    document.getElementById('btn-back-folder').addEventListener('click', () => {
-      ingest.step = 'folder'
-      renderIngestStep()
+    // Standardized back link (top of page) — reflects how this review was
+    // actually reached (Ryan, 2026-07-15: "scrub our back link logic for
+    // that space"). From Bulk Import's "Review →": straight back to the
+    // in-memory batch results, no rescan — speed is the whole point for a
+    // bulk reviewer working through many folders. Otherwise: the folder step.
+    document.getElementById('ingest-back-link').addEventListener('click', e => {
+      e.preventDefault()
+      if (ingest.fromBatch) {
+        renderBatchResultsView()
+      } else {
+        ingest.step = 'folder'
+        renderIngestStep()
+      }
     })
 
     document.getElementById('btn-ai-assist')?.addEventListener('click', startAiAssist)
@@ -4394,7 +4643,7 @@ const App = (() => {
       tab.addEventListener('click', () => switchIngestPane(tab.dataset.ipane, tab))
     })
 
-    document.getElementById('btn-confirm').addEventListener('click', () => {
+    document.getElementById('btn-confirm').addEventListener('click', async () => {
       // Collect metadata
       const f = ingest.form
       f.artist_name     = document.getElementById('f-artist').value.trim()
@@ -4427,185 +4676,34 @@ const App = (() => {
         const t = ingest.tracks[parseInt(el.dataset.idx)]; if (t) t.title = el.value.trim()
       })
 
-      ingest.step = 'confirm'
-      renderIngestStep()
-    })
-
-    // Resize handle
-    wireResizablePanel(
-      mainContent.querySelector('.ingest-review-shell'),
-      mainContent.querySelector('.ingest-review-form'),
-      document.getElementById('rev-divider'),
-      260, 200
-    )
-  }
-
-  // fmtDur is shared by the review-step track table and the confirm summary.
-  function fmtDur(s) {
-    if (!s) return '—'
-    const m = Math.floor(s / 60), sec = Math.floor(s % 60)
-    return `${m}:${String(sec).padStart(2,'0')}`
-  }
-
-  // ── Step 4: Confirm & submit ───────────────────────────────────────────────
-
-  function buildFolderName() {
-    // Mirror the Python build_folder_name logic for preview purposes
-    const f = ingest.form
-    const pad = n => n ? String(n).padStart(2,'0') : null
-    let date = f.start_year
-      ? (f.start_month && f.start_day
-          ? `${f.start_year}-${pad(f.start_month)}-${pad(f.start_day)}`
-          : f.start_month ? `${f.start_year}-${pad(f.start_month)}`
-          : String(f.start_year))
-      : 'Unknown Date'
-    const venue = f.venue_name || 'Unknown Venue'
-    const loc   = f.city && f.state ? `${f.city}, ${f.state}`
-                : f.city ? f.city
-                : f.state || 'Unknown Location'
-    const src   = f.source || null
-    let name = `${f.artist_name || 'Unknown Artist'} - ${date} - ${venue} - ${loc}`
-    if (src) name += ` (${src})`
-    return name
-  }
-
-  async function renderIngestConfirm() {
-    const f          = ingest.form
-    const folderName = buildFolderName()
-
-    // Default the file-behavior choice from the saved preference, once per session.
-    if (ingest.form.behavior == null) {
-      try {
-        const prefs = await API.preferences.get()
-        ingest.form.behavior = prefs.ingest_file_behavior || 'copy'
-      } catch (_) { ingest.form.behavior = 'copy' }
-    }
-
-    const trackRows = ingest.tracks.map(t => `
-      <div class="confirm-track-row">
-        <span class="confirm-track-num">${String(t.track_number).padStart(2, '0')}</span>
-        <span class="confirm-track-title">${esc(t.title)}</span>
-        <span class="confirm-track-dur">${fmtDur(t.duration)}</span>
-      </div>`).join('')
-
-    setMainHTML(`
-      <div class="ingest-view" style="max-width:640px">
-        <div class="ingest-step-header">
-          <h2>Confirm &amp; Add to Library</h2>
-          ${stepDots('confirm')}
-        </div>
-
-        <!-- 1. Library destination -->
-        <div class="confirm-summary">
-          <div class="ingest-section-title">Library destination</div>
-          <div class="confirm-folder-name">${esc(folderName)}</div>
-          <div class="confirm-row" style="margin-top:10px; border-top:none">
-            <span class="label">File behavior</span>
-            <span class="value">
-              <select id="confirm-behavior">
-                <option value="copy" ${ingest.form.behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
-                <option value="move" ${ingest.form.behavior === 'move' ? 'selected' : ''}>Move into library (source removed)</option>
-              </select>
-              <div class="confirm-behavior-hint" id="confirm-behavior-hint">${ingest.form.behavior === 'move' ? 'Removes the original folder after the move.' : 'Originals stay where they are.'}</div>
-            </span>
-          </div>
-        </div>
-
-        <!-- 2. Recording metadata -->
-        <div class="confirm-summary">
-          <div class="ingest-section-title">Recording</div>
-          <div class="confirm-row">
-            <span class="label">Artist</span>
-            <span class="value">${esc(f.artist_name)}</span>
-          </div>
-          <div class="confirm-row">
-            <span class="label">Start date</span>
-            <span class="value">${fmtDate(f.start_year, f.start_month, f.start_day)}</span>
-          </div>
-          ${f.end_year ? `
-          <div class="confirm-row">
-            <span class="label">End date</span>
-            <span class="value">${fmtDate(f.end_year, f.end_month, f.end_day)}</span>
-          </div>` : ''}
-          <div class="confirm-row">
-            <span class="label">Venue</span>
-            <span class="value">${esc(f.venue_name || '—')}</span>
-          </div>
-          <div class="confirm-row">
-            <span class="label">Location</span>
-            <span class="value">${esc([f.city, f.state].filter(Boolean).join(', ') || '—')}</span>
-          </div>
-          ${f.event_name ? `
-          <div class="confirm-row">
-            <span class="label">Festival / Event</span>
-            <span class="value">${esc(f.event_name)}</span>
-          </div>` : ''}
-          <div class="confirm-row">
-            <span class="label">Source</span>
-            <span class="value">${esc(f.source || '—')}</span>
-          </div>
-          <div class="confirm-row">
-            <span class="label">Quality</span>
-            <span class="value">${esc(f.quality || '—')}</span>
-          </div>
-          ${f.lineage ? `
-          <div class="confirm-row">
-            <span class="label">Lineage</span>
-            <span class="value" style="word-break:break-word;white-space:pre-wrap">${esc(f.lineage)}</span>
-          </div>` : ''}
-          ${f.notes ? `
-          <div class="confirm-row">
-            <span class="label">Notes</span>
-            <span class="value" style="word-break:break-word;white-space:pre-wrap">${esc(f.notes)}</span>
-          </div>` : ''}
-        </div>
-
-        <!-- 3. Tracks -->
-        <div class="confirm-summary">
-          <div class="ingest-section-title">Tracks (${ingest.tracks.length})</div>
-          ${trackRows || '<div style="color:var(--t2);font-size:12px">No tracks</div>'}
-        </div>
-
-        <div id="confirm-error" style="color:var(--red); font-size:12px; margin-bottom:12px; display:none"></div>
-
-        <div class="ingest-actions">
-          <button class="btn btn-ghost btn-sm" id="btn-back-tracks">← Back</button>
-          <button class="btn btn-primary" id="btn-add-library">Add to library</button>
-        </div>
-      </div>`)
-
-    document.getElementById('btn-back-tracks').addEventListener('click', () => {
-      ingest.step = 'review'
-      renderIngestStep()
-    })
-
-    document.getElementById('confirm-behavior')?.addEventListener('change', e => {
-      ingest.form.behavior = e.target.value
-      const hint = document.getElementById('confirm-behavior-hint')
-      if (hint) hint.textContent = e.target.value === 'move'
-        ? 'Removes the original folder after the move.'
-        : 'Originals stay where they are.'
-    })
-
-    document.getElementById('btn-add-library').addEventListener('click', async () => {
-      const btn    = document.getElementById('btn-add-library')
-      const errEl  = document.getElementById('confirm-error')
+      // Submit directly — the old "Confirm & Add to Library" review screen
+      // is gone (Ryan, 2026-07-15: "never very useful, nothing is ever
+      // something i need to change"). File-behavior (copy/move) is no longer
+      // a per-add choice either — it's a standing preference (Settings ⚙,
+      // right next to the Anthropic key), read silently here.
+      const btn = document.getElementById('btn-confirm')
+      const errEl = document.getElementById('review-submit-error')
       btn.disabled = true
       btn.textContent = 'Adding to library…'
       errEl.style.display = 'none'
 
+      let behavior = 'copy'
+      try {
+        const prefs = await API.preferences.get()
+        behavior = prefs.ingest_file_behavior || 'copy'
+      } catch (_) { /* fall back to copy */ }
+
       const payload = {
         source_folder_path: ingest.folderPath,
-        ...ingest.form,
-        behavior: ingest.form.behavior || 'copy',
+        ...f,
+        behavior,
         tracks: ingest.tracks,
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
-        // Performer members → ordered artist (person) names for the backend.
-        members: (ingest.form.members || []).map(m => m.name),
+        members: (f.members || []).map(m => m.name),
         // AI Assist may have already been run on this draft (pre-save) — carry
         // the result along so it lands on the new recording instead of being
-        // lost the moment Confirm creates the row (2026-07-14 bug: it wasn't).
+        // lost the moment confirm creates the row (2026-07-14 bug: it wasn't).
         ai_result: ingest.aiResult || null,
       }
 
@@ -4634,16 +4732,20 @@ const App = (() => {
         if (fill) fill.style.width = '100%'
         ingest._lastResult = result
         if (result.recording_id) {
-          // Checksums were auto-verified during confirm (api/ingest.py
-          // _do_confirm) — flag it now, before navigating away, rather than
-          // relying on the archivist to notice the Checksums pane later.
           if (result.checksum_mismatches > 0) {
             alert(`⚠ ${result.checksum_mismatches} track checksum${result.checksum_mismatches === 1 ? '' : 's'} did not match the fingerprint file for this show. Check the Checksums pane before trusting this copy.`)
           }
-          // Skip the success screen — refresh the sidebar (new performer/venue/
-          // artist may exist) and go straight to the new recording.
-          await loadArtistList()
-          window.location.hash = `#/recording/${result.recording_id}`
+          await loadArtistList()   // new performer/venue/artist may exist
+          if (ingest.fromBatch) {
+            // Keep the batch list's ✓ Ingested state correct if they later
+            // navigate back here some other way, then go straight back to
+            // the queue — that's the whole point for a bulk reviewer working
+            // through many folders (Ryan, 2026-07-15).
+            batch.ingestedIds.set(ingest.folderPath, result.recording_id)
+            renderBatchResultsView()
+          } else {
+            window.location.hash = `#/recording/${result.recording_id}`
+          }
         } else {
           // Fallback, shouldn't normally happen — no recording_id to jump to.
           ingest.step = 'success'
@@ -4653,11 +4755,33 @@ const App = (() => {
         errEl.textContent = `Error: ${e.message}`
         errEl.style.display = 'block'
         btn.disabled = false
-        btn.textContent = 'Add to library'
+        btn.textContent = 'Add Recording →'
         prog?.remove()
       }
     })
+
+    // Resize handle
+    wireResizablePanel(
+      mainContent.querySelector('.ingest-review-shell'),
+      mainContent.querySelector('.ingest-review-form'),
+      document.getElementById('rev-divider'),
+      260, 200
+    )
   }
+
+  // fmtDur is shared by the review-step track table and the confirm summary.
+  function fmtDur(s) {
+    if (!s) return '—'
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60)
+    return `${m}:${String(sec).padStart(2,'0')}`
+  }
+
+  // Step 4 ("Confirm & Add to Library") removed 2026-07-15 — Ryan: "never
+  // very useful, nothing is ever something i need to change... doesn't look
+  // great." The review step's "Add Recording →" button now submits directly
+  // (see its click handler above) instead of navigating to a separate
+  // summary-then-confirm screen. File behavior (copy/move) moved from a
+  // per-add choice to a standing preference (Settings ⚙).
 
   // ── Step 5: Success ────────────────────────────────────────────────────────
 
@@ -4698,7 +4822,7 @@ const App = (() => {
 
   // ── Player integration ─────────────────────────────────────────────────────
 
-  async function playRecording(recId, startIdx, preloadedTracks) {
+  async function playRecording(recId, startIdx, preloadedTracks, opts) {
     let tracks  = preloadedTracks
     let recData = null
     try {
@@ -4749,7 +4873,7 @@ const App = (() => {
       recLabel,
     }))
 
-    Player.loadQueue(queue, queueStart)
+    Player.loadQueue(queue, queueStart, opts)
   }
 
   /** Called by Player when the track changes (for highlighting in the track list) */
@@ -4771,10 +4895,17 @@ const App = (() => {
       if (playBtn) playBtn.textContent = isActive ? '▶' : '▷'
     })
 
-    // Switch waveform to the new track if we have data for it
-    const canvas = document.getElementById('rec-waveform')
-    if (canvas && _waveformMap[trackId] && trackId !== _waveformTrackId) {
-      _startWaveformLoop(canvas, trackId)
+    // Switch the wavesurfer waveform to the new track's peaks if we have
+    // analysis data for it (mirrors the old canvas's track-follow
+    // behaviour). No network fetch — same precomputed peaks used to render
+    // the banner in the first place.
+    if (_wsInstance && trackId !== _wsTrackId) {
+      const peaks = _peaksForTrack(trackId)
+      const duration = _trackDurationMap[trackId]
+      if (peaks && duration) {
+        _wsInstance.load('', peaks, duration)
+        _wsTrackId = trackId
+      }
     }
   }
 

@@ -27,6 +27,13 @@ const Player = (() => {
   let queueIdx   = -1
   let startedAt  = null   // Date when play started (for PlayLog)
 
+  // Set by whichever page is currently showing a recording with nothing
+  // loaded in the player yet — pressing the bar's play button with an empty
+  // queue then plays that recording's first track instead of no-op'ing
+  // (Ryan, 2026-07-15). Cleared on every navigation (see App.setMainHTML).
+  let fallbackPlay = null
+  function setFallbackPlay(fn) { fallbackPlay = fn }
+
   // Navigate back to the currently-playing recording when user clicks the info area
   infoEl.addEventListener('click', () => {
     const recId = infoEl.dataset.recId
@@ -66,23 +73,31 @@ const Player = (() => {
 
   // ── Playback ──────────────────────────────────────────────────────────────
 
-  function playIdx(idx) {
+  function playIdx(idx, opts) {
     if (idx < 0 || idx >= queue.length) return
     queueIdx  = idx
     const trk = currentTrack()
+    const autoplay = !opts || opts.autoplay !== false
 
     audio.src = trk.streamUrl
     audio.load()
     audio.volume = parseFloat(volBar.value)
-    audio.play().catch(() => {})
+    if (autoplay) {
+      audio.play().catch(() => {})
+      startedAt = Date.now()
+    } else {
+      startedAt = null
+    }
 
     updateTrackUI(trk)
-    startedAt = Date.now()
     App.onTrackChange(trk.id)
   }
 
   function togglePlay() {
-    if (!currentTrack()) return
+    if (!currentTrack()) {
+      if (fallbackPlay) fallbackPlay()
+      return
+    }
     if (audio.paused) {
       audio.play().catch(() => {})
       startedAt = startedAt || Date.now()
@@ -105,13 +120,20 @@ const Player = (() => {
    * Load a new queue and start playing at startIndex.
    * @param {Array}  tracks     — array of { id, title, duration, streamUrl, meta }
    * @param {number} startIndex — index in tracks to begin playing
+   * @param {Object} [opts]     — pass { autoplay: false } to load paused
+   *                              (e.g. readying a recording for the waveform
+   *                              to scrub without interrupting silence)
    */
-  function loadQueue(tracks, startIndex) {
+  function loadQueue(tracks, startIndex, opts) {
     queue    = tracks
-    playIdx(startIndex)
+    playIdx(startIndex, opts)
   }
 
   function isPlaying() { return !audio.paused }
+
+  function pause() {
+    if (!audio.paused) audio.pause()
+  }
 
   function currentId() {
     return currentTrack()?.id ?? null
@@ -169,6 +191,6 @@ const Player = (() => {
     get queueIdx()     { return queueIdx },
   }
 
-  return { loadQueue, isPlaying, currentId }
+  return { loadQueue, isPlaying, pause, currentId, setFallbackPlay }
 
 })()

@@ -23,6 +23,7 @@ from app.extensions import db
 from app.models.performer import Performer
 from app.models.artist import Artist, Membership
 from app.utils.performers import resolve_or_create_performer, set_performer_members
+from app.utils.venues import is_placeholder_venue_name
 from app.models.venue import Venue
 from app.models.event import Event
 from app.models.performance import Performance
@@ -466,12 +467,22 @@ def _do_confirm(data, user_id, progress_cb=None):
         set_performer_members(performer, member_names)
 
     # ── 3. Find or create Venue (optional) ────────────────────────────────────
+    # Placeholder names ("Unknown Venue", "TBD", ...) are never linked as a
+    # real Venue — they aren't one canonical physical place, they're a
+    # stand-in every show without a known venue reuses. Linking them shares
+    # one row's city/state/country across unrelated shows (Ryan's 2026-07-15
+    # bug report; confirmed contamination in scripts/audit_placeholder_venues.py).
+    # Treat exactly like no venue was given: venue stays None, and city/state/
+    # country fall through to the Performance's own fallback fields below.
     venue = None
     venue_id_in = data.get("venue_id")
     if venue_id_in:
-        # User selected an existing venue — use it directly
-        venue = db.session.get(Venue, int(venue_id_in))
-    elif venue_name:
+        # User selected an existing venue by id — use it, unless it resolves
+        # to a placeholder row.
+        candidate = db.session.get(Venue, int(venue_id_in))
+        if candidate and not is_placeholder_venue_name(candidate.name):
+            venue = candidate
+    elif venue_name and not is_placeholder_venue_name(venue_name):
         # No id — look up by name or create new
         venue = db.session.query(Venue).filter(
             func.lower(Venue.name) == venue_name.lower()
@@ -863,14 +874,28 @@ def batch_scan():
 
     Response: list of candidates, each with:
       - name, path, audio_count, size_mb, issues
-      - tier: "green" | "yellow" | "red"
-      - confidence: { artist, date, tracks, venue }  — per-field scores
+      - health: compute_health() result — { score, band, factors, ... }. This
+                IS the completeness score shown on each row.
+      - tier: "green" | "yellow" | "red" — literally health["band"]. Used to be
+              a second, independently-derived heuristic off conf_artist/
+              conf_date/conf_tracks, which could disagree with the visible
+              score (Ryan hit this 2026-07-16: a 94-scoring row still bucketed
+              under "yellow"). Now it's just an alias so the pill counts and
+              the "Auto-Ingest All ___" filters always match what's on screen.
+      - confidence: { artist, date, tracks, venue }  — per-field scores, still
+                    used for the "uncertain" styling on individual fields in
+                    the expanded row detail (unrelated to tier now).
       - extracted: { artist, year, month, day, venue, city, state, country,
                      source, lineage, track_count, tracks_titled }
+      - paula: compute_paula_score() result, or None (empty/unreadable folder).
+               Purple-border source-of-truth in Add Recording's field-level
+               confidence highlighting — no longer rendered as its own
+               narrative/avatar anywhere in the UI (removed 2026-07-16).
       - already_ingested: bool  (folder path already in DB)
     """
     from app.utils.ingest import build_scan_payload
     from app.models.recording import Recording
+    from app.utils.paula import compute_paula_score
 
     data       = request.get_json() or {}
     source_dir = (data.get("source_dir") or "").strip()
@@ -878,8 +903,14 @@ def batch_scan():
     if not source_dir or not os.path.isdir(source_dir):
         return jsonify({"error": f"Directory not found: {source_dir!r}"}), 400
 
-    # Known artist names for fuzzy artist matching
+    # Known artist/venue records — same lookups the interactive Add Recording
+    # scan uses, so Paula's per-item confidence scoring here (added 2026-07-15,
+    # Ryan: "let's get her pulled into that experience") matches exactly.
     known_performers = [p.name for p in db.session.query(Performer.name).all()]
+    known_venues = [
+        {"name": v.name, "city": v.city, "state": v.state, "country": v.country}
+        for v in db.session.query(Venue).all()
+    ]
 
     # Already-ingested folder paths (relative or basename match)
     ingested_paths = {
@@ -960,6 +991,7 @@ def batch_scan():
                 "tier": "red", "issues": issues,
                 "confidence": {}, "extracted": {},
                 "health": {"score": 0, "band": "red", "factors": [], "populated": 0, "total": 0},
+                "paula": None,
                 "already_ingested": already_ingested,
             })
             continue
@@ -976,6 +1008,17 @@ def batch_scan():
         from_tags = ((scan or {}).get("suggestions") or {}).get("from_tags") or {}
         from_info = ((scan or {}).get("suggestions") or {}).get("from_info_file") or {}
         health    = (scan or {}).get("health") or {"score": 0, "band": "red"}
+
+        # Paula's per-item confidence read — same engine as the interactive
+        # scan endpoint (app/api/recordings.py). Frontend aggregates these
+        # into a single batch-level narrative rather than showing per-row
+        # scores (Ryan didn't want per-item Paula numbers cluttering the list).
+        paula_result = None
+        if scan:
+            try:
+                paula_result = compute_paula_score(scan, known_performers, known_venues)
+            except Exception:
+                paula_result = None
 
         # ── Field resolution: tags win, info file fills gaps ──────────────────
         # Artist
@@ -1080,21 +1123,16 @@ def batch_scan():
         conf_venue = "high" if venue else "low"
 
         # ── Tier assignment ───────────────────────────────────────────────────
-        # Green: have an artist name + full date + tracks titled + no count mismatch.
-        #        DB match is irrelevant — bulk import creates new artists by design.
-        # Red:   artist name or date completely missing
-        # Yellow: everything else (partial date, no track titles, count mismatch, etc.)
-        info_count = len(info_tracks)
-        info_count_mismatch = info_count > 0 and info_count != audio_count
-        if (conf_artist != "none"
-                and conf_date == "high"
-                and conf_tracks in ("high", "medium")
-                and not info_count_mismatch):
-            tier = "green"
-        elif conf_artist == "none" or conf_date == "none":
-            tier = "red"
-        else:
-            tier = "yellow"
+        # Tier is just the completeness-score band (health.band, computed above
+        # from the same compute_health() shown as the row's score badge). Used
+        # to be a second, independently-derived heuristic off conf_artist/
+        # conf_date/conf_tracks — that produced a real inconsistency Ryan hit
+        # 2026-07-16: a row could show "94" (health/completeness score, green
+        # band) while still being bucketed under the yellow pill count/filter,
+        # because the two scorers didn't always agree. One score, one band, no
+        # more double bookkeeping. conf_* values are kept as-is — they still
+        # drive the per-field "uncertain" styling in the expanded row detail.
+        tier = health["band"]
 
         results.append({
             "name":        os.path.basename(folder_path),
@@ -1104,6 +1142,7 @@ def batch_scan():
             "tier":        tier,
             "issues":      issues,
             "health":      health,
+            "paula":       paula_result,
             "confidence": {
                 "artist": conf_artist,
                 "date":   conf_date,
