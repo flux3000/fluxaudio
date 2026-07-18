@@ -23,11 +23,12 @@ CHUNK_SIZE = 1024 * 256  # 256 KB chunks
 MIMETYPE   = "audio/flac"
 
 
-def _serve_file(full_path):
+def _serve_file(full_path, mimetype=MIMETYPE):
     """
     Stream a file with HTTP Range support (enables seeking): a 206 partial
     response when a Range header is present, else a 200 full-file stream.
-    Single implementation shared by both stream endpoints.
+    Single implementation shared by the local FLAC endpoints AND the peer
+    transcoded-MP3 endpoint (api/share.py), which passes mimetype="audio/mpeg".
     """
     file_size    = os.path.getsize(full_path)
     range_header = request.headers.get("Range")
@@ -51,7 +52,7 @@ def _serve_file(full_path):
             "Content-Range":  f"bytes {byte_start}-{byte_end}/{file_size}",
             "Accept-Ranges":  "bytes",
             "Content-Length": str(length),
-            "Content-Type":   MIMETYPE,
+            "Content-Type":   mimetype,
         })
 
     def generate_full():
@@ -62,7 +63,7 @@ def _serve_file(full_path):
     return Response(generate_full(), status=200, headers={
         "Content-Length": str(file_size),
         "Accept-Ranges":  "bytes",
-        "Content-Type":   MIMETYPE,
+        "Content-Type":   mimetype,
     })
 
 

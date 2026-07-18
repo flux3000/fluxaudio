@@ -8,6 +8,7 @@ from .event import Event
 from .performance import Performance
 from .recording import Recording, RecordingFingerprint
 from .collection import Collection, CollectionRecording
+from .peer import Peer, CollectionGrant, PeerInvite, PeerToken, PeerAccessLog
 from .recording_event import RecordingEvent
 from .track import Track
 from .play_log import PlayLog
