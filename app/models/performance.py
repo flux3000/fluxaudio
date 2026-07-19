@@ -30,6 +30,14 @@ class Performance(db.Model):
     # Sub-venue stage (e.g. "Omega Tent", "Main Stage") — used within events
     stage  = db.Column(db.String(128), nullable=True)
 
+    # 'inherit' (default): lineup = act Memberships whose stints cover this
+    # date, plus any performance_personnel rows layered on as guests/edits.
+    # 'explicit': lineup = performance_personnel rows ONLY; act roster ignored
+    # entirely (rotating billings where the act roster is just a pick-list,
+    # e.g. Acoustic All-Stars). Defaults from performer.default_personnel_mode
+    # at creation. See app/utils/personnel.py::resolve_performance_personnel.
+    personnel_mode = db.Column(db.String(16), nullable=False, default="inherit")
+
     # Date range — nullable integers support partial and multi-day dates
     start_year  = db.Column(db.Integer, nullable=True)
     start_month = db.Column(db.Integer, nullable=True)
@@ -54,6 +62,9 @@ class Performance(db.Model):
     event      = db.relationship("Event",      back_populates="performances")
     recordings = db.relationship("Recording",  back_populates="performance",
                                  cascade="all, delete-orphan")
+    personnel  = db.relationship("PerformancePersonnel", back_populates="performance",
+                                 cascade="all, delete-orphan",
+                                 order_by="PerformancePersonnel.order")
 
     def __repr__(self):
         date = f"{self.start_year}-{self.start_month:02d}-{self.start_day:02d}" \

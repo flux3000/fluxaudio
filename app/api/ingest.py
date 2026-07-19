@@ -542,6 +542,10 @@ def _do_confirm(data, user_id, progress_cb=None):
             city    = city    if not venue else None,
             state   = state   if not venue else None,
             country = country if not venue else None,
+            # New performances start in the act's default resolution mode
+            # (e.g. "Acoustic All-Stars" set to 'explicit' means every future
+            # ingest starts explicit, not inherit) — see personnel.py.
+            personnel_mode = performer.default_personnel_mode,
         )
         db.session.add(performance)
         db.session.flush()

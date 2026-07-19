@@ -11,6 +11,9 @@ from sqlalchemy import func
 from app.extensions import db
 from app.models.artist import Artist, Membership
 from app.models.performer import Performer
+from app.models.performance_personnel import PerformancePersonnel
+from app.utils.format import format_partial_date
+from app.utils.serialize import recording_summary
 from app.utils.performers import resolve_or_create_performer
 
 bp = Blueprint("artists", __name__)
@@ -42,19 +45,57 @@ def list_artists():
 @bp.route("/<int:artist_id>")
 @login_required
 def get_artist(artist_id):
-    """A person + every Performer (act) they're a member of."""
+    """
+    A person + every Performer (act) they're a member of, PLUS individual
+    show-level appearances reached only via performance_personnel — sit-ins
+    or explicit-mode picks on acts they're not formally a Membership of at
+    all (2026-07-18, Per-Show Personnel design doc ripple item 3: "Béla's
+    page would finally surface his All-Stars sit-ins"). Kept as a separate
+    `guest_appearances` list rather than folded into `performers`, since the
+    existing UI pulls EVERY recording of a listed performer — doing that for
+    a one-off sit-in would misrepresent a single show as full membership.
+    """
     a = db.session.get(Artist, artist_id)
     if not a:
         return jsonify({"error": "Not found"}), 404
     # Skip any dangling membership whose performer was removed.
     performers = [m.performer for m in a.memberships if m.performer is not None]
     performers.sort(key=lambda p: (p.sort_name or p.name).lower())
+    member_performer_ids = {p.id for p in performers}
+
+    guest_appearances = []
+    for pp in db.session.query(PerformancePersonnel).filter_by(artist_id=artist_id).all():
+        perf = pp.performance
+        if not perf or perf.performer_id in member_performer_ids:
+            continue   # already covered by the act-membership list above
+        v = perf.venue
+        guest_appearances.append({
+            "performance_id": perf.id,
+            "performer_id":   perf.performer_id,
+            "performer_name": perf.performer.name if perf.performer else None,
+            "date":       format_partial_date(perf.start_year, perf.start_month, perf.start_day),
+            # Split date + location, matching the shape performers.recordings
+            # already returns, so the frontend can render these with the same
+            # flatRowHtml() row builder instead of a bespoke one.
+            "start_year": perf.start_year, "start_month": perf.start_month, "start_day": perf.start_day,
+            "venue_name": v.name    if v else None,
+            "city":       v.city    if v else perf.city,
+            "state":      v.state   if v else perf.state,
+            "country":    v.country if v else perf.country,
+            "instrument": pp.instrument,
+            "is_guest":   pp.is_guest,
+            "note":       pp.note,
+            "recordings": [recording_summary(r) for r in perf.recordings],
+        })
+    guest_appearances.sort(key=lambda g: (g["start_year"] or 0, g["start_month"] or 0, g["start_day"] or 0))
+
     return jsonify({
         "id":         a.id,
         "name":       a.name,
         "sort_name":  a.sort_name,
         "bio":        a.bio,
-        "performers": [{"id": p.id, "name": p.name} for p in performers],
+        "performers":         [{"id": p.id, "name": p.name} for p in performers],
+        "guest_appearances":  guest_appearances,
     })
 
 

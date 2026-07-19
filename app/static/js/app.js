@@ -1001,6 +1001,43 @@ const App = (() => {
       </div>`
     }).join('')
 
+    // Guest / sit-in appearances — performance_personnel rows on acts this
+    // person isn't formally a Membership of (2026-07-18 Per-Show Personnel,
+    // ripple item 3: "Béla's page would finally surface his All-Stars
+    // sit-ins"). Grouped by performer like the section above, but kept
+    // visually separate and tagged "guest" since it's not the same thing as
+    // full membership — this is a different act's recording that happens to
+    // include this person for one show.
+    const guestAppearances = a.guest_appearances || []
+    const guestByPerformer = {}
+    guestAppearances.forEach(g => {
+      const key = g.performer_id
+      if (!guestByPerformer[key]) guestByPerformer[key] = { performer_id: g.performer_id, performer_name: g.performer_name, appearances: [] }
+      guestByPerformer[key].appearances.push(g)
+    })
+    const totalGuestRecordings = guestAppearances.reduce((n, g) => n + (g.recordings || []).length, 0)
+
+    const guestGroupsHtml = Object.values(guestByPerformer).map(g => {
+      const ordered = g.appearances.slice().sort((x, y) =>
+        (x.start_year || 0) - (y.start_year || 0) ||
+        (x.start_month || 0) - (y.start_month || 0) ||
+        (x.start_day || 0) - (y.start_day || 0))
+      const rows = ordered.map(ap =>
+        (ap.recordings || []).map(r => flatRowHtml({
+          id: r.id, performer: g.performer_name,
+          start_year: ap.start_year, start_month: ap.start_month, start_day: ap.start_day,
+          venue: ap.venue_name, city: ap.city, state: ap.state, country: ap.country,
+          source: r.source, quality: r.quality,
+          rating: r.rating, is_complete: r.is_complete,
+          track_count: r.track_count, duration_sec: r.duration_sec,
+        }, false)).join('')).join('')
+      if (!rows) return ''
+      return `<div class="pp-group">
+        <div class="pp-group-head"><a href="#/performer/${g.performer_id}">${esc(g.performer_name)}</a> <span class="pp-guest-tag">guest</span></div>
+        <div class="rec-table">${rows}</div>
+      </div>`
+    }).join('')
+
     const descText = a.bio && a.bio.trim()
     setMainHTML(`
       <div class="performer-page">
@@ -1016,9 +1053,10 @@ const App = (() => {
             <div class="pp-artists" id="pn-performers"></div>
           </div>
 
-          <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performers.length} performer${performers.length !== 1 ? 's' : ''}</div>
+          <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performers.length} performer${performers.length !== 1 ? 's' : ''}${totalGuestRecordings ? ` · ${totalGuestRecordings} guest recording${totalGuestRecordings !== 1 ? 's' : ''}` : ''}</div>
         </div>
-        ${groupsHtml || '<div class="empty-state" style="min-height:160px"><div class="empty-title">No appearances yet</div></div>'}
+        ${groupsHtml || (guestGroupsHtml ? '' : '<div class="empty-state" style="min-height:160px"><div class="empty-title">No appearances yet</div></div>')}
+        ${guestGroupsHtml ? `<div class="pp-section-label">Guest Appearances</div>${guestGroupsHtml}` : ''}
       </div>`)
 
     wireRecordingRows(mainContent)
@@ -1178,7 +1216,11 @@ const App = (() => {
 
     state.selectedArtist = performer
     // Local, mutable copy of the roster — edited in place, persisted on each change.
-    let members = (performer.members || []).map(m => ({ id: m.id, name: m.name }))
+    // Each member also carries `.stints` (date-bounded tenures; usually one
+    // unbounded row = "always a member") — see the stint editor below.
+    let members = (performer.members || []).map(m => ({ id: m.id, name: m.name, stints: m.stints || [] }))
+    let defaultPersonnelMode = performer.default_personnel_mode || 'inherit'
+    let expandedMemberId = null   // which member's stint editor drawer is open, if any
 
     const withRecs = performances.filter(p => (p.recordings || []).length > 0)
     const totalRecordings = withRecs.reduce((n, p) => n + p.recordings.length, 0)
@@ -1211,8 +1253,15 @@ const App = (() => {
           <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
 
           <div class="pp-artists-block">
-            <div class="pp-artists-label">Artists</div>
+            <div class="pp-artists-label-row">
+              <div class="pp-artists-label">Artists</div>
+              <select class="pp-mode-select" id="pp-mode-select" title="Whether new performances of this act start with the full roster, or need personnel picked per show">
+                <option value="inherit">New shows: full roster</option>
+                <option value="explicit">New shows: pick personnel per show</option>
+              </select>
+            </div>
             <div class="pp-artists" id="pp-artists"></div>
+            <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
           </div>
 
           <div class="pp-artists-block">
@@ -1253,30 +1302,133 @@ const App = (() => {
       },
     })
 
-    // ── Editable Artists (members) ──────────────────────────────────────────
+    // ── Editable Artists (members) + per-person stint dates ──────────────────
+    // A member usually has one unbounded stint ("always a member" — zero UI
+    // tax, matches every pre-2026-07-18 row). Click a chip's name to expand
+    // an inline drawer for real tenure dates (era lineups, second stints like
+    // Mickey Hart) — see Per-Show Personnel design doc §7.6.
     async function persistMembers() { await saveField({ members: members.map(m => m.name) }) }
+
+    async function refreshRoster() {
+      // Stint mutations happen against Membership rows directly (not via the
+      // plain-name-list sync), so re-fetch rather than hand-patch local state.
+      const fresh = await API.performers.get(performerId)
+      members = (fresh.members || []).map(m => ({ id: m.id, name: m.name, stints: m.stints || [] }))
+      defaultPersonnelMode = fresh.default_personnel_mode || 'inherit'
+    }
+
+    function isUnbounded(s) {
+      return !s.start_year && !s.start_month && !s.start_day && !s.end_year && !s.end_month && !s.end_day
+    }
 
     function renderArtists() {
       const box = document.getElementById('pp-artists')
       box.innerHTML =
-        members.map((m, i) => `<span class="member-chip">${esc(m.name)} <span class="member-chip-x" data-i="${i}" title="Remove">×</span></span>`).join('') +
+        members.map((m, i) => `
+          <span class="member-chip ${expandedMemberId === m.id ? 'member-chip--expanded' : ''}">
+            <span class="member-chip-name" data-id="${m.id}" title="Click to edit stint dates">${esc(m.name)}</span>
+            <span class="member-chip-x" data-i="${i}" title="Remove">×</span>
+          </span>`).join('') +
         `<span class="artist-picker-wrap pp-add-wrap">
            <input type="text" class="member-input pp-add-input" autocomplete="off" placeholder="Add an artist…" />
            <div class="artist-dropdown" id="pp-add-dd" style="display:none"></div>
          </span>`
       box.querySelectorAll('.member-chip-x').forEach(x =>
-        x.addEventListener('click', async () => { members.splice(parseInt(x.dataset.i), 1); await persistMembers(); renderArtists() }))
+        x.addEventListener('click', async () => {
+          const removedId = members[parseInt(x.dataset.i)]?.id
+          members.splice(parseInt(x.dataset.i), 1)
+          if (expandedMemberId === removedId) expandedMemberId = null
+          await persistMembers(); renderArtists(); renderStintEditor()
+        }))
+      box.querySelectorAll('.member-chip-name').forEach(el =>
+        el.addEventListener('click', () => {
+          const id = parseInt(el.dataset.id)
+          expandedMemberId = (expandedMemberId === id) ? null : id
+          renderArtists(); renderStintEditor()
+        }))
       const input = box.querySelector('.pp-add-input')
       wirePickerDropdown(input, document.getElementById('pp-add-dd'), API.artists.search,
         async ({ name }) => {
           name = (name || '').trim()
           if (name && !members.some(m => m.name.toLowerCase() === name.toLowerCase())) {
             members.push({ name }); await persistMembers()   // set_performer_members creates new people as needed
+            await refreshRoster()
           }
           renderArtists()
         }, 'Create new artist')
     }
+
+    function renderStintEditor() {
+      const box = document.getElementById('pp-stint-editor')
+      const member = members.find(m => m.id === expandedMemberId)
+      if (!member) { box.style.display = 'none'; box.innerHTML = ''; return }
+      box.style.display = ''
+      const single = member.stints.length <= 1
+      box.innerHTML = `
+        <div class="pp-stint-editor-head">
+          <span class="pp-stint-editor-title">Stint dates — <b>${esc(member.name)}</b></span>
+          <span class="pp-stint-editor-close" title="Close">×</span>
+        </div>
+        <div class="pp-stint-rows">
+          ${member.stints.map(s => `
+            <div class="pp-stint-row" data-stint-id="${s.id}">
+              ${isUnbounded(s) ? '<span class="pp-stint-always">Always a member — leave blank, or set dates for a specific tenure</span>' : ''}
+              <input type="number" class="pp-stint-input pp-s-y1" placeholder="Start yr" value="${s.start_year ?? ''}" style="width:64px" />
+              <input type="number" class="pp-stint-input pp-s-m1" placeholder="mo" value="${s.start_month ?? ''}" min="1" max="12" style="width:38px" />
+              <input type="number" class="pp-stint-input pp-s-d1" placeholder="day" value="${s.start_day ?? ''}" min="1" max="31" style="width:38px" />
+              <span class="pp-stint-dash">–</span>
+              <input type="number" class="pp-stint-input pp-s-y2" placeholder="End yr" value="${s.end_year ?? ''}" style="width:64px" />
+              <input type="number" class="pp-stint-input pp-s-m2" placeholder="mo" value="${s.end_month ?? ''}" min="1" max="12" style="width:38px" />
+              <input type="number" class="pp-stint-input pp-s-d2" placeholder="day" value="${s.end_day ?? ''}" min="1" max="31" style="width:38px" />
+              <span class="pp-stint-del" title="Remove this stint" ${single ? 'style="display:none"' : ''}>×</span>
+            </div>`).join('')}
+        </div>
+        <button class="btn btn-ghost btn-xs pp-stint-add-btn" type="button">+ Add another stint (e.g. a second tenure)</button>`
+
+      box.querySelector('.pp-stint-editor-close').addEventListener('click', () => {
+        expandedMemberId = null; renderArtists(); renderStintEditor()
+      })
+
+      box.querySelectorAll('.pp-stint-row').forEach(row => {
+        const stintId = parseInt(row.dataset.stintId)
+        const read = () => ({
+          start_year:  parseInt(row.querySelector('.pp-s-y1').value) || null,
+          start_month: parseInt(row.querySelector('.pp-s-m1').value) || null,
+          start_day:   parseInt(row.querySelector('.pp-s-d1').value) || null,
+          end_year:    parseInt(row.querySelector('.pp-s-y2').value) || null,
+          end_month:   parseInt(row.querySelector('.pp-s-m2').value) || null,
+          end_day:     parseInt(row.querySelector('.pp-s-d2').value) || null,
+        })
+        row.querySelectorAll('.pp-stint-input').forEach(inp =>
+          inp.addEventListener('blur', async () => {
+            try { await API.performers.updateStint(stintId, read()); await refreshRoster(); renderArtists(); renderStintEditor() }
+            catch (e) { alert('Failed to save stint: ' + e.message) }
+          }))
+        const del = row.querySelector('.pp-stint-del')
+        if (del) del.addEventListener('click', async () => {
+          try { await API.performers.removeStint(stintId); await refreshRoster(); renderArtists(); renderStintEditor() }
+          catch (e) { alert('Failed to remove stint: ' + e.message) }
+        })
+      })
+
+      box.querySelector('.pp-stint-add-btn').addEventListener('click', async () => {
+        try {
+          await API.performers.addStint(performerId, member.id, {})   // unbounded until edited
+          await refreshRoster(); renderArtists(); renderStintEditor()
+        } catch (e) { alert('Failed to add stint: ' + e.message) }
+      })
+    }
+
     renderArtists()
+    renderStintEditor()
+
+    // ── New-shows default (Performer.default_personnel_mode) ─────────────────
+    const modeSelect = document.getElementById('pp-mode-select')
+    modeSelect.value = defaultPersonnelMode
+    modeSelect.addEventListener('change', async () => {
+      try { await saveField({ default_personnel_mode: modeSelect.value }); defaultPersonnelMode = modeSelect.value }
+      catch (e) { alert('Failed: ' + e.message); modeSelect.value = defaultPersonnelMode }
+    })
 
     // ── Editable reference Resources (external DBs / discographies) ──────────
     let resources = (performer.resources || []).map(r => ({ label: r.label, url: r.url }))
@@ -2326,34 +2478,106 @@ const App = (() => {
         })
       }
 
-      // Artists association pill row
-      let recMembers = (perf.members || []).map(m => ({ id: m.id, name: m.name }))
-      const persistMembers = async () => {
-        try { await API.performances.update(perf.id, { members: recMembers.map(m => m.name) }); invalidateDims('artists') }
+      // Artists association pill row — personnel-aware (2026-07-18, Per-Show
+      // Personnel Phase 2). Pills render from the RESOLVED lineup (perf.personnel,
+      // each tagged with a source: inherited/guest/explicit) rather than the
+      // flat name list, so it's visible at a glance who's on the act's normal
+      // roster vs. added just for this show. Add/remove still submits a flat
+      // name list — the backend infers guest-add vs member-absent from the
+      // diff (sync_performance_personnel_from_names) — so every mutation here
+      // reloads the page rather than guessing the new resolved state locally.
+      const persistPersonnelNames = async (names) => {
+        try { await API.performances.update(perf.id, { members: names }); invalidateDims('artists') }
         catch (e) { alert('Failed: ' + e.message) }
+        reload()
       }
+
       function renderRecArtists() {
         const box = document.getElementById('rec-artists')
         if (!box) return
+        const personnel = perf.personnel || []
+        const sourceClass = p => p.source === 'guest' ? 'member-chip--guest'
+                            : p.source === 'explicit' ? 'member-chip--explicit' : ''
         box.innerHTML =
           `<span class="rec-artists-label">Artists</span>` +
-          recMembers.map((m, i) => `<span class="member-chip">${esc(m.name)} <span class="member-chip-x" data-i="${i}" title="Remove">×</span></span>`).join('') +
-          `<span class="artist-picker-wrap rec-art-add">
-             <input type="text" class="member-input rec-art-input" autocomplete="off" placeholder="Add an artist…" />
-             <div class="artist-dropdown" id="rec-art-dd" style="display:none"></div>
-           </span>`
+          personnel.map((p, i) => `
+            <span class="member-chip ${sourceClass(p)}">
+              <span class="member-chip-name rec-pill-name" data-i="${i}" title="${canEdit ? 'Click for instrument/note' : ''}">${esc(p.name)}</span>
+              ${canEdit ? `<span class="member-chip-x" data-i="${i}" title="Remove">×</span>` : ''}
+            </span>`).join('') +
+          (canEdit ? `
+            <span class="artist-picker-wrap rec-art-add">
+              <input type="text" class="member-input rec-art-input" autocomplete="off" placeholder="Add an artist…" />
+              <div class="artist-dropdown" id="rec-art-dd" style="display:none"></div>
+            </span>
+            <select class="rec-mode-select" id="rec-mode-select" title="Whether this show uses the act's normal roster, or a hand-picked lineup">
+              <option value="inherit"  ${perf.personnel_mode === 'inherit'  ? 'selected' : ''}>Inherit act roster</option>
+              <option value="explicit" ${perf.personnel_mode === 'explicit' ? 'selected' : ''}>Explicit — pick per show</option>
+            </select>` : '') +
+          `<div class="rec-personnel-detail" id="rec-personnel-detail" style="display:none"></div>`
+
+        if (!canEdit) return
+
         box.querySelectorAll('.member-chip-x').forEach(x =>
-          x.addEventListener('click', async () => { recMembers.splice(parseInt(x.dataset.i), 1); await persistMembers(); renderRecArtists() }))
+          x.addEventListener('click', async () => {
+            const names = personnel.filter((_, idx) => idx !== parseInt(x.dataset.i)).map(p => p.name)
+            await persistPersonnelNames(names)
+          }))
+
+        box.querySelectorAll('.rec-pill-name').forEach(el =>
+          el.addEventListener('click', () => renderPersonnelDetail(personnel[parseInt(el.dataset.i)])))
+
         const input = box.querySelector('.rec-art-input')
         wirePickerDropdown(input, document.getElementById('rec-art-dd'), API.artists.search,
           async ({ name }) => {
             name = (name || '').trim()
-            if (name && !recMembers.some(m => m.name.toLowerCase() === name.toLowerCase())) {
-              recMembers.push({ name }); await persistMembers()
+            if (name && !personnel.some(p => p.name.toLowerCase() === name.toLowerCase())) {
+              await persistPersonnelNames([...personnel.map(p => p.name), name])
             }
-            renderRecArtists()
           }, 'Create new artist')
+
+        document.getElementById('rec-mode-select')?.addEventListener('change', async e => {
+          try { await API.performances.update(perf.id, { personnel_mode: e.target.value }) }
+          catch (err) { alert('Failed: ' + err.message) }
+          reload()
+        })
       }
+
+      function renderPersonnelDetail(p) {
+        const box = document.getElementById('rec-personnel-detail')
+        if (!box) return
+        if (!p.id) {
+          // Purely inherited — no performance_personnel row of its own, so
+          // there's nothing here to attach an instrument/note to (that would
+          // mean converting them to an explicit entry first — not a plain
+          // metadata edit, not built in Phase 2).
+          box.style.display = ''
+          box.innerHTML = `<div class="rec-personnel-detail-inner">
+            <span class="pp-stint-always">${esc(p.name)} is from the act's roster — instrument/note only apply to guests or explicit-mode entries.</span>
+            <span class="pp-stint-editor-close" id="rec-pd-close" title="Close">×</span>
+          </div>`
+          document.getElementById('rec-pd-close').addEventListener('click', () => { box.style.display = 'none' })
+          return
+        }
+        box.style.display = ''
+        box.innerHTML = `<div class="rec-personnel-detail-inner">
+          <span class="pp-stint-editor-title">${esc(p.name)}</span>
+          <input type="text" class="pp-stint-input rec-pd-instrument" placeholder="Instrument (optional)" value="${esc(p.instrument || '')}" style="width:140px" />
+          <input type="text" class="pp-stint-input rec-pd-note" placeholder="Note (optional)" value="${esc(p.note || '')}" style="width:180px" />
+          <span class="pp-stint-editor-close" id="rec-pd-close" title="Close">×</span>
+        </div>`
+        const commit = async () => {
+          const instrument = box.querySelector('.rec-pd-instrument').value.trim() || null
+          const note       = box.querySelector('.rec-pd-note').value.trim() || null
+          p.instrument = instrument; p.note = note   // keep the closure's copy in sync until the next reload
+          try { await API.performances.updatePersonnelRow(perf.id, p.id, { instrument, note }) }
+          catch (e) { alert('Failed: ' + e.message) }
+        }
+        box.querySelector('.rec-pd-instrument').addEventListener('blur', commit)
+        box.querySelector('.rec-pd-note').addEventListener('blur', commit)
+        document.getElementById('rec-pd-close').addEventListener('click', () => { box.style.display = 'none' })
+      }
+
       renderRecArtists()
 
       // AI Assist (top-right) — research the web to verify/fill this recording.

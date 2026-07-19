@@ -1,8 +1,11 @@
 """
 api/performances.py — Performance endpoints.
 
-A Performance belongs to one Performer (the act). The performer's member Artists
-(people) are exposed as `members`.
+A Performance belongs to one Performer (the act). `members` (back-compat key)
+and `personnel` are the RESOLVED show-level lineup — act roster with stint
+bounds applied, plus guests, or an explicit per-show list — never the raw,
+unfiltered act roster. See app/utils/personnel.py::resolve_performance_personnel.
+The act roster itself is only ever edited via PUT /api/performers/<id>.
 """
 
 from flask import Blueprint, jsonify, request
@@ -11,9 +14,14 @@ from flask_login import login_required
 from app.extensions import db
 from app.models.performance import Performance
 from app.models.performer import Performer
+from app.models.performance_personnel import PerformancePersonnel
 from app.utils.format import format_partial_date
 from app.utils.serialize import recording_summary
-from app.utils.performers import resolve_or_create_performer, set_performer_members
+from app.utils.performers import resolve_or_create_performer
+from app.utils.personnel import (
+    resolve_performance_personnel, sync_performance_personnel_from_names,
+    set_performance_personnel_mode,
+)
 from app.utils.pruning import prune_performer_if_orphaned
 
 bp = Blueprint("performances", __name__)
@@ -53,11 +61,20 @@ def get_performance(performance_id):
         return jsonify({"error": "Not found"}), 404
 
     v = p.venue
+    resolved = resolve_performance_personnel(p)
     return jsonify({
         "id":           p.id,
         "performer_id": p.performer_id,
         "performer":    p.performer.name,
-        "members":      [{"id": a.id, "name": a.name} for a in p.performer.artists],
+        # Back-compat shape (id/name pairs) for the existing recording-page
+        # Artists pill row — now the RESOLVED show lineup (act roster with
+        # stint bounds applied, plus guests, or the explicit list), not the
+        # raw act roster. Existing UI needs zero changes to pick this up.
+        "members":         [{"id": r["artist_id"], "name": r["name"]} for r in resolved],
+        # Full detail incl. instrument/is_guest/note/source/row-id, for the
+        # Phase 2 show-personnel UI.
+        "personnel":       resolved,
+        "personnel_mode":  p.personnel_mode,
         "title":        p.title,
         "stage":        p.stage,
         "start_year":   p.start_year,
@@ -84,6 +101,9 @@ def create_performance():
     data = request.get_json()
     if not data.get("performer_id"):
         return jsonify({"error": "performer_id is required"}), 400
+    performer = db.session.get(Performer, data["performer_id"])
+    if not performer:
+        return jsonify({"error": "performer not found"}), 404
     p = Performance(
         performer_id = data["performer_id"],
         venue_id     = data.get("venue_id"),
@@ -100,6 +120,8 @@ def create_performance():
         state        = data.get("state"),
         country      = data.get("country"),
         notes        = data.get("notes"),
+        # New performances start in the act's default resolution mode.
+        personnel_mode = performer.default_personnel_mode,
     )
     db.session.add(p)
     db.session.commit()
@@ -127,9 +149,24 @@ def update_performance(performance_id):
         prune_performer_if_orphaned(old_performer_id)
         reassigned = performer.name
 
-    # Update the performer's roster if members supplied (global to the act).
+    # Manual inherit/explicit toggle — applied BEFORE the members diff below,
+    # so a same-request combo of {personnel_mode, members} lands on the new
+    # mode's baseline (e.g. flip to explicit, which snapshots the current
+    # lineup, then edit from there) rather than the old mode's.
+    if data.get("personnel_mode") is not None:
+        if data["personnel_mode"] not in ("inherit", "explicit"):
+            return jsonify({"error": "personnel_mode must be 'inherit' or 'explicit'"}), 400
+        set_performance_personnel_mode(p, data["personnel_mode"])
+
+    # SHOW-level personnel — who played THIS performance. Distinct from the
+    # act roster (which is edited only via PUT /api/performers/<id> on the
+    # Performer page). This used to call set_performer_members(p.performer,
+    # ...), silently rewriting the act's GLOBAL roster from a single show's
+    # pill-row edit — that was the actual bug the Per-Show Personnel design
+    # doc set out to fix. Now it only ever touches performance_personnel
+    # rows scoped to this performance; see utils/personnel.py.
     if data.get("members") is not None:
-        set_performer_members(p.performer, data["members"])
+        sync_performance_personnel_from_names(p, data["members"])
 
     for f in ["title", "stage", "start_year", "start_month", "start_day",
               "end_year", "end_month", "end_day", "venue_id", "event_id",
@@ -138,3 +175,24 @@ def update_performance(performance_id):
             setattr(p, f, data[f])
     db.session.commit()
     return jsonify({"id": p.id, "reassigned_to": reassigned})
+
+
+@bp.route("/<int:performance_id>/personnel/<int:personnel_id>", methods=["PUT"])
+@login_required
+def update_personnel_row(performance_id, personnel_id):
+    """
+    Edit instrument/note on one show-level personnel row. Only applies to
+    guest/explicit-sourced rows (the ones that actually have a
+    performance_personnel row of their own) — a purely inherited person has
+    no row here to edit; adding an instrument for them would first mean
+    adding them as an explicit entry, not a plain metadata edit.
+    """
+    row = db.session.get(PerformancePersonnel, personnel_id)
+    if not row or row.performance_id != performance_id:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json() or {}
+    for f in ["instrument", "note"]:
+        if f in data:
+            setattr(row, f, data[f])
+    db.session.commit()
+    return jsonify({"id": row.id})

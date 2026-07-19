@@ -6,6 +6,7 @@ from .artist import Artist, Membership
 from .venue import Venue
 from .event import Event
 from .performance import Performance
+from .performance_personnel import PerformancePersonnel
 from .recording import Recording, RecordingFingerprint
 from .collection import Collection, CollectionRecording
 from .peer import Peer, CollectionGrant, PeerInvite, PeerToken, PeerAccessLog

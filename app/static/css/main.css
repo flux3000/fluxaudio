@@ -467,7 +467,34 @@ body {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--t2); margin-bottom: 7px;
 }
+.pp-artists-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pp-mode-select {
+  font-size: 11px; padding: 2px 6px; margin-bottom: 6px;
+  background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--t2);
+  border-radius: var(--r-sm); cursor: pointer;
+}
 .pp-artists { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* Per-person stint editor drawer (click a member chip's name to open) */
+.pp-stint-editor {
+  margin-top: 10px; padding: 10px 12px;
+  background: var(--bg-2); border: 1px solid var(--bd-1); border-radius: var(--r-sm);
+}
+.pp-stint-editor-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.pp-stint-editor-title { font-size: 12px; color: var(--t1); }
+.pp-stint-editor-close { color: var(--t2); cursor: pointer; font-size: 15px; line-height: 1; }
+.pp-stint-editor-close:hover { color: var(--red); }
+.pp-stint-rows { display: flex; flex-direction: column; gap: 6px; }
+.pp-stint-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.pp-stint-always { font-size: 11px; color: var(--t3); font-style: italic; margin-right: 6px; width: 100%; }
+.pp-stint-input {
+  font-size: 12px; padding: 3px 6px;
+  background: var(--bg-1); border: 1px solid var(--bd-1); color: var(--t0); border-radius: var(--r-sm);
+}
+.pp-stint-dash { color: var(--t3); }
+.pp-stint-del { color: var(--t2); cursor: pointer; font-size: 14px; line-height: 1; margin-left: 4px; }
+.pp-stint-del:hover { color: var(--red); }
+.pp-stint-add-btn { margin-top: 8px; }
 
 /* Performer reference resources (external DBs / discographies) */
 .pp-resources { display: flex; flex-direction: column; gap: 3px; }
@@ -508,6 +535,15 @@ body {
 }
 .pp-group-head a { color: var(--t1); text-decoration: none; }
 .pp-group-head a:hover { color: var(--accent); }
+.pp-section-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--t3); margin: 20px 28px 0; padding-top: 12px; border-top: 1px solid var(--bd-0);
+}
+.pp-guest-tag {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 400;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 8px; padding: 1px 6px;
+  vertical-align: middle;
+}
 
 /* The in-place editor input/textarea */
 .pp-inline-input {
@@ -949,6 +985,16 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .rec-art-input {
   font-size: 11px; padding: 2px 6px; width: 130px;
   background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--t0); border-radius: var(--r-sm);
+}
+.rec-mode-select {
+  font-size: 10px; padding: 2px 5px; margin-left: 6px;
+  background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--t2);
+  border-radius: var(--r-sm); cursor: pointer;
+}
+.rec-personnel-detail { flex-basis: 100%; margin-top: 4px; }
+.rec-personnel-detail-inner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; background: var(--bg-2); border: 1px solid var(--bd-1); border-radius: var(--r-sm);
 }
 .venue-result-loc { color: var(--t3); font-size: 11px; margin-left: 6px; }
 
@@ -2635,6 +2681,21 @@ input[type="range"].progress-bar {
 }
 .member-chip-x { color: var(--t2); cursor: pointer; font-size: 14px; line-height: 1; }
 .member-chip-x:hover { color: var(--red); }
+.member-chip-name { cursor: pointer; }
+.member-chip-name:hover { text-decoration: underline; }
+.member-chip--expanded { border-color: var(--accent); background: rgba(196,149,106,0.12); }
+
+/* Recording-page personnel pills: distinct tint per resolution source
+   (2026-07-18, Per-Show Personnel Phase 2). Inherited members keep the
+   plain .member-chip look — zero visual change for the 90% stable-band
+   case. Guest and explicit-mode entries get their own tint so it's obvious
+   at a glance why someone's listed. */
+.member-chip--guest    { background: rgba(196,149,106,0.14); border-color: var(--accent); }
+.member-chip--explicit { background: rgba(104,152,200,0.14); border-color: var(--blue); }
+.member-chip-source-tag {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--t2); margin-left: 2px;
+}
 
 /* ── Sidebar nav (all-caps top-level; expandable dimensions) ──────────────────── */
 

@@ -32,13 +32,37 @@ class Artist(db.Model):
 
 
 class Membership(db.Model):
-    """Links an Artist (person) to a Performer (act). Ordered many-to-many."""
+    """
+    Links an Artist (person) to a Performer (act). Ordered many-to-many.
+
+    A row is a STINT, not a lifetime tie — multiple rows are allowed for the
+    same (performer, artist) pair (e.g. Mickey Hart: Dead 1967-Feb1971, then
+    Oct1974-1995). A person is in the lineup for a show if ANY of their stints
+    covers that date (union of intervals). NULL bounds throughout = "always a
+    member," identical to pre-2026-07-18 behavior — every existing row is
+    unaffected by this column addition.
+
+    Bounds are nullable partial dates (y/m/d), same convention as Performance.
+    Comparison normalizes coarse dates permissively:
+      start -> earliest possible day (missing month/day -> 01/01)
+      end   -> latest possible day   (missing month/day -> 12/last-day-of-month)
+    See app/utils/personnel.py for the resolver that applies this rule.
+    """
     __tablename__ = "membership"
 
     id           = db.Column(db.Integer, primary_key=True)
     performer_id = db.Column(db.Integer, db.ForeignKey("performer.id"), nullable=False)
     artist_id    = db.Column(db.Integer, db.ForeignKey("artist.id"),    nullable=False)
     order        = db.Column(db.Integer, nullable=False, default=0)
+
+    # Stint bounds — nullable partial dates. NULL/NULL/NULL on both ends means
+    # "always a member" (the default for every pre-existing row).
+    start_year   = db.Column(db.Integer, nullable=True)
+    start_month  = db.Column(db.Integer, nullable=True)
+    start_day    = db.Column(db.Integer, nullable=True)
+    end_year     = db.Column(db.Integer, nullable=True)
+    end_month    = db.Column(db.Integer, nullable=True)
+    end_day      = db.Column(db.Integer, nullable=True)
 
     performer = db.relationship("Performer", back_populates="memberships")
     artist    = db.relationship("Artist",    back_populates="memberships")

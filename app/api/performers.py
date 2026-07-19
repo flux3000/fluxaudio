@@ -12,13 +12,45 @@ from sqlalchemy import func
 
 from app.extensions import db
 from app.models.performer import Performer, PerformerResource
-from app.models.artist import Artist
+from app.models.artist import Artist, Membership
 from app.models.performance import Performance
 from app.models.recording import Recording
 from app.utils.serialize import recording_summary
-from app.utils.performers import set_performer_members
+from app.utils.performers import (
+    set_performer_members, add_membership_stint,
+    update_membership_stint_bounds, remove_membership_stint,
+)
 
 bp = Blueprint("performers", __name__)
+
+
+def _serialize_roster(performer):
+    """
+    Member Artists deduped by person (see Performer.artists), each carrying
+    their stint row(s) — usually one unbounded row ('always a member'), but
+    possibly several for someone with real tenure gaps (Mickey Hart). Powers
+    the Performer page's stint editor.
+    """
+    by_artist = {}
+    for m in performer.memberships:   # already ordered by Membership.order
+        by_artist.setdefault(m.artist_id, []).append(m)
+    roster = []
+    for artist_id, stints in by_artist.items():
+        roster.append({
+            "id":   artist_id,
+            "name": stints[0].artist.name,
+            "stints": [
+                {
+                    "id": s.id,
+                    "start_year": s.start_year, "start_month": s.start_month,
+                    "start_day":  s.start_day,
+                    "end_year":   s.end_year,   "end_month":   s.end_month,
+                    "end_day":    s.end_day,
+                }
+                for s in sorted(stints, key=lambda s: s.order)
+            ],
+        })
+    return roster
 
 
 @bp.route("/search")
@@ -116,7 +148,11 @@ def get_performer(performer_id):
         "name":      p.name,
         "sort_name": p.sort_name,
         "bio":       p.bio,
-        "members":   [{"id": a.id, "name": a.name} for a in p.artists],
+        "default_personnel_mode": p.default_personnel_mode,
+        # Each entry still has {id, name} (existing frontend code reading
+        # just those two keys keeps working unchanged) plus a new `stints`
+        # list the Performer page's stint editor uses.
+        "members":   _serialize_roster(p),
         "resources": [{"id": r.id, "label": r.label, "url": r.url} for r in p.resources],
     })
 
@@ -185,7 +221,9 @@ def update_performer(performer_id):
     if not p:
         return jsonify({"error": "Not found"}), 404
     data = request.get_json()
-    for f in ["name", "sort_name", "bio"]:
+    if "default_personnel_mode" in data and data["default_personnel_mode"] not in ("inherit", "explicit"):
+        return jsonify({"error": "default_personnel_mode must be 'inherit' or 'explicit'"}), 400
+    for f in ["name", "sort_name", "bio", "default_personnel_mode"]:
         if f in data:
             setattr(p, f, data[f])
     if data.get("members") is not None:
@@ -194,6 +232,74 @@ def update_performer(performer_id):
         _set_resources(p, data["resources"])
     db.session.commit()
     return jsonify({"id": p.id})
+
+
+@bp.route("/<int:performer_id>/members/<int:artist_id>/stints", methods=["POST"])
+@login_required
+def add_stint(performer_id, artist_id):
+    """
+    Add a NEW stint for an existing member — how a second tenure (Mickey
+    Hart's post-1974 return) gets recorded without touching the first. Does
+    NOT create the membership from scratch if none exists yet; use the
+    plain roster (PUT .../members) to add someone for the first time.
+    """
+    performer = db.session.get(Performer, performer_id)
+    if not performer:
+        return jsonify({"error": "Performer not found"}), 404
+    artist = db.session.get(Artist, artist_id)
+    if not artist:
+        return jsonify({"error": "Artist not found"}), 404
+    data = request.get_json() or {}
+    m = add_membership_stint(
+        performer, artist.name,
+        start_year=data.get("start_year"), start_month=data.get("start_month"),
+        start_day=data.get("start_day"),
+        end_year=data.get("end_year"), end_month=data.get("end_month"),
+        end_day=data.get("end_day"),
+    )
+    db.session.commit()
+    return jsonify({"id": m.id}), 201
+
+
+@bp.route("/stints/<int:stint_id>", methods=["PUT"])
+@login_required
+def update_stint(stint_id):
+    """Edit one stint's date bounds. Does not affect a person's other stints."""
+    data = request.get_json() or {}
+    m = update_membership_stint_bounds(
+        stint_id,
+        start_year=data.get("start_year"), start_month=data.get("start_month"),
+        start_day=data.get("start_day"),
+        end_year=data.get("end_year"), end_month=data.get("end_month"),
+        end_day=data.get("end_day"),
+    )
+    if not m:
+        return jsonify({"error": "Not found"}), 404
+    db.session.commit()
+    return jsonify({"id": m.id})
+
+
+@bp.route("/stints/<int:stint_id>", methods=["DELETE"])
+@login_required
+def delete_stint(stint_id):
+    """
+    Remove one stint row. Refuses if it's the member's ONLY stint — dropping
+    someone to zero stints via a raw delete here would leave them dangling
+    in a different way than the roster-remove path (set_performer_members'
+    drop-a-name flow, which goes through its own orphan/prune-safe logic).
+    To remove someone entirely, drop them from the plain roster instead.
+    """
+    m = db.session.get(Membership, stint_id)
+    if not m:
+        return jsonify({"error": "Not found"}), 404
+    remaining = db.session.query(Membership).filter_by(
+        performer_id=m.performer_id, artist_id=m.artist_id).count()
+    if remaining <= 1:
+        return jsonify({"error": "This is the member's only stint — remove them from "
+                                 "the roster instead of deleting their last stint."}), 409
+    remove_membership_stint(stint_id)
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 def _set_resources(performer, resources):

@@ -28,11 +28,40 @@ def resolve_or_create_artist(name):
     return a
 
 
+def _is_unbounded(membership):
+    """True if a stint row has no date bounds at all ('always a member')."""
+    return not any([
+        membership.start_year, membership.start_month, membership.start_day,
+        membership.end_year, membership.end_month, membership.end_day,
+    ])
+
+
 def set_performer_members(performer, member_names):
     """
-    Replace a performer's membership with the given ordered artist names
-    (resolve/create each person). An empty list clears all members — a Performer
-    with zero Artists is valid.
+    Sync a performer's roster to the given ordered list of names — the plain
+    "list of names" editing path (Performer page, ingest). Covers the 90% case
+    with no stint dates involved; see Per-Show Personnel design doc §7.6.
+
+    STINT-SAFE (2026-07-18 rewrite): the old version deleted and recreated the
+    whole roster on every call, which would silently destroy stint date bounds
+    (e.g. Mickey Hart's two Membership rows — 1967-71 and 1974-95 — would
+    collapse into one row and both sets of dates would vanish). Instead:
+
+      - a name already linked to this performer keeps ALL of its existing
+        stint row(s) untouched; only its `order` moves to the new position
+        (order is a per-PERSON concept — the earliest stint's row carries it,
+        per the design doc's dedupe rule)
+      - a brand-new name gets one fresh unbounded stint row (NULL bounds =
+        "always a member," identical to pre-personnel behavior)
+      - a name dropped from the list is deleted ONLY if it has exactly one
+        stint row and that row is fully unbounded (nothing to lose). A person
+        with real stint history (dated bounds, or more than one stint) is
+        left in place rather than silently destroyed. To actually end
+        someone's tenure, put an end date on their stint — don't just drop
+        them from this list.
+
+    An empty list clears every member with no stint history — a Performer
+    with zero Artists is still valid.
     """
     names, seen = [], set()
     for n in (member_names or []):
@@ -41,13 +70,77 @@ def set_performer_members(performer, member_names):
             seen.add(n.lower())
             names.append(n)
 
-    db.session.query(Membership).filter_by(performer_id=performer.id).delete(
-        synchronize_session=False)
+    existing = db.session.query(Membership).filter_by(performer_id=performer.id).all()
+    by_artist_id = {}
+    for m in existing:
+        by_artist_id.setdefault(m.artist_id, []).append(m)
+
+    kept_artist_ids = set()
+    for i, name in enumerate(names):
+        artist = resolve_or_create_artist(name)
+        kept_artist_ids.add(artist.id)
+        stints = by_artist_id.get(artist.id)
+        if stints:
+            earliest = min(stints, key=lambda m: m.order)
+            earliest.order = i
+        else:
+            db.session.add(Membership(performer_id=performer.id, artist_id=artist.id, order=i))
+
+    for artist_id, stints in by_artist_id.items():
+        if artist_id in kept_artist_ids:
+            continue
+        if len(stints) == 1 and _is_unbounded(stints[0]):
+            db.session.delete(stints[0])
+        # else: real stint history on a now-dropped name — leave it in place.
+
     db.session.flush()
-    for i, mn in enumerate(names):
-        artist = resolve_or_create_artist(mn)
-        db.session.add(Membership(performer_id=performer.id, artist_id=artist.id, order=i))
+
+
+def add_membership_stint(performer, artist_name, order=None,
+                          start_year=None, start_month=None, start_day=None,
+                          end_year=None, end_month=None, end_day=None):
+    """
+    Add a NEW stint row linking `artist_name` to `performer`. Does not touch
+    any existing stint(s) already on record for that person — this is how a
+    second stint (e.g. Mickey Hart's post-1974 return) gets recorded without
+    disturbing the first. `order` defaults to after the current max.
+    """
+    artist = resolve_or_create_artist(artist_name)
+    if order is None:
+        max_order = db.session.query(func.max(Membership.order)).filter_by(
+            performer_id=performer.id).scalar()
+        order = (max_order + 1) if max_order is not None else 0
+    m = Membership(
+        performer_id=performer.id, artist_id=artist.id, order=order,
+        start_year=start_year, start_month=start_month, start_day=start_day,
+        end_year=end_year, end_month=end_month, end_day=end_day,
+    )
+    db.session.add(m)
     db.session.flush()
+    return m
+
+
+def update_membership_stint_bounds(membership_id, start_year=None, start_month=None,
+                                    start_day=None, end_year=None, end_month=None,
+                                    end_day=None):
+    """Edit one stint's date bounds in place. Does not affect a person's other stints."""
+    m = db.session.get(Membership, membership_id)
+    if not m:
+        return None
+    m.start_year, m.start_month, m.start_day = start_year, start_month, start_day
+    m.end_year, m.end_month, m.end_day = end_year, end_month, end_day
+    db.session.flush()
+    return m
+
+
+def remove_membership_stint(membership_id):
+    """Delete exactly one stint row — not the whole person's membership history."""
+    m = db.session.get(Membership, membership_id)
+    if not m:
+        return False
+    db.session.delete(m)
+    db.session.flush()
+    return True
 
 
 def resolve_or_create_performer(name, member_names=None):

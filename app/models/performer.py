@@ -23,6 +23,14 @@ class Performer(db.Model):
     name       = db.Column(db.String(255), nullable=False)   # billed act name
     sort_name  = db.Column(db.String(255), nullable=True)
     bio        = db.Column(db.Text,        nullable=True)
+
+    # Personnel resolution mode new Performances of this act start in.
+    # 'inherit' (default) = act roster/stints apply; 'explicit' = every show
+    # starts with an empty lineup that must be entered per-show (rotating
+    # billings like "Acoustic All-Stars" set this once and never fight the
+    # default again). See app/utils/personnel.py.
+    default_personnel_mode = db.Column(db.String(16), nullable=False, default="inherit")
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
                            onupdate=lambda: datetime.now(timezone.utc))
@@ -39,8 +47,17 @@ class Performer(db.Model):
 
     @property
     def artists(self):
-        """Member Artists (people) in billing order."""
-        return [m.artist for m in self.memberships]
+        """
+        Member Artists (people) in billing order — each person appears once,
+        even if they have multiple Membership STINTS (e.g. Mickey Hart's two
+        Dead tenures). `memberships` is already ordered by Membership.order,
+        so taking the first occurrence per artist naturally applies the
+        design doc's "dedupe by artist, earliest stint wins the order" rule.
+        """
+        seen = {}
+        for m in self.memberships:
+            seen.setdefault(m.artist_id, m.artist)
+        return list(seen.values())
 
     def __repr__(self):
         return f"<Performer {self.name}>"

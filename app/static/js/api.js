@@ -67,6 +67,9 @@ const API = (() => {
       create:        (data)      => post('/api/performers/', data),
       update:        (id, data)  => put(`/api/performers/${id}`, data),
       remove:        (id)        => request('DELETE', `/api/performers/${id}`),
+      addStint:      (id, artistId, data) => post(`/api/performers/${id}/members/${artistId}/stints`, data),
+      updateStint:   (stintId, data)      => put(`/api/performers/stints/${stintId}`, data),
+      removeStint:   (stintId)            => request('DELETE', `/api/performers/stints/${stintId}`),
     },
 
     // ── Performances ─────────────────────────────────────────────────────────
@@ -74,6 +77,8 @@ const API = (() => {
       get:    (id)       => get(`/api/performances/${id}`),
       create: (data)     => post('/api/performances/', data),
       update: (id, data) => put(`/api/performances/${id}`, data),
+      updatePersonnelRow: (perfId, personnelId, data) =>
+        put(`/api/performances/${perfId}/personnel/${personnelId}`, data),
     },
 
     // ── Recordings ───────────────────────────────────────────────────────────
