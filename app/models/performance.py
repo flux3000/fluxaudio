@@ -36,7 +36,8 @@ class Performance(db.Model):
     # entirely (rotating billings where the act roster is just a pick-list,
     # e.g. Acoustic All-Stars). Defaults from performer.default_personnel_mode
     # at creation. See app/utils/personnel.py::resolve_performance_personnel.
-    personnel_mode = db.Column(db.String(16), nullable=False, default="inherit")
+    personnel_mode = db.Column(db.String(16), nullable=False, default="inherit",
+                               server_default="inherit")
 
     # Date range — nullable integers support partial and multi-day dates
     start_year  = db.Column(db.Integer, nullable=True)

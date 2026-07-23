@@ -125,6 +125,7 @@ def test_prune_after_delete_removes_full_chain(app, db, seeded_ids):
 def test_prune_keeps_person_who_is_in_another_act(app, db, seeded_ids):
     performer_id = seeded_ids["performer_id"]
     artist_id    = seeded_ids["artist_id"]
+    rec_id       = seeded_ids["recording_id"]
 
     # Put the same person in a second performer, so they survive the prune.
     other = Performer(name="Bill Evans Trio")
@@ -133,6 +134,16 @@ def test_prune_keeps_person_who_is_in_another_act(app, db, seeded_ids):
     db.session.flush()
 
     # Orphan the original performer (remove its performance) and prune it.
+    # Must clear the seeded Recording/Track chain first (as delete_recording's
+    # real cleanup does) — with FK enforcement on, bulk-deleting Performance
+    # while a Recording still references it violates the FK.
+    track_ids = [t.id for t in Track.query.filter_by(recording_id=rec_id).all()]
+    db.session.query(TrackAnalysis).filter(TrackAnalysis.track_id.in_(track_ids)).delete(
+        synchronize_session=False)
+    db.session.query(PlayLog).filter(PlayLog.track_id.in_(track_ids)).delete(
+        synchronize_session=False)
+    db.session.query(Track).filter(Track.id.in_(track_ids)).delete(synchronize_session=False)
+    db.session.query(Recording).filter_by(id=rec_id).delete(synchronize_session=False)
     db.session.query(Performance).filter_by(performer_id=performer_id).delete(
         synchronize_session=False)
     db.session.flush()
