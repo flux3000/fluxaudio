@@ -70,6 +70,29 @@ const API = (() => {
       addStint:      (id, artistId, data) => post(`/api/performers/${id}/members/${artistId}/stints`, data),
       updateStint:   (stintId, data)      => put(`/api/performers/stints/${stintId}`, data),
       removeStint:   (stintId)            => request('DELETE', `/api/performers/stints/${stintId}`),
+
+      // Profile picture (2026-07-22) — a raw upload, not JSON, so it bypasses
+      // request()'s JSON.stringify/Content-Type: letting the browser set its
+      // own multipart boundary is required for a file upload to parse
+      // server-side. imageUrl() is a plain URL string for an <img src>, not a
+      // fetch call — the browser requests it directly (same-origin session
+      // cookie covers the @login_required check, same as the waveform/
+      // spectrogram images already do).
+      imageUrl: (id) => `/api/performers/${id}/image?t=${Date.now()}`,   // cache-bust on re-upload
+      uploadImage: async (id, file) => {
+        const form = new FormData()
+        form.append('image', file)
+        const res = await fetch(`/api/performers/${id}/image`, { method: 'POST', body: form, credentials: 'same-origin' })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        return data
+      },
+      removeImage: (id) => request('DELETE', `/api/performers/${id}/image`),
+
+      // Dossier — AI-drafted bio + suggested resource links, background job
+      // (same shape as API.ingest.aiAssist*).
+      startDossier:   (id)         => post(`/api/performers/${id}/dossier`),
+      dossierStatus:  (id, jobId)  => get(`/api/performers/${id}/dossier/${jobId}`),
     },
 
     // ── Performances ─────────────────────────────────────────────────────────

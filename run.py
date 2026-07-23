@@ -55,12 +55,24 @@ class FluxAPI:
 
 
 def start_flask():
-    """Run Flask in a background thread so PyWebView owns the main thread."""
+    """
+    Run Flask in a background thread so PyWebView owns the main thread.
+
+    threaded=True (2026-07-19): the dev server otherwise handles ONE request
+    at a time — a single slow request (a Batch Import "Review" scan hitting
+    a slow NAS read, for example) blocks the ENTIRE app, including unrelated
+    UI actions and even the debug panel's own polling. That's what made a
+    stuck scan look like "the whole app died" rather than "one request is
+    slow" — and why "New Scan" never helped: the retry just queued up behind
+    the same stuck worker. config.py already sets check_same_thread=False on
+    the SQLite connection specifically to support this.
+    """
     app.run(
         host         = Config.HOST,
         port         = Config.PORT,
         debug        = False,       # must be False under PyWebView
         use_reloader = False,
+        threaded     = True,
     )
 
 

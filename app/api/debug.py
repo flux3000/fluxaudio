@@ -3,20 +3,25 @@ api/debug.py — Debug endpoints. DEV_MODE only.
 
 Routes:
   POST /api/debug/log   receive a JS log entry (in-memory buffer)
-  GET  /api/debug/live  current in-memory log (polled by pop-out)
+  GET  /api/debug/live  current in-memory log (polled by pop-out AND the
+                        in-app panel's Live Server Activity section)
   GET  /api/debug/info  general app state
+
+The in-memory buffer itself lives in app/utils/debug_log.py (2026-07-19) so
+server-side pipelines (scan_folder, read_flac_tags, parse_info_file, Paula
+scoring) can push "step" checkpoints into it directly via log_step(), not
+just receive entries forwarded from the JS fetch wrapper after the fact —
+see that module's docstring for why (a stuck Batch Import scan was
+completely invisible before this).
 
 (The on-disk FLAC tag viewer moved to the always-on "File Tags" pane:
  GET /api/recordings/<id>/tags.)
 """
 
-from collections import deque
 from flask import Blueprint, jsonify, request, current_app, abort
 from flask_login import login_required, current_user
 
-# In-memory circular log shared across requests (process-scoped, not thread-safe
-# but fine for single-dev DEV_MODE use)
-_dbg_log = deque(maxlen=200)
+from app.utils.debug_log import log_entry, all_entries
 
 from app.extensions import db
 from app.models.recording import Recording
@@ -38,18 +43,19 @@ def debug_log():
     """Receive a log entry from the JS layer and append to the in-memory buffer."""
     _require_dev()
     entry = request.get_json(silent=True) or {}
-    _dbg_log.appendleft(entry)
+    log_entry(entry)
     return '', 204
 
 
-# ── GET /api/debug/live — polled by the pop-out browser window ────────────────
+# ── GET /api/debug/live — polled by the pop-out browser window AND the ───────
+# in-app panel (while open) for live server-side step checkpoints.
 
 @bp.route("/live")
 @login_required
 def debug_live():
-    """Return the full in-memory log as JSON for the pop-out debug page."""
+    """Return the full in-memory log as JSON."""
     _require_dev()
-    return jsonify(list(_dbg_log))
+    return jsonify(all_entries())
 
 
 # ── GET /api/debug/info ───────────────────────────────────────────────────────

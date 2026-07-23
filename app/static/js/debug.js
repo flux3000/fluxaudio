@@ -14,32 +14,50 @@
 ;(async function initDebug() {
 
   // ── API call log — wrap fetch FIRST so we catch everything ──────────────────
+  // 2026-07-19: entries are now logged as PENDING the moment a fetch starts,
+  // not only after it resolves — a request that's still in flight (a stuck
+  // Batch Import "Review" scan, say) used to be completely invisible here;
+  // now it shows up immediately with a live elapsed-time ticker until it
+  // finishes or errors. Complements the server-side step log below (Live
+  // Server Activity) which shows WHERE inside the request things are stuck.
   const MAX_LOG  = 50
   const MAX_ERR  = 20
   const apiLog   = []
   const errorLog = []
   const _origFetch = window.fetch
+  let _pendingTicker = null
+
+  function _startPendingTicker() {
+    if (_pendingTicker) return
+    _pendingTicker = setInterval(() => {
+      if (!apiLog.some(e => e.status === '…')) { clearInterval(_pendingTicker); _pendingTicker = null; return }
+      _refreshLog()
+    }, 1000)
+  }
 
   window.fetch = async function(input, init) {
     const url    = typeof input === 'string' ? input : input.url
     const method = (init?.method || 'GET').toUpperCase()
     const t0     = performance.now()
 
+    const entry = { kind: 'api', method, url, status: '…', ms: null, ts: new Date(), _t0: t0 }
+    apiLog.unshift(entry)
+    if (apiLog.length > MAX_LOG) apiLog.pop()
+    _refreshLog()
+    _startPendingTicker()
+
     try {
       const res = await _origFetch(input, init)
-      const ms  = Math.round(performance.now() - t0)
-      const entry = { kind: 'api', method, url, status: res.status, ms, ts: new Date() }
-      apiLog.unshift(entry)
-      if (apiLog.length > MAX_LOG) apiLog.pop()
+      entry.status = res.status
+      entry.ms     = Math.round(performance.now() - t0)
       _broadcast({ type: 'api', entry })
       _sendToServer(entry)
       _refreshLog()
       return res
     } catch (err) {
-      const ms = Math.round(performance.now() - t0)
-      const entry = { kind: 'api', method, url, status: 'ERR', ms, ts: new Date(), err: err.message }
-      apiLog.unshift(entry)
-      if (apiLog.length > MAX_LOG) apiLog.pop()
+      entry.status = 'ERR'
+      entry.ms     = Math.round(performance.now() - t0)
+      entry.err    = err.message
       _broadcast({ type: 'api', entry })
       _sendToServer(entry)
       _refreshLog()
@@ -149,6 +167,15 @@
           <button class="dbg-btn dbg-btn-sm" id="dbg-btn-clear-log">Clear</button>
         </div>
         <div id="dbg-log-content" class="dbg-log-list"></div>
+      </div>
+    </div>
+
+    <div class="dbg-section">
+      <div class="dbg-section-head" data-target="dbg-steps">
+        Live Server Activity ▾ <span class="dbg-hint" style="font-weight:400; text-transform:none; letter-spacing:normal">— checkpoints logged from inside slow pipelines (scan, batch-scan); shows where a hang is actually stuck</span>
+      </div>
+      <div class="dbg-section-body" id="dbg-steps">
+        <div id="dbg-steps-content" class="dbg-log-list"></div>
       </div>
     </div>
 
@@ -310,14 +337,20 @@
     const el = document.getElementById('dbg-log-content')
     if (!el || panel.style.display === 'none') return
     el.innerHTML = apiLog.map(e => {
-      const isErr = e.status === 'ERR' || (typeof e.status === 'number' && e.status >= 400)
-      const cls   = isErr ? 'dbg-log-err' : e.status === '…' ? 'dbg-log-pending' : ''
+      const isErr     = e.status === 'ERR' || (typeof e.status === 'number' && e.status >= 400)
+      const isPending = e.status === '…'
+      const elapsed   = isPending ? Math.round((performance.now() - e._t0) / 1000) : null
+      // A pending request past 8s gets flagged the same way a stuck server
+      // step does — long enough to rule out normal request latency.
+      const stale = isPending && elapsed >= 8
+      const cls   = isErr ? 'dbg-log-err' : stale ? 'dbg-log-stale' : isPending ? 'dbg-log-pending' : ''
       const t     = e.ts.toLocaleTimeString('en-US', { hour12: false })
+      const msLabel = isPending ? `${elapsed}s…` : `${e.ms}ms`
       return `<div class="dbg-log-row ${cls}">
         <span class="dbg-log-method">${e.method}</span>
         <span class="dbg-log-status">${e.status}</span>
         <span class="dbg-log-url">${esc(e.url)}</span>
-        <span class="dbg-log-ms">${e.ms}ms</span>
+        <span class="dbg-log-ms">${msLabel}</span>
         <span class="dbg-log-ts">${t}</span>
       </div>`
     }).join('') || '<div class="dbg-hint">No calls yet</div>'
@@ -327,6 +360,61 @@
     apiLog.length = 0
     _refreshLog()
   })
+
+  // ── Live Server Activity — polls /api/debug/live for server-originated ──────
+  // "step" checkpoints (2026-07-19, see utils/debug_log.py::log_step). Only
+  // polls while the panel is open. Requires threaded Flask (run.py) — a
+  // single-threaded server blocked on the very request being investigated
+  // can't answer this poll either, which is the whole reason that fix came
+  // first. Jobs (grouped by folder path / batch id) whose latest step isn't
+  // "done" and hasn't updated in a while are flagged stale — that's the
+  // actual "where is it stuck" answer for a hung Batch Import scan.
+  const MAX_STEPS       = 150
+  const STALE_AFTER_SEC = 5
+  let liveSteps         = []
+  let _stepsPollTimer   = null
+
+  function _refreshSteps() {
+    const el = document.getElementById('dbg-steps-content')
+    if (!el || panel.style.display === 'none') return
+    if (!liveSteps.length) { el.innerHTML = '<div class="dbg-hint">No server activity logged yet</div>'; return }
+
+    const nowSec = Date.now() / 1000
+    const seenJob = new Set()
+    el.innerHTML = liveSteps.map(s => {
+      const isLatestForJob = !seenJob.has(s.job)
+      seenJob.add(s.job)
+      const age   = nowSec - s.ts
+      const stale = isLatestForJob && s.stage !== 'done' && age > STALE_AFTER_SEC
+      const t     = new Date(s.ts * 1000).toLocaleTimeString('en-US', { hour12: false })
+      return `<div class="dbg-log-row ${stale ? 'dbg-log-stale' : ''}">
+        <span class="dbg-log-method" style="min-width:0">${esc(s.stage || '')}</span>
+        <span class="dbg-log-status" style="min-width:0"></span>
+        <span class="dbg-log-url">${esc(s.job || '')}${s.detail ? ' — ' + esc(s.detail) : ''}</span>
+        <span class="dbg-log-ms">${stale ? `${Math.round(age)}s ago` : ''}</span>
+        <span class="dbg-log-ts">${t}</span>
+      </div>`
+    }).join('')
+  }
+
+  async function _pollSteps() {
+    try {
+      const r = await _origFetch('/api/debug/live', { credentials: 'same-origin' })
+      if (!r.ok) return
+      const all = await r.json()
+      liveSteps = all.filter(e => e.kind === 'step').slice(0, MAX_STEPS)
+      _refreshSteps()
+    } catch {}
+  }
+
+  function _startStepsPolling() {
+    if (_stepsPollTimer) return
+    _pollSteps()
+    _stepsPollTimer = setInterval(_pollSteps, 750)
+  }
+  function _stopStepsPolling() {
+    clearInterval(_stepsPollTimer); _stepsPollTimer = null
+  }
 
   // ── Pop-out window ───────────────────────────────────────────────────────────
   function popOut() {
@@ -348,8 +436,9 @@
   function show() {
     panel.style.display = ''
     refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors(); _refreshPaula()
+    _startStepsPolling()
   }
-  function hide()   { panel.style.display = 'none' }
+  function hide()   { panel.style.display = 'none'; _stopStepsPolling() }
   function toggle() { panel.style.display === 'none' ? show() : hide() }
   function refresh() {
     refreshState(); refreshInfoCounts(); _refreshLog(); _refreshErrors(); _refreshPaula()

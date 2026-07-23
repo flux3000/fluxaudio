@@ -159,12 +159,16 @@ def scan_recording():
     (kept DB-free/pure, same as compute_health()). Scoped to the interactive
     Add Recording flow only for now — batch-scan is untouched.
     """
+    from app.utils.debug_log import log_step
+
     data        = request.get_json()
     folder_path = data.get("folder_path", "").strip()
+    job         = f"scan:{folder_path}"
 
     if not folder_path or not os.path.isdir(folder_path):
         return jsonify({"error": "Invalid or inaccessible folder path"}), 400
 
+    log_step(job, "request received", "POST /api/recordings/scan")
     resp = build_scan_payload(folder_path)
     if resp is None:
         return jsonify({"error": "No audio files found in folder"}), 422
@@ -174,7 +178,10 @@ def scan_recording():
         {"name": v.name, "city": v.city, "state": v.state, "country": v.country}
         for v in Venue.query.all()
     ]
+    log_step(job, "queried known performers/venues",
+             f"{len(known_performers)} performers, {len(known_venues)} venues")
     resp["paula"] = compute_paula_score(resp, known_performers, known_venues)
+    log_step(job, "response ready", "Paula scoring done")
 
     return jsonify(resp)
 

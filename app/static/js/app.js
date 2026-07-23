@@ -18,6 +18,25 @@ const App = (() => {
     currentRecId:    null,   // recording id currently in detail view
     playingTrackId:  null,   // track id currently in player
     skipNonMusic:    false,  // filter announcements/banter/tuning from queue
+    // Generic "where did I come from" navigation tracking (2026-07-23),
+    // replacing three earlier ad hoc mechanisms (a selectedArtist-based
+    // back-link that only worked one hop, a one-shot recFrom that only
+    // covered Recording→Performer/Venue, and several hardcoded '#/'
+    // fallbacks) — see route() for how these are kept in sync, and the
+    // 2026-07-23 project memory entry for the bug this fixed (Recently
+    // Added → Recording → Back landed on Library instead of Recently Added).
+    //   navCurrent — { hash, label } for the page ON SCREEN right now, set
+    //     by that page's own render function once its label is known
+    //     (setNavCurrent()). A same-page reload (direct render*View() call,
+    //     not a hash change) just re-sets this to the same value — harmless.
+    //   navBack — { hash, label } | null, the page that was on screen
+    //     immediately before the CURRENT one. This is what every "← Back"
+    //     link in the app should point to. Snapshotted from navCurrent by
+    //     route() itself, and ONLY on a genuine hash change — never on the
+    //     first-ever dispatch (nothing preceded it) or a same-hash
+    //     re-dispatch (a reload must never overwrite the real back target).
+    navCurrent:      null,
+    navBack:         null,
   }
 
   // ── Track flag registry — single source of truth ─────────────────────────
@@ -166,6 +185,25 @@ const App = (() => {
   const userAvatar  = document.getElementById('user-avatar')
   const userName    = document.getElementById('user-name')
 
+  // ── Kill native spellcheck/autocorrect on text inputs ─────────────────────
+  // This app runs inside PyWebView's underlying WKWebView, which applies
+  // macOS's own spellcheck/text-replacement to any unmarked text input — pops
+  // an unwanted correction bubble while typing artist/venue/person names
+  // (proper nouns trip it constantly; Ryan, 2026-07-23, typing "Ricky
+  // Simpkins" got auto-"corrected" toward "Simpkin's"). Delegated on focusin
+  // at the document level rather than patched into every input's template —
+  // most of these inputs (add-picker rows, inline edits) are created well
+  // after their page's own setMainHTML() call, so a one-time sweep wouldn't
+  // reach them; this catches every text input, present and future.
+  document.addEventListener('focusin', e => {
+    const el = e.target
+    if (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'search')) {
+      el.spellcheck = false
+      el.setAttribute('autocorrect', 'off')
+      el.setAttribute('autocapitalize', 'off')
+    }
+  })
+
   // ── Theme toggle ───────────────────────────────────────────────────────────
   ;(function () {
     const btn = document.getElementById('theme-btn')
@@ -223,6 +261,21 @@ const App = (() => {
     if (month && day) return `${MONTHS[month-1]} ${day}, ${year}`
     if (month) return `${MONTHS[month-1]} ${year}`
     return String(year)
+  }
+
+  // Start date, extended with an end date when the performance spans more
+  // than one day (2026-07-23 — e.g. the Danny Gatton Cellar Door stand,
+  // start/end a day apart). Same month+year → compact "Jan 25–26, 1979";
+  // otherwise a full "Start – End" range.
+  function fmtDateRangeLong(perf) {
+    const start = fmtDateLong(perf.start_year, perf.start_month, perf.start_day)
+    if (!perf.end_year && !perf.end_month && !perf.end_day) return start
+    if (perf.end_year === perf.start_year && perf.end_month === perf.start_month && perf.end_day) {
+      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+      return `${MONTHS[perf.start_month-1]} ${perf.start_day}–${perf.end_day}, ${perf.start_year}`
+    }
+    const end = fmtDateLong(perf.end_year || perf.start_year, perf.end_month, perf.end_day)
+    return `${start} – ${end}`
   }
 
   function fmtLocation(city, state, country) {
@@ -425,42 +478,89 @@ const App = (() => {
     inputEl.addEventListener('focus', () => { if (inputEl.value.trim().length >= 2) run() })
   }
 
-  // ── Reusable Performer + Members widget ──────────────────────────────────────
-  // Bound to a `store` object holding `.members` (+ .performer_name/.performer_id).
-  // Used by both the Add and Edit forms. `ids` = the DOM element ids.
+  // ── Reusable Performer + Members/Guests widget ───────────────────────────────
+  // Bound to a `store` object holding `.members`, `.guests` (+ .performer_name/
+  // .performer_id). `ids.field` is a mount point div — renderChips() rebuilds
+  // its full innerHTML each call (both rows + pills + add controls) and
+  // rewires events, the same rebuild-and-rewire pattern already used for
+  // buildAiResultsHtml, rather than DOM-patching individual chips.
+  //
+  // Members/Guests two-row redesign (2026-07-22), replacing one flat Artists
+  // pill row + descriptive subtext: a small (+) button per row reveals an
+  // inline add-picker input on click. Removing a pill is a plain splice —
+  // this is still draft form state until Confirm, no server round-trip.
   function createMembersWidget(store, ids) {
+    const pill = (p, i, role) => `
+      <span class="member-chip ${role === 'guest' ? 'member-chip--guest' : ''}">
+        ${esc(p.name)} <span class="member-chip-x" data-role="${role}" data-idx="${i}" title="Remove">×</span>
+      </span>`
+    const row = (role, label, items) => `
+      <div class="mg-row">
+        <span class="mg-row-label">${label}</span>
+        ${items.map((p, i) => pill(p, i, role)).join('')}
+        <button type="button" class="mg-add-btn" data-role="${role}" title="Add ${label === 'Members' ? 'Member' : 'Guest'} Name">+</button>
+        <span class="artist-picker-wrap mg-add-picker" data-role="${role}" style="display:none">
+          <input type="text" class="member-input mg-role-input" data-role="${role}" autocomplete="off" placeholder="Add ${label === 'Members' ? 'Member' : 'Guest'} Name…" />
+          <div class="artist-dropdown mg-role-dd" data-role="${role}" style="display:none"></div>
+        </span>
+      </div>`
+
     function renderChips() {
       const field = document.getElementById(ids.field)
-      const input = document.getElementById(ids.memberInput)
-      if (!field || !input) return
-      // The input is nested inside .artist-picker-wrap, so insert chips before the
-      // wrap (a direct child of field) — inserting before the input itself throws.
-      const ref = input.closest('.artist-picker-wrap') || input
-      field.querySelectorAll('.member-chip').forEach(c => c.remove())
-      ;(store.members || []).forEach((m, i) => {
-        const chip = document.createElement('span')
-        chip.className = 'member-chip'
-        chip.innerHTML = `${esc(m.name)} <span class="member-chip-x" data-idx="${i}">×</span>`
-        field.insertBefore(chip, ref)
-      })
+      if (!field) return
+      store.members = store.members || []
+      store.guests  = store.guests  || []
+      field.innerHTML = row('member', 'Members', store.members) + row('guest', 'Guests', store.guests)
+
       field.querySelectorAll('.member-chip-x').forEach(x =>
-        x.addEventListener('click', () => { store.members.splice(parseInt(x.dataset.idx), 1); renderChips() }))
+        x.addEventListener('click', () => {
+          const list = x.dataset.role === 'guest' ? store.guests : store.members
+          list.splice(parseInt(x.dataset.idx), 1)
+          renderChips()
+        }))
+
+      field.querySelectorAll('.mg-add-btn').forEach(btn =>
+        btn.addEventListener('click', () => {
+          const picker = field.querySelector(`.mg-add-picker[data-role="${btn.dataset.role}"]`)
+          const input  = picker?.querySelector('.mg-role-input')
+          if (!picker || !input) return
+          const showing = picker.style.display !== 'none'
+          // Only one add-picker open at a time.
+          field.querySelectorAll('.mg-add-picker').forEach(p => { p.style.display = 'none' })
+          picker.style.display = showing ? 'none' : 'inline-flex'
+          if (!showing) input.focus()
+        }))
+
+      field.querySelectorAll('.mg-role-input').forEach(input => {
+        const role = input.dataset.role
+        const dd   = field.querySelector(`.mg-role-dd[data-role="${role}"]`)
+        wirePickerDropdown(input, dd, API.artists.search,
+          ({ id, name }) => { addMember(name, id, role); input.value = '' }, 'Add new artist')
+        input.addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); addMember(input.value, null, role); input.value = '' }
+        })
+      })
     }
-    function addMember(name, id) {
+
+    function addMember(name, id, role = 'member') {
       name = (name || '').trim()
       if (!name) return
-      store.members = store.members || []
-      if (store.members.some(m => m.name.toLowerCase() === name.toLowerCase())) return
-      store.members.push(id ? { id, name } : { name })
+      const list = role === 'guest' ? (store.guests = store.guests || []) : (store.members = store.members || [])
+      if (list.some(m => m.name.toLowerCase() === name.toLowerCase())) return
+      list.push(id ? { id, name } : { name })
       renderChips()
     }
-    // Performer picked (existing → load its members; new → no members by default,
-    // Artists are optional and only added for special collaborations).
+
+    // Performer picked (existing act → load its current roster into Members;
+    // new act → no members by default, Artists are optional and only added
+    // for special collaborations). Guests always reset — a freshly (re)picked
+    // act has no per-show guests carried over from whatever was typed before.
     async function onPerformerPick({ id, name }) {
       const el = document.getElementById(ids.performerInput)
       if (el) el.value = name
       store.performer_name = name
       store.performer_id   = id || null
+      store.guests = []
       if (id) {
         try { const p = await API.performers.get(id); store.members = (p.members || []).map(m => ({ id: m.id, name: m.name })) }
         catch (_) { store.members = [] }
@@ -472,16 +572,31 @@ const App = (() => {
     function mount() {
       wirePickerDropdown(document.getElementById(ids.performerInput), document.getElementById(ids.performerDropdown),
         API.performers.search, onPerformerPick, 'Create new performer')
-      const mInput = document.getElementById(ids.memberInput)
-      wirePickerDropdown(mInput, document.getElementById(ids.memberDropdown), API.artists.search,
-        ({ id, name }) => { addMember(name, id); if (mInput) mInput.value = '' }, 'Add new artist')
-      mInput?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addMember(mInput.value); mInput.value = '' } })
       renderChips()
     }
     return { renderChips, addMember, onPerformerPick, mount }
   }
 
-  // Add flow: preload members if the scanned performer already exists.
+  // Splits a billed-act name into candidate individual-person names, for
+  // matching against existing Artists when the Performer itself doesn't
+  // exist yet (2026-07-22) — e.g. "Bela Fleck & Edgar Meyer" ->
+  // ["Bela Fleck", "Edgar Meyer"]. Conservative separators only; a missed
+  // split is harmless (that name just stays unmatched), which is why exact
+  // matching below matters more than aggressive splitting here.
+  const _NAME_SPLIT_RE = /\s*(?:&|,|\/|\+|\bwith\b|\bfeat\.?\b|\bfeaturing\b|\band\b)\s*/i
+  function splitPerformerNameCandidates(raw) {
+    return (raw || '').split(_NAME_SPLIT_RE).map(s => s.trim()).filter(Boolean)
+  }
+
+  // Add flow: preload Members if the scanned Performer (act) already exists
+  // in the DB — pulls its current roster. If the act itself is new (e.g. a
+  // one-off duo billing), fall back to splitting the act name into candidate
+  // person names and matching each against existing Artists — EXACT
+  // (case-insensitive) name match only, never a fuzzy/substring hit, since a
+  // wrong auto-attached person is worse than an unmatched name Ryan fills in
+  // by hand. Ryan chose auto-fill over a click-to-confirm suggestion step
+  // for this (2026-07-22), weighing it against the AI-Assist auto-apply bug
+  // fixed earlier the same session.
   async function initAddPerformerMembers(widget) {
     const f = ingest.form
     const name = (f.artist_name || '').trim()
@@ -496,7 +611,15 @@ const App = (() => {
         const p = await API.performers.get(exact.id)
         f.members = (p.members || []).map(m => ({ id: m.id, name: m.name }))
       } else {
-        f.members = f.members || []
+        const found = []
+        for (const cand of splitPerformerNameCandidates(name)) {
+          try {
+            const results = await API.artists.search(cand)
+            const hit = results.find(r => r.name.toLowerCase() === cand.toLowerCase())
+            if (hit) found.push({ id: hit.id, name: hit.name })
+          } catch (_) { /* best-effort — a failed lookup just leaves that name unmatched */ }
+        }
+        f.members = found
       }
     } catch (_) { f.members = f.members || [] }
     widget.renderChips()
@@ -562,6 +685,18 @@ const App = (() => {
   }
 
   // ── Nav helpers ────────────────────────────────────────────────────────────
+
+  // Every render*View() function calls this once it knows its own display
+  // label (immediately for a static-label page like "Library"; after its
+  // data fetch succeeds for a dynamic one like a performer/venue/recording
+  // name) — see state.navCurrent/navBack above for how "← Back" links use
+  // it. A page whose data fetch FAILS (e.g. "Recording not found") simply
+  // never calls this, which is deliberate: a subsequent page's Back link
+  // then skips the dead page and points at the last one that actually
+  // loaded, rather than back to a dead end.
+  function setNavCurrent(label) {
+    state.navCurrent = { hash: window.location.hash, label }
+  }
 
   function setActiveNav(active) {
     state._activeNav = active
@@ -850,6 +985,7 @@ const App = (() => {
   // ── Collections views ────────────────────────────────────────────────────────
   async function renderCollectionsIndex() {
     setActiveNav('collections'); setActiveArtist(null); setLoading()
+    setNavCurrent('Collections')
     let cols = []
     try { cols = await API.collections.list() } catch (_) {}
     const rows = cols.map(c => `
@@ -877,6 +1013,7 @@ const App = (() => {
   // New collection (create only — editing happens in place on the collection page).
   async function renderCollectionForm() {
     setActiveNav('collections'); setActiveArtist(null)
+    setNavCurrent('New Collection')
     setMainHTML(`
       <div class="artist-header"><h1>New collection</h1></div>
       <div style="max-width:480px; padding:0 20px">
@@ -894,7 +1031,9 @@ const App = (() => {
         </div>
       </div>`)
     document.getElementById('col-name').focus()
-    document.getElementById('col-cancel').addEventListener('click', () => { window.location.hash = '#/' })
+    document.getElementById('col-cancel').addEventListener('click', () => {
+      window.location.hash = state.navBack ? state.navBack.hash : '#/'
+    })
     document.getElementById('col-save').addEventListener('click', async () => {
       const name = document.getElementById('col-name').value.trim()
       if (!name) { alert('Name is required'); return }
@@ -915,6 +1054,7 @@ const App = (() => {
     let c
     try { c = await API.collections.get(id) }
     catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Collection not found</div></div>`); return }
+    setNavCurrent(c.name)
     const colRows = c.recordings || []
     const rows = colRows.map(r => flatRowHtml(r, true)).join('')
     const descText = c.description && c.description.trim()
@@ -967,6 +1107,7 @@ const App = (() => {
       setMainHTML(`<div class="empty-state"><div class="empty-title">This artist no longer exists</div></div>`)
       return
     }
+    setNavCurrent(a.name)
     // Performers the person is a member of (already sorted by the API).
     let performers = (a.performers || []).map(p => ({ id: p.id, name: p.name }))
 
@@ -1032,8 +1173,19 @@ const App = (() => {
           track_count: r.track_count, duration_sec: r.duration_sec,
         }, false)).join('')).join('')
       if (!rows) return ''
+      // "Guest" tag only when every appearance under this act name is
+      // actually is_guest=True (2026-07-23 fix — this section is really "not
+      // a formal roster member of this act," which the API named
+      // guest_appearances back when that always meant a sit-in. The
+      // Members/Guests two-row redesign (2026-07-22) added a real non-guest
+      // case here too: a full billed appearance under a one-off act name
+      // (e.g. a duo billing) that this person isn't formally on the roster
+      // of. Tagging that "guest" was Ryan's bug report — Bela Fleck & Bryan
+      // Sutton is a real Member appearance, not a sit-in. Each appearance
+      // carries its own is_guest; only tag the group when ALL of them agree.)
+      const allGuest = ordered.every(ap => ap.is_guest)
       return `<div class="pp-group">
-        <div class="pp-group-head"><a href="#/performer/${g.performer_id}">${esc(g.performer_name)}</a> <span class="pp-guest-tag">guest</span></div>
+        <div class="pp-group-head"><a href="#/performer/${g.performer_id}">${esc(g.performer_name)}</a>${allGuest ? ' <span class="pp-guest-tag">guest</span>' : ''}</div>
         <div class="rec-table">${rows}</div>
       </div>`
     }).join('')
@@ -1115,6 +1267,7 @@ const App = (() => {
     setActiveNav('library')
     setActiveArtist(null)
     state.selectedArtist = null
+    setNavCurrent('Library')
     setLoading()
 
     let allArtists
@@ -1171,6 +1324,7 @@ const App = (() => {
     setActiveNav('recent')
     setActiveArtist(null)
     state.selectedArtist = null
+    setNavCurrent('Recently Added')
     setLoading()
 
     let rows
@@ -1213,6 +1367,14 @@ const App = (() => {
       setMainHTML(`<div class="empty-state"><div class="empty-title">This performer no longer exists</div><div class="empty-sub">It may have been removed after its recordings were reassigned.</div></div>`)
       return
     }
+    setNavCurrent(performer.name)
+    // Whatever page brought us here (2026-07-23 generic mechanism — see
+    // state.navBack) — shown as a "← Back" breadcrumb below, replacing the
+    // old one-shot recFrom that only covered arriving via a Recording's ↗
+    // nav-link icon. Read directly, not consumed/cleared: route() already
+    // refreshes it on every real navigation, and a same-page reload (e.g.
+    // after an inline edit) never touches it.
+    const navBack = state.navBack
 
     state.selectedArtist = performer
     // Local, mutable copy of the roster — edited in place, persisted on each change.
@@ -1245,38 +1407,51 @@ const App = (() => {
     const descText = performer.bio && performer.bio.trim()
     setMainHTML(`
       <div class="performer-page">
+        ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="pp-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
         <div class="performer-head">
-          <div class="pp-name-row">
-            <h1 class="pp-name pp-editable" id="pp-name" title="Click to edit">${esc(performer.name)}</h1>
-            <button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>
-          </div>
-          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
+          <div class="pp-head-row">
+            <div class="pp-head-main">
+              <div class="pp-name-row">
+                <h1 class="pp-name pp-editable" id="pp-name" title="Click to edit">${esc(performer.name)}</h1>
+                <button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>
+              </div>
+              <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
 
-          <div class="pp-artists-block">
-            <div class="pp-artists-label-row">
-              <div class="pp-artists-label">Artists</div>
-              <select class="pp-mode-select" id="pp-mode-select" title="Whether new performances of this act start with the full roster, or need personnel picked per show">
-                <option value="inherit">New shows: full roster</option>
-                <option value="explicit">New shows: pick personnel per show</option>
-              </select>
+              <div class="pp-artists-block">
+                <div class="pp-artists-label">Members</div>
+                <div class="pp-artists mg-row" id="pp-artists"></div>
+                <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
+              </div>
             </div>
-            <div class="pp-artists" id="pp-artists"></div>
-            <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
+            <div class="pp-head-image" id="pp-head-image"></div>
           </div>
+        </div>
 
+        <div class="subtitle" id="pp-rec-count">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''}</div>
+        ${perfRows.length ? recTableHeadHtml(false) : ''}
+        <div class="rec-table" id="rec-table-performer">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
+
+        <div class="pp-bottom-section">
           <div class="pp-artists-block">
             <div class="pp-artists-label">Resources</div>
             <div class="pp-resources" id="pp-resources"></div>
           </div>
 
-          <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${withRecs.length} performance${withRecs.length !== 1 ? 's' : ''}</div>
+          <div class="pp-artists-block">
+            <div class="pp-artists-label">Dossier <span class="pp-artists-label-note">— AI-drafted biography &amp; resource suggestions</span></div>
+            <div class="pp-dossier" id="pp-dossier"></div>
+          </div>
         </div>
-        ${perfRows.length ? recTableHeadHtml(false) : ''}
-        <div class="rec-table" id="rec-table-performer">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
       </div>`)
 
     wireRecordingRows(mainContent)
     if (perfRows.length) wireDateAddedSort(document.getElementById('rec-table-performer'), perfRows, false)
+
+    if (navBack) {
+      document.getElementById('pp-back-btn')?.addEventListener('click', () => {
+        window.location.hash = navBack.hash
+      })
+    }
 
     const refreshSidebar = () => { _dimCache.performers = null; if (state.expandedDims.has('performers')) _renderDimRecords('performers') }
 
@@ -1321,6 +1496,9 @@ const App = (() => {
       return !s.start_year && !s.start_month && !s.start_day && !s.end_year && !s.end_month && !s.end_day
     }
 
+    // Members row uses the same (+) button + inline picker style as the
+    // recording page's Members/Guests rows (2026-07-22) — no Guests row here,
+    // guests are a per-show concept and don't apply to the act itself.
     function renderArtists() {
       const box = document.getElementById('pp-artists')
       box.innerHTML =
@@ -1329,8 +1507,9 @@ const App = (() => {
             <span class="member-chip-name" data-id="${m.id}" title="Click to edit stint dates">${esc(m.name)}</span>
             <span class="member-chip-x" data-i="${i}" title="Remove">×</span>
           </span>`).join('') +
-        `<span class="artist-picker-wrap pp-add-wrap">
-           <input type="text" class="member-input pp-add-input" autocomplete="off" placeholder="Add an artist…" />
+        `<button type="button" class="mg-add-btn" id="pp-add-btn" title="Add Member Name">+</button>
+         <span class="artist-picker-wrap mg-add-picker" id="pp-add-picker" style="display:none">
+           <input type="text" class="member-input mg-role-input" id="pp-add-input" autocomplete="off" placeholder="Add Member Name…" />
            <div class="artist-dropdown" id="pp-add-dd" style="display:none"></div>
          </span>`
       box.querySelectorAll('.member-chip-x').forEach(x =>
@@ -1346,7 +1525,13 @@ const App = (() => {
           expandedMemberId = (expandedMemberId === id) ? null : id
           renderArtists(); renderStintEditor()
         }))
-      const input = box.querySelector('.pp-add-input')
+      document.getElementById('pp-add-btn').addEventListener('click', () => {
+        const picker = document.getElementById('pp-add-picker')
+        const showing = picker.style.display !== 'none'
+        picker.style.display = showing ? 'none' : 'inline-flex'
+        if (!showing) document.getElementById('pp-add-input').focus()
+      })
+      const input = box.querySelector('#pp-add-input')
       wirePickerDropdown(input, document.getElementById('pp-add-dd'), API.artists.search,
         async ({ name }) => {
           name = (name || '').trim()
@@ -1422,13 +1607,13 @@ const App = (() => {
     renderArtists()
     renderStintEditor()
 
-    // ── New-shows default (Performer.default_personnel_mode) ─────────────────
-    const modeSelect = document.getElementById('pp-mode-select')
-    modeSelect.value = defaultPersonnelMode
-    modeSelect.addEventListener('change', async () => {
-      try { await saveField({ default_personnel_mode: modeSelect.value }); defaultPersonnelMode = modeSelect.value }
-      catch (e) { alert('Failed: ' + e.message); modeSelect.value = defaultPersonnelMode }
-    })
+    // Performer.default_personnel_mode is still a real field (new
+    // performances of this act still start in whatever mode it's set to,
+    // and the case-5 auto-flip still fires per-show) — it just has no
+    // manual UI control on this page anymore, per the 2026-07-22 Members/
+    // Guests redesign. `defaultPersonnelMode` is kept around unused here
+    // only because refreshRoster() still reads it off a fresh fetch; nothing
+    // reads the local variable itself now.
 
     // ── Editable reference Resources (external DBs / discographies) ──────────
     let resources = (performer.resources || []).map(r => ({ label: r.label, url: r.url }))
@@ -1463,6 +1648,105 @@ const App = (() => {
       urlEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add() } })
     }
     renderResources()
+
+    // ── Profile picture (2026-07-22) — one image slot, top-right ─────────────
+    function renderProfileImage() {
+      const box = document.getElementById('pp-head-image')
+      if (!box) return
+      box.innerHTML = `
+        <div class="pp-image-frame">
+          ${performer.has_image
+            ? `<img class="pp-image-img" id="pp-image-img" src="${API.performers.imageUrl(performerId)}" alt="${esc(performer.name)}" />`
+            : `<div class="pp-image-placeholder">No photo</div>`}
+        </div>
+        <input type="file" id="pp-image-input" accept="image/png,image/jpeg,image/webp" style="display:none" />
+        <div class="pp-image-actions">
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-image-upload-btn">${performer.has_image ? 'Replace photo' : 'Add photo'}</button>
+          ${performer.has_image ? `<button type="button" class="btn btn-ghost btn-xs" id="pp-image-remove-btn">Remove</button>` : ''}
+        </div>`
+      document.getElementById('pp-image-upload-btn').addEventListener('click', () =>
+        document.getElementById('pp-image-input').click())
+      document.getElementById('pp-image-input').addEventListener('change', async e => {
+        const file = e.target.files[0]
+        if (!file) return
+        try { await API.performers.uploadImage(performerId, file); performer.has_image = true; renderProfileImage() }
+        catch (err) { alert('Upload failed: ' + err.message) }
+      })
+      document.getElementById('pp-image-remove-btn')?.addEventListener('click', async () => {
+        if (!confirm('Remove this photo?')) return
+        try { await API.performers.removeImage(performerId); performer.has_image = false; renderProfileImage() }
+        catch (err) { alert('Failed: ' + err.message) }
+      })
+    }
+    renderProfileImage()
+
+    // ── Dossier — AI-drafted biography + suggested resource links ────────────
+    // "AI suggests, human approves": nothing here writes to `bio` or
+    // `resources` on its own — Copy to Description and + Add are both
+    // explicit clicks (same rule as the ingest-side AI Assist auto-apply
+    // fix earlier this session — see performer_research.py's module doc).
+    let dossier = performer.dossier || null
+    function renderDossier() {
+      const box = document.getElementById('pp-dossier')
+      if (!box) return
+      const runLabel = dossier ? '↻ Run again' : '✨ Run Dossier'
+      if (!dossier) {
+        box.innerHTML = `<div class="pp-dossier-empty">No research run yet.</div>
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-dossier-run">${runLabel}</button>`
+      } else {
+        const cost = dossier.usage ? formatAiCost(dossier.usage) : ''
+        const bioParas = (dossier.biography || '').split('\n').map(s => s.trim()).filter(Boolean)
+        box.innerHTML = `
+          <div class="ai-res-title">Biography draft ${cost} <button type="button" class="btn btn-ghost btn-xs" id="pp-dossier-run">${runLabel}</button></div>
+          ${dossier.thinking ? `<p class="ai-summary">${esc(formatAiThinking(dossier.thinking))}</p>` : ''}
+          <div class="pp-dossier-bio">
+            ${bioParas.map(p => `<p>${esc(p)}</p>`).join('')}
+          </div>
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-dossier-copy-bio">Copy to Description</button>
+          ${(dossier.resources || []).length ? `
+            <div class="ai-res-section">
+              <div class="ai-res-title">Suggested resources</div>
+              ${dossier.resources.map((r, i) => `
+                <div class="ai-res-row">
+                  <span class="ai-res-value"><a class="ai-link" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.url)}</a></span>
+                  <button type="button" class="btn btn-ghost btn-xs pp-dossier-add-res" data-i="${i}">+ Add</button>
+                </div>`).join('')}
+            </div>` : ''}
+          ${(dossier.sources || []).length ? `
+            <div class="ai-res-section"><div class="ai-res-title">Sources</div>${dossier.sources.map(s =>
+              `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''}`
+      }
+      document.getElementById('pp-dossier-run').addEventListener('click', runDossier)
+      document.getElementById('pp-dossier-copy-bio')?.addEventListener('click', async () => {
+        const bio = dossier.biography || ''
+        performer.bio = bio
+        await saveField({ bio: bio || null })
+        const descEl = document.getElementById('pp-desc')
+        if (descEl) { descEl.textContent = bio || 'Add a description…'; descEl.classList.toggle('pp-empty', !bio.trim()) }
+      })
+      box.querySelectorAll('.pp-dossier-add-res').forEach(btn =>
+        btn.addEventListener('click', async () => {
+          const r = dossier.resources[parseInt(btn.dataset.i)]
+          if (!r || resources.some(x => x.url === r.url)) return
+          resources.push({ label: r.label || null, url: r.url })
+          await persistResources(); renderResources()
+          btn.disabled = true; btn.textContent = 'Added ✓'
+        }))
+    }
+
+    async function runDossier() {
+      const box = document.getElementById('pp-dossier')
+      box.innerHTML = `<div class="ai-loading"><div class="loading-spinner"></div><div>Researching the web — this can take a minute or two… <span id="pp-dossier-elapsed">0s</span></div></div>`
+      const t0 = Date.now()
+      try {
+        const { job_id } = await API.performers.startDossier(performerId)
+        dossier = await pollDossierJob(performerId, job_id, t0)
+        renderDossier()
+      } catch (e) {
+        box.innerHTML = `<div class="empty-state" style="color:var(--red)">Dossier failed: ${esc(e.message)}</div>`
+      }
+    }
+    renderDossier()
 
     document.getElementById('pp-delete').addEventListener('click', async () => {
       if (!confirm(`Delete performer "${performer.name}"? This can't be undone.`)) return
@@ -1514,7 +1798,7 @@ const App = (() => {
       const { job_id } = await API.ingest.aiAssistRecording(recordingId)
       const result = await pollAiJob(job_id, t0)
       if (rec) rec.ai_research = result   // keep local state in sync (server has already saved it)
-      renderRecAiResults(result, body, recordingId, rec, perf, { autoApply: true })
+      renderRecAiResults(result, body, recordingId, rec, perf)
     } catch (e) {
       const secs = Math.round((Date.now() - t0) / 1000)
       const msg = /no_api_key/.test(e.message)
@@ -1594,6 +1878,21 @@ const App = (() => {
   // clearly regardless of where the proposal ends up getting applied.
   const AI_VENUE_FIELDS = ['city', 'state', 'country']
 
+  // Cost badge — reads the usage block ai_assist.py::_compute_cost attaches
+  // to every result (2026-07-21, Problem 3 of the AI Assist Refinement spec).
+  // r.usage is null when the model has no pricing entry (see _PRICING in
+  // ai_assist.py) rather than showing a misleading "free" — that's the one
+  // case this renders nothing.
+  function formatAiCost(usage) {
+    if (!usage) return ''
+    const c = usage.cost_cents
+    const label = c >= 100 ? `$${(c / 100).toFixed(2)}` : `${c.toFixed(c < 1 ? 3 : 2)}¢`
+    const n = usage.web_search_requests || 0
+    const title = `${usage.input_tokens.toLocaleString()} in / ${usage.output_tokens.toLocaleString()} out tokens`
+      + (n ? ` + ${n} web search${n === 1 ? '' : 'es'}` : '')
+    return `<span class="ai-cost-badge" title="${esc(title)}">${label}</span>`
+  }
+
   function buildAiResultsHtml(r, opts = {}) {
     const proposals = r.proposals || []
     const row = (p, i) => `
@@ -1629,7 +1928,7 @@ const App = (() => {
 
     return `
       <div class="ai-res-section">
-        <div class="ai-res-title">Metadata Review ${rerunBtn}</div>
+        <div class="ai-res-title">Metadata Review ${formatAiCost(r.usage)} ${rerunBtn}</div>
         ${r.thinking ? `<p class="ai-summary">${esc(formatAiThinking(r.thinking))}</p>` : ''}
         ${propsHtml || '<p class="ai-res-empty">No field changes proposed.</p>'}
       </div>
@@ -1717,21 +2016,15 @@ const App = (() => {
   // Applied fields land immediately (matches every other field on this page's
   // click-to-edit/auto-save pattern) — no Revert toggle; a full reload
   // refreshes every affected field at once, so "undo" is just editing again.
-  // High-confidence proposals auto-apply, sequentially and priority-ordered
-  // so a 'venue' proposal lands before any 'city'/'state'/'country' proposal
-  // that depends on it, then one reload for the whole batch.
-  const AI_APPLY_PRIORITY = { artist: 0, date: 1, venue: 2, event: 3, source: 4, city: 5, state: 6, country: 7 }
-
-  // autoApply: only true right after a FRESH run just completed (the user
-  // clicked Run/Re-run and wants instant feedback). When re-displaying an
-  // already-SAVED result on a plain page load, this must be false — every
-  // renderRecordingView() call renders whatever's in rec.ai_research
-  // unconditionally (see the `if (rec.ai_research)` call site), so leaving
-  // auto-apply on there re-applied the same high-confidence proposals, then
-  // reloaded, then re-applied again — an infinite GET/PUT loop (Ryan,
-  // 2026-07-14 bug report — surfaced by the AI-persistence revival, since
-  // before that there was no rec.ai_research for a plain load to find).
-  function renderRecAiResults(r, body, recordingId, rec, perf, { autoApply = false } = {}) {
+  //
+  // No auto-apply, regardless of confidence (Ryan, 2026-07-20 — AI Assist
+  // Refinement spec, Context Library). A rare Danny Gatton/Cellar Door
+  // 1/25/79 recording got confidently, silently overwritten with a wrong
+  // date twice in a row (a different wrong date each run) — proof the
+  // model's own "high confidence" self-rating isn't trustworthy enough to
+  // act on unsupervised. Every proposal, at every confidence level, now
+  // requires an explicit click on its own Apply button.
+  function renderRecAiResults(r, body, recordingId, rec, perf) {
     if (!body) return
     body.innerHTML = buildAiResultsHtml(r, { showRerun: true })
     const venueRef = { venue_id: perf?.venue_id || null, venue_name: perf?.venue || null }
@@ -1761,19 +2054,6 @@ const App = (() => {
       applyRecTrackTitles(r.track_titles || [], rec, recordingId))
     document.getElementById('btn-ai-rerun')?.addEventListener('click', () =>
       startRecAiAssist(recordingId, rec, perf))
-
-    const highConf = (r.proposals || []).map((p, i) => ({ p, i }))
-      .filter(x => x.p.confidence === 'high')
-      .sort((a, b) => (AI_APPLY_PRIORITY[a.p.field] ?? 9) - (AI_APPLY_PRIORITY[b.p.field] ?? 9))
-    if (autoApply && highConf.length) {
-      ;(async () => {
-        for (const x of highConf) {
-          try { await applyOne(x.i, body.querySelector(`.ai-apply-btn[data-idx="${x.i}"]`)) }
-          catch (_) { /* one failed auto-apply shouldn't block the rest or the reload */ }
-        }
-        renderRecordingView(recordingId)
-      })()
-    }
   }
 
   /** Recording detail — split panel: tracks + info file */
@@ -1792,23 +2072,40 @@ const App = (() => {
       return
     }
 
-    // Determine back label from current artist
-    const backLabel = state.selectedArtist ? `← ${esc(state.selectedArtist.name)}` : '← Back'
-    const backHash  = state.selectedArtist ? `#/artist/${state.selectedArtist.id}` : '#/'
+    // "← Back" points at whatever page immediately preceded this one — the
+    // generic navBack mechanism (route()), not the old state.selectedArtist
+    // hack that only worked if you'd arrived via a Performer page (Ryan's
+    // 2026-07-23 bug report: Recently Added → Recording → Back landed on
+    // Library, since selectedArtist was never set by Recently Added).
+    const backLabel = state.navBack ? `← ${esc(state.navBack.label)}` : '← Back'
+    const backHash  = state.navBack ? state.navBack.hash : '#/'
 
     // We need performance info to show the date/venue
     let perf = null
     try { perf = await API.performances.get(rec.performance_id) } catch (_) {}
 
-    const dateStr    = perf ? fmtDateLong(perf.start_year, perf.start_month, perf.start_day) : ''
+    const dateStr    = perf ? fmtDateRangeLong(perf) : ''
     const venueStr   = perf?.venue_name || ''
     const venueId    = perf?.venue_id   || null
     const locStr     = perf ? fmtLocation(perf.city, perf.state, perf.country) : ''
     const perfName   = perf?.performer || ''
+    const perfId     = perf?.performer_id || null
     const eventStr   = perf?.event_name || ''
+    setNavCurrent(dateStr || perfName || 'Recording')
+
+    // Small "go to its own page" nav icons (2026-07-23) — same treatment for
+    // Performer and Venue, shown regardless of edit permission since it's
+    // navigation, not editing. Plain hash links — the generic navBack
+    // mechanism (route()) picks up the "came from a recording" reference
+    // automatically, no per-link wiring needed.
+    const perfNavLink = perfId
+      ? `<a class="rec-nav-link" href="#/performer/${perfId}" title="Go to ${esc(perfName)}'s page">↗</a>` : ''
+    const venueNavLink = venueId
+      ? `<a class="rec-nav-link" href="#/venue/${venueId}" title="Go to ${esc(venueStr)}'s page">↗</a>` : ''
+
     // Date line — venue is a clickable link if we have a venue_id
     const venueHtml  = venueId
-      ? `<span class="venue-link" data-venue-id="${venueId}">${esc(venueStr)}</span>`
+      ? `<span class="venue-link" data-venue-id="${venueId}">${esc(venueStr)}</span>${venueNavLink}`
       : (venueStr ? esc(venueStr) : '')
     const dateLineParts = [dateStr ? esc(dateStr) : '', venueHtml, locStr ? esc(locStr) : ''].filter(Boolean)
     const dateLineHtml  = dateLineParts.join(' · ')
@@ -2022,12 +2319,15 @@ const App = (() => {
       </div>
       <div class="rec-detail-header">
         <div class="rec-header-left">
-          <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
+          <div class="rec-name-row">
+            <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
+            ${perfNavLink}
+          </div>
           <div class="rec-date-line" id="rec-date-line">
             <span class="rec-f rec-f-date${canEdit ? ' pp-editable' : ''}" id="rec-f-date">${dateStr ? esc(dateStr) : (canEdit ? '<span class="pp-empty">Add date</span>' : '')}</span>
             <span class="rec-dot">·</span>
             ${canEdit
-              ? `<span class="rec-f rec-f-venue pp-editable" id="rec-f-venue">${venueStr ? esc(venueStr) : '<span class="pp-empty">Add venue</span>'}</span>${venueId ? `<a class="rec-venue-edit-link" href="#/venue/${venueId}" title="Edit this venue's own details (city/state/country/bio)">✎</a>` : ''}`
+              ? `<span class="rec-f rec-f-venue pp-editable" id="rec-f-venue">${venueStr ? esc(venueStr) : '<span class="pp-empty">Add venue</span>'}</span>${venueNavLink}`
               : (venueHtml || '')}
             ${locStr ? `<span class="rec-dot">·</span><span class="rec-f-loc">${esc(locStr)}</span>` : ''}
             ${canEdit
@@ -2365,14 +2665,24 @@ const App = (() => {
         })
       })
 
-      // Date → inline Year / Month / Day
+      // Date → inline Year / Month / Day, with an optional End Date (same
+      // +/- toggle pattern as the ingest form's "+ End date", 2026-07-23 —
+      // for multi-day stands, e.g. the Danny Gatton Cellar Door shows).
+      // Clearing the end fields and committing removes the end date.
       const dateEl = document.getElementById('rec-f-date')
       dateEl?.addEventListener('click', () => {
         if (dateEl.querySelector('input')) return
+        const hasEnd = !!(perf.end_year || perf.end_month || perf.end_day)
         dateEl.innerHTML = `
           <input type="number" class="rec-date-input" id="rec-d-y" placeholder="YYYY" value="${perf.start_year || ''}" min="1900" max="2099" style="width:52px" />
           <input type="number" class="rec-date-input" id="rec-d-m" placeholder="MM" value="${perf.start_month || ''}" min="1" max="12" style="width:38px" />
-          <input type="number" class="rec-date-input" id="rec-d-d" placeholder="DD" value="${perf.start_day || ''}" min="1" max="31" style="width:38px" />`
+          <input type="number" class="rec-date-input" id="rec-d-d" placeholder="DD" value="${perf.start_day || ''}" min="1" max="31" style="width:38px" />
+          <a class="field-toggle-link" id="rec-toggle-end-date" href="#">${hasEnd ? '− End date' : '+ End date'}</a>
+          <span id="rec-end-date-fields" style="display:${hasEnd ? 'inline-flex' : 'none'}; gap:3px; margin-left:4px">
+            <input type="number" class="rec-date-input" id="rec-d-y2" placeholder="YYYY" value="${perf.end_year || ''}" min="1900" max="2099" style="width:52px" />
+            <input type="number" class="rec-date-input" id="rec-d-m2" placeholder="MM" value="${perf.end_month || ''}" min="1" max="12" style="width:38px" />
+            <input type="number" class="rec-date-input" id="rec-d-d2" placeholder="DD" value="${perf.end_day || ''}" min="1" max="31" style="width:38px" />
+          </span>`
         document.getElementById('rec-d-y').focus()
         let done = false
         const commit = async () => {
@@ -2380,10 +2690,39 @@ const App = (() => {
           const y = parseInt(document.getElementById('rec-d-y').value) || null
           const m = parseInt(document.getElementById('rec-d-m').value) || null
           const d = parseInt(document.getElementById('rec-d-d').value) || null
-          try { await API.performances.update(perf.id, { start_year: y, start_month: m, start_day: d }) }
-          catch (e) { alert('Failed: ' + e.message) }
+          const endShown = document.getElementById('rec-end-date-fields').style.display !== 'none'
+          const ey = endShown ? (parseInt(document.getElementById('rec-d-y2').value) || null) : null
+          const em = endShown ? (parseInt(document.getElementById('rec-d-m2').value) || null) : null
+          const ed = endShown ? (parseInt(document.getElementById('rec-d-d2').value) || null) : null
+          try {
+            await API.performances.update(perf.id, {
+              start_year: y, start_month: m, start_day: d,
+              end_year: ey, end_month: em, end_day: ed,
+            })
+          } catch (e) { alert('Failed: ' + e.message) }
           reload()
         }
+        document.getElementById('rec-toggle-end-date').addEventListener('click', e => {
+          e.preventDefault()
+          const box = document.getElementById('rec-end-date-fields')
+          const visible = box.style.display !== 'none'
+          if (visible) {
+            // Hide and clear — committing after this removes the end date.
+            box.style.display = 'none'
+            e.currentTarget.textContent = '+ End date'
+            document.getElementById('rec-d-y2').value = ''
+            document.getElementById('rec-d-m2').value = ''
+            document.getElementById('rec-d-d2').value = ''
+          } else {
+            box.style.display = 'inline-flex'
+            e.currentTarget.textContent = '− End date'
+            // Pre-fill from the start date on first reveal, same as ingest.
+            if (!document.getElementById('rec-d-y2').value) document.getElementById('rec-d-y2').value = document.getElementById('rec-d-y').value
+            if (!document.getElementById('rec-d-m2').value) document.getElementById('rec-d-m2').value = document.getElementById('rec-d-m').value
+            if (!document.getElementById('rec-d-d2').value) document.getElementById('rec-d-d2').value = document.getElementById('rec-d-d').value
+            document.getElementById('rec-d-y2').focus()
+          }
+        })
         dateEl.querySelectorAll('input').forEach(inp => {
           inp.addEventListener('keydown', e => {
             e.stopPropagation()
@@ -2478,17 +2817,22 @@ const App = (() => {
         })
       }
 
-      // Artists association pill row — personnel-aware (2026-07-18, Per-Show
-      // Personnel Phase 2). Pills render from the RESOLVED lineup (perf.personnel,
-      // each tagged with a source: inherited/guest/explicit) rather than the
-      // flat name list, so it's visible at a glance who's on the act's normal
-      // roster vs. added just for this show. Add/remove still submits a flat
-      // name list — the backend infers guest-add vs member-absent from the
-      // diff (sync_performance_personnel_from_names) — so every mutation here
-      // reloads the page rather than guessing the new resolved state locally.
-      const persistPersonnelNames = async (names) => {
-        try { await API.performances.update(perf.id, { members: names }); invalidateDims('artists') }
-        catch (e) { alert('Failed: ' + e.message) }
+      // Members/Guests two-row personnel widget (2026-07-22, replacing the
+      // single Artists pill row + Inherit/Explicit mode selector). Pills
+      // split purely on perf.personnel[].is_guest — Members = roster/explicit
+      // non-guest rows, Guests = is_guest rows — same split used by the Add
+      // Recording form's createMembersWidget, matched visually here (mg-row/
+      // mg-add-btn/mg-add-picker markup) so both surfaces look identical.
+      // The Inherit/Explicit mode is still a real field on Performance (case
+      // 5 — dropping a roster member for this one show — still auto-flips it
+      // under the hood), it just no longer has a manual UI control; nothing
+      // in this Phase needed one, since editing the rows already covers
+      // every case the toggle used to require picking by hand.
+      const persistPersonnelLists = async (memberNames, guestNames) => {
+        try {
+          await API.performances.update(perf.id, { members: memberNames, guests: guestNames })
+          invalidateDims('artists')
+        } catch (e) { alert('Failed: ' + e.message) }
         reload()
       }
 
@@ -2496,50 +2840,66 @@ const App = (() => {
         const box = document.getElementById('rec-artists')
         if (!box) return
         const personnel = perf.personnel || []
-        const sourceClass = p => p.source === 'guest' ? 'member-chip--guest'
-                            : p.source === 'explicit' ? 'member-chip--explicit' : ''
+        const members = personnel.filter(p => !p.is_guest)
+        const guests  = personnel.filter(p =>  p.is_guest)
+        const listFor = role => role === 'guest' ? guests : members
+
+        const pill = (p, i, role) => `
+          <span class="member-chip ${role === 'guest' ? 'member-chip--guest' : ''}">
+            <span class="member-chip-name rec-pill-name" data-role="${role}" data-i="${i}" title="${canEdit ? 'Click for instrument/note' : ''}">${esc(p.name)}</span>
+            ${canEdit ? `<span class="member-chip-x" data-role="${role}" data-i="${i}" title="Remove">×</span>` : ''}
+          </span>`
+        const row = (role, label, items) => `
+          <div class="mg-row">
+            <span class="mg-row-label">${label}</span>
+            ${items.map((p, i) => pill(p, i, role)).join('')}
+            ${canEdit ? `
+              <button type="button" class="mg-add-btn" data-role="${role}" title="Add ${label === 'Members' ? 'Member' : 'Guest'} Name">+</button>
+              <span class="artist-picker-wrap mg-add-picker" data-role="${role}" style="display:none">
+                <input type="text" class="member-input mg-role-input" data-role="${role}" autocomplete="off" placeholder="Add ${label === 'Members' ? 'Member' : 'Guest'} Name…" />
+                <div class="artist-dropdown mg-role-dd" data-role="${role}" style="display:none"></div>
+              </span>` : (items.length === 0 ? '<span class="mg-row-empty">—</span>' : '')}
+          </div>`
+
         box.innerHTML =
-          `<span class="rec-artists-label">Artists</span>` +
-          personnel.map((p, i) => `
-            <span class="member-chip ${sourceClass(p)}">
-              <span class="member-chip-name rec-pill-name" data-i="${i}" title="${canEdit ? 'Click for instrument/note' : ''}">${esc(p.name)}</span>
-              ${canEdit ? `<span class="member-chip-x" data-i="${i}" title="Remove">×</span>` : ''}
-            </span>`).join('') +
-          (canEdit ? `
-            <span class="artist-picker-wrap rec-art-add">
-              <input type="text" class="member-input rec-art-input" autocomplete="off" placeholder="Add an artist…" />
-              <div class="artist-dropdown" id="rec-art-dd" style="display:none"></div>
-            </span>
-            <select class="rec-mode-select" id="rec-mode-select" title="Whether this show uses the act's normal roster, or a hand-picked lineup">
-              <option value="inherit"  ${perf.personnel_mode === 'inherit'  ? 'selected' : ''}>Inherit act roster</option>
-              <option value="explicit" ${perf.personnel_mode === 'explicit' ? 'selected' : ''}>Explicit — pick per show</option>
-            </select>` : '') +
+          row('member', 'Members', members) + row('guest', 'Guests', guests) +
           `<div class="rec-personnel-detail" id="rec-personnel-detail" style="display:none"></div>`
 
         if (!canEdit) return
 
         box.querySelectorAll('.member-chip-x').forEach(x =>
           x.addEventListener('click', async () => {
-            const names = personnel.filter((_, idx) => idx !== parseInt(x.dataset.i)).map(p => p.name)
-            await persistPersonnelNames(names)
+            const role = x.dataset.role, idx = parseInt(x.dataset.i)
+            const newMembers = (role === 'member' ? members.filter((_, i) => i !== idx) : members).map(p => p.name)
+            const newGuests  = (role === 'guest'  ? guests.filter((_, i) => i !== idx)  : guests).map(p => p.name)
+            await persistPersonnelLists(newMembers, newGuests)
           }))
 
         box.querySelectorAll('.rec-pill-name').forEach(el =>
-          el.addEventListener('click', () => renderPersonnelDetail(personnel[parseInt(el.dataset.i)])))
+          el.addEventListener('click', () => renderPersonnelDetail(listFor(el.dataset.role)[parseInt(el.dataset.i)])))
 
-        const input = box.querySelector('.rec-art-input')
-        wirePickerDropdown(input, document.getElementById('rec-art-dd'), API.artists.search,
-          async ({ name }) => {
-            name = (name || '').trim()
-            if (name && !personnel.some(p => p.name.toLowerCase() === name.toLowerCase())) {
-              await persistPersonnelNames([...personnel.map(p => p.name), name])
-            }
-          }, 'Create new artist')
+        box.querySelectorAll('.mg-add-btn').forEach(btn =>
+          btn.addEventListener('click', () => {
+            const picker = box.querySelector(`.mg-add-picker[data-role="${btn.dataset.role}"]`)
+            const input  = picker?.querySelector('.mg-role-input')
+            if (!picker || !input) return
+            const showing = picker.style.display !== 'none'
+            box.querySelectorAll('.mg-add-picker').forEach(p => { p.style.display = 'none' })
+            picker.style.display = showing ? 'none' : 'inline-flex'
+            if (!showing) input.focus()
+          }))
 
-        document.getElementById('rec-mode-select')?.addEventListener('change', async e => {
-          try { await API.performances.update(perf.id, { personnel_mode: e.target.value }) }
-          catch (err) { alert('Failed: ' + err.message) }
-          reload()
+        box.querySelectorAll('.mg-role-input').forEach(input => {
+          const role = input.dataset.role
+          const dd   = box.querySelector(`.mg-role-dd[data-role="${role}"]`)
+          wirePickerDropdown(input, dd, API.artists.search,
+            async ({ name }) => {
+              name = (name || '').trim()
+              if (!name || listFor(role).some(p => p.name.toLowerCase() === name.toLowerCase())) return
+              const newMembers = members.map(p => p.name).concat(role === 'member' ? [name] : [])
+              const newGuests  = guests.map(p => p.name).concat(role === 'guest'  ? [name] : [])
+              await persistPersonnelLists(newMembers, newGuests)
+            }, 'Create new artist')
         })
       }
 
@@ -2687,9 +3047,9 @@ const App = (() => {
         await API.recordings.delete(recordingId)
         // Deleting a recording can prune its performer / venue / artists.
         invalidateDims('performers', 'venues', 'artists')
-        // Navigate back to artist or library root (unless the performer was pruned)
-        const backHash = state.selectedArtist ? `#/artist/${state.selectedArtist.id}` : '#/'
-        window.location.hash = backHash
+        // Navigate back to wherever the user came from (falls back to
+        // Library if this recording was reached with nothing preceding it).
+        window.location.hash = state.navBack ? state.navBack.hash : '#/'
       } catch (err) {
         btn.disabled = false
         btn.textContent = 'Delete'
@@ -2923,25 +3283,45 @@ const App = (() => {
     try {
       batch.results = await API.ingest.batchScan(batch.sourceDir)
     } catch (e) {
+      if (/^Directory not found:/.test(e.message)) {
+        // Not a real failure — the scanned folder itself is gone, almost
+        // certainly because it WAS the "Performer Name" staging folder
+        // (Bulk Import pointed directly at one act's folder), and finishing
+        // its last show just deleted it as empty (move_to_library's
+        // empty-parent cleanup, 2026-07-23 — Ryan hit this immediately:
+        // "Mr. Sun"). There's nothing left to import here, not an error.
+        // Drop back to the picker, pre-filled with the parent directory so
+        // the next act's folder is one click away.
+        const parentDir = batch.sourceDir.replace(/\/[^/]+\/?$/, '')
+        batch.sourceDir = null
+        batch.results   = null
+        renderBatchPickerView({
+          suggestedDir: parentDir,
+          note: 'That folder is empty and was cleaned up — pick the next one to continue.',
+        })
+        return
+      }
       setMainHTML(`<div class="empty-state" style="color:var(--red)">Scan failed: ${esc(e.message)}</div>`)
       return
     }
     renderBatchResultsView()
   }
 
-  function renderBatchPickerView() {
+  function renderBatchPickerView({ suggestedDir = null, note = null } = {}) {
+    setNavCurrent('Batch Import')
     const defaultDir = '/Volumes/music/Live Music Archive/Workshop/Import'
     setMainHTML(`
       <div class="batch-shell">
         <div class="batch-header">
           <h2>Batch Import</h2>
           <p class="batch-subtitle">Scan a folder — each subfolder is graded green / yellow / red. You decide what to ingest.</p>
+          ${note ? `<p class="batch-subtitle" style="color:var(--accent)">${esc(note)}</p>` : ''}
         </div>
         <div class="batch-pick-form">
           <label class="batch-pick-label">Source directory</label>
           <div class="batch-pick-row">
             <input type="text" id="batch-dir-input" class="batch-dir-input"
-                   value="${esc(batch.sourceDir || defaultDir)}"
+                   value="${esc(suggestedDir || batch.sourceDir || defaultDir)}"
                    placeholder="/path/to/folder" />
             <button class="btn btn-ghost btn-sm" id="batch-pick-btn">Browse…</button>
           </div>
@@ -3078,6 +3458,7 @@ const App = (() => {
   }
 
   async function renderBatchResultsView() {
+    setNavCurrent('Batch Import')
     const r = batch.results
     if (!r) { renderBatchPickerView(); return }
 
@@ -3312,6 +3693,7 @@ const App = (() => {
   function renderIngestView() {
     setActiveNav('ingest')
     setActiveArtist(null)
+    setNavCurrent('Add Recording')
     // Fresh navigation to Add Recording always starts with an empty form. The one
     // exception is Batch Import opening a pre-scanned folder, which sets a
     // one-shot _resume flag so the in-progress review isn't wiped.
@@ -3713,10 +4095,9 @@ const App = (() => {
     body.querySelectorAll('.ai-apply-btn').forEach(b =>
       b.addEventListener('click', () => { toggleApplyProposal(r.proposals[parseInt(b.dataset.idx)], b); reScore() }))
     document.getElementById('ai-apply-tracks')?.addEventListener('click', () => applyAiTrackTitles(r.track_titles || []))
-    // Auto-apply high-confidence scalar proposals (server already filtered).
-    ;(r.proposals || []).forEach((p, i) => {
-      if (p.confidence === 'high') toggleApplyProposal(p, body.querySelector(`.ai-apply-btn[data-idx="${i}"]`))
-    })
+    // No auto-apply, regardless of confidence — see renderRecAiResults above
+    // for why (2026-07-20, AI Assist Refinement spec). Every proposal needs
+    // an explicit click on its own Apply button.
     reScore()
   }
 
@@ -3783,6 +4164,27 @@ const App = (() => {
         if (s.status === 'done')  return s.result
         if (s.status === 'error') throw new Error(s.error)
         if (Date.now() - t0 > 5 * 60 * 1000) throw new Error('AI research timed out after 5 minutes')
+      }
+    })()
+  }
+
+  // Same polling pattern as pollAiJob, for the Performer page's Dossier
+  // research job (2026-07-22) — kept separate rather than parameterizing
+  // pollAiJob, since the endpoint shape (performerId + jobId) and the
+  // elapsed-timer element id differ.
+  function pollDossierJob(performerId, jobId, t0) {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    return (async function loop() {
+      while (true) {
+        await sleep(2000)
+        const el = document.getElementById('pp-dossier-elapsed')
+        if (el) el.textContent = `${Math.round((Date.now() - t0) / 1000)}s`
+        let s
+        try { s = await API.performers.dossierStatus(performerId, jobId) }
+        catch (e) { if (/unknown job/.test(e.message)) throw new Error('Job was lost (did the app restart?)'); throw e }
+        if (s.status === 'done')  return s.result
+        if (s.status === 'error') throw new Error(s.error)
+        if (Date.now() - t0 > 5 * 60 * 1000) throw new Error('Dossier research timed out after 5 minutes')
       }
     })()
   }
@@ -4051,8 +4453,17 @@ const App = (() => {
     // horizontally — they used to all stack vertically inside the narrow
     // title-cell and push the title text up (Ryan, 2026-07-15).
     function _trackChipExpandRowHtml(i, chips) {
+      // chips[0] is already rendered separately under the title (see
+      // trackRows below / refreshIngestTrackRow) — this row is only for the
+      // REST. Bug fixed 2026-07-23 (Ryan: "Banter" showing twice on tracks
+      // titled e.g. "Banter & Tuning"): this used to join the FULL chips
+      // array here, so the first chip was shown once under the title AND
+      // again in this row every time a track had 2+ chips. Not a data bug —
+      // t.flags itself was always clean (detectTrackFlags/detect_track_flags
+      // both build off a Set, which can't hold a duplicate key) — purely a
+      // rendering double-count.
       return `<tr class="track-review-chiprow" data-idx="${i}">
-          <td colspan="6"><div class="track-chip-expand-row">${chips.join('')}</div></td>
+          <td colspan="6"><div class="track-chip-expand-row">${chips.slice(1).join('')}</div></td>
         </tr>`
     }
 
@@ -4096,14 +4507,10 @@ const App = (() => {
               </div>
             </div>
 
+            <!-- Members/Guests two-row personnel widget — filled in by
+                 createMembersWidget().renderChips(), see app.js. -->
             <div class="ingest-field" style="margin-top:6px">
-              <label>Artists <span style="color:var(--t3); font-weight:400">— performing artists who also may appear with other outfits</span></label>
-              <div class="members-field" id="f-members-field">
-                <div class="artist-picker-wrap" style="flex:1; min-width:120px">
-                  <input type="text" id="f-member-input" class="member-input" autocomplete="off" placeholder="Add an artist…" />
-                  <div class="artist-dropdown" id="f-member-dropdown" style="display:none"></div>
-                </div>
-              </div>
+              <div class="members-field" id="f-members-field"></div>
             </div>
 
             <!-- Date: Year / Month / Day (no "Start") -->
@@ -4404,7 +4811,7 @@ const App = (() => {
         ? mainRow.nextElementSibling : null
       if (chips.length > 1) {
         if (existingExpand) {
-          existingExpand.querySelector('.track-chip-expand-row').innerHTML = chips.join('')
+          existingExpand.querySelector('.track-chip-expand-row').innerHTML = chips.slice(1).join('')
         } else if (mainRow) {
           mainRow.insertAdjacentHTML('afterend', _trackChipExpandRowHtml(i, chips))
         }
@@ -4560,10 +4967,10 @@ const App = (() => {
     })()
 
     // Artist autocomplete
-    // Performer + Members widget (shared with the Edit form).
+    // Performer + Members/Guests widget.
     const addMembersWidget = createMembersWidget(ingest.form, {
       performerInput: 'f-artist', performerDropdown: 'f-artist-dropdown',
-      field: 'f-members-field', memberInput: 'f-member-input', memberDropdown: 'f-member-dropdown',
+      field: 'f-members-field',
     })
     addMembersWidget.mount()
     initAddPerformerMembers(addMembersWidget)
@@ -4853,6 +5260,16 @@ const App = (() => {
     document.getElementById('ingest-back-link').addEventListener('click', e => {
       e.preventDefault()
       if (ingest.fromBatch) {
+        // renderBatchResultsView() paints the batch list directly, bypassing
+        // the hash router — but window.location.hash is still '#/ingest' from
+        // when we navigated in. Left uncorrected, the NEXT _batchOpenReview()
+        // call sets hash to '#/ingest' again, which is a no-op (same value ⇒
+        // no hashchange ⇒ route() never runs ⇒ renderIngestView() never fires).
+        // The scan completes fine and ingest.* state is fully populated — the
+        // review form just never gets painted, looking exactly like a stuck
+        // hang even though nothing is hung. replaceState fixes the recorded
+        // hash without triggering a redundant render (2026-07-20).
+        history.replaceState(null, '', '#/batch')
         renderBatchResultsView()
       } else {
         ingest.step = 'folder'
@@ -4925,6 +5342,7 @@ const App = (() => {
         fingerprints: ingest.scan.fingerprints || [],
         info_file_content: ingest.scan.info_file_content || null,
         members: (f.members || []).map(m => m.name),
+        guests:  (f.guests  || []).map(m => m.name),
         // AI Assist may have already been run on this draft (pre-save) — carry
         // the result along so it lands on the new recording instead of being
         // lost the moment confirm creates the row (2026-07-14 bug: it wasn't).
@@ -4966,6 +5384,7 @@ const App = (() => {
             // the queue — that's the whole point for a bulk reviewer working
             // through many folders (Ryan, 2026-07-15).
             batch.ingestedIds.set(ingest.folderPath, result.recording_id)
+            history.replaceState(null, '', '#/batch')   // see note on the back-link handler above
             renderBatchResultsView()
           } else {
             window.location.hash = `#/recording/${result.recording_id}`
@@ -5143,6 +5562,8 @@ const App = (() => {
       setMainHTML(`<div class="empty-state"><div class="empty-title">This venue no longer exists</div></div>`)
       return
     }
+    setNavCurrent(v.name)
+    const navBack = state.navBack   // see the Performer page's identical comment
     const descText = v.bio && v.bio.trim()
     // One row per Recording at this venue (showing the performer, since a venue
     // hosts many different acts). Already ordered chronologically by the API.
@@ -5151,6 +5572,7 @@ const App = (() => {
 
     setMainHTML(`
       <div class="performer-page">
+        ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="vn-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
         <div class="performer-head">
           <div class="pp-name-row">
             <h1 class="pp-name pp-editable" id="vn-name" title="Click to edit">${esc(v.name)}</h1>
@@ -5169,6 +5591,12 @@ const App = (() => {
 
     wireRecordingRows(mainContent)
     if (venueRows.length) wireDateAddedSort(document.getElementById('rec-table-venue'), venueRows, true)
+
+    if (navBack) {
+      document.getElementById('vn-back-btn')?.addEventListener('click', () => {
+        window.location.hash = navBack.hash
+      })
+    }
 
     const refreshSidebar = () => invalidateDims('venues')
     async function saveField(patch) {
@@ -5204,6 +5632,7 @@ const App = (() => {
   async function renderVenuesPage(preSelectId = null) {
     setActiveNav('venues')
     setActiveArtist(null)
+    setNavCurrent('Venues')
     setLoading()
 
     let venues = []
@@ -5398,6 +5827,7 @@ const App = (() => {
   async function renderArtistsIndexPage() {
     setActiveNav('artists-index')
     setActiveArtist(null)
+    setNavCurrent('Performers')
     setLoading()
 
     let performers = []
@@ -5436,8 +5866,26 @@ const App = (() => {
 
   // ── Router ─────────────────────────────────────────────────────────────────
 
+  // Hash of the page route() last actually dispatched to — module-scope, not
+  // state.*, since this is purely a "have we already been here" bookkeeping
+  // detail for the navBack snapshot below, not app state anything else reads.
+  let _lastRouteHash = null
+
   function route() {
     const hash = window.location.hash || '#/'
+
+    // Snapshot "where we're coming from" for the destination page's Back
+    // link (state.navCurrent/navBack) — but only on a genuine navigation.
+    // Guard against two false positives: the very first dispatch this
+    // session (_lastRouteHash is null — nothing preceded it, navBack stays
+    // null) and a same-hash re-dispatch (some code sets window.location.hash
+    // to its OWN current value, or history.replaceState is used elsewhere to
+    // correct the recorded hash without a real navigation — neither should
+    // overwrite a real back target with the page's own info).
+    if (_lastRouteHash !== null && hash !== _lastRouteHash) {
+      state.navBack = state.navCurrent
+    }
+    _lastRouteHash = hash
 
     if (hash.startsWith('#/recording/')) {
       const id = parseInt(hash.split('/')[2])

@@ -50,6 +50,56 @@ class AiAssistError(Exception):
 # are deliberately excluded — they are suggestion-only via verify_items.
 _PROPOSAL_FIELDS = ["artist", "date", "venue", "city", "state", "country", "source", "event"]
 
+# $ per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
+# (checked 2026-07-21). Only the two models offered in Settings (see
+# app/api/preferences.py::_ALLOWED_MODELS) need entries here.
+# Sonnet 5 is in its introductory-pricing window through 2026-08-31 — after
+# that it becomes $3/$15. UPDATE THIS ROW on 2026-09-01, or the cost badge
+# will silently under-report by 50%.
+_PRICING = {
+    "claude-sonnet-5":  {"input": 2.00, "output": 10.00},   # through 2026-08-31; $3/$15 after
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+}
+_WEB_SEARCH_RATE_CENTS = 1.0   # $10 / 1,000 searches = $0.01 = 1 cent, flat per search used
+
+
+def _compute_cost(usage, model):
+    """
+    Turn an Anthropic Messages API `usage` object into a cost estimate, in
+    cents. Returns None (not zero) if the model has no pricing entry, so the
+    UI can tell "unknown" apart from "free."
+
+    usage fields, per the API: input_tokens, output_tokens, and (only present
+    when at least one search ran) server_tool_use.web_search_requests. Cache
+    tokens are read too, defensively, even though nothing in this module sets
+    cache_control today — a future dialogue feature (Problem 2 in the AI
+    Assist Refinement spec) may add caching, and a cache-read token billed as
+    a full-price input token would overstate cost by 10x.
+    """
+    rates = _PRICING.get(model)
+    if rates is None:
+        return None
+
+    input_tokens  = getattr(usage, "input_tokens", 0) or 0
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    cache_read    = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write   = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    stu           = getattr(usage, "server_tool_use", None)
+    searches      = getattr(stu, "web_search_requests", 0) or 0 if stu else 0
+
+    cents = (
+        (input_tokens - cache_read - cache_write) / 1_000_000 * rates["input"] * 100
+        + cache_read  / 1_000_000 * rates["input"] * 0.1 * 100   # cache hit = 10% of input rate
+        + cache_write / 1_000_000 * rates["input"] * 1.25 * 100  # 5-min cache write = 1.25x input rate
+        + output_tokens / 1_000_000 * rates["output"] * 100
+        + searches * _WEB_SEARCH_RATE_CENTS
+    )
+    return {
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": cache_write,
+        "web_search_requests": searches, "cost_cents": round(cents, 3),
+    }
+
 _SYSTEM = """You are the Flux Audio Research Assistant, an expert archivist of live \
 concert recordings (ROIOs). You verify and correct a recording's metadata using the \
 web-search tool.
@@ -249,4 +299,11 @@ def run_ai_assist(folder_path, current, api_key, model):
     result["proposals"] = [p for p in result.get("proposals", [])
                            if p.get("field") in _PROPOSAL_FIELDS and p.get("proposed")]
     result["model"] = model
+
+    usage = _compute_cost(getattr(resp, "usage", None), model)
+    result["usage"] = usage
+    if usage:
+        _log("usage: in=%d out=%d searches=%d cost=%.3f¢"
+             % (usage["input_tokens"], usage["output_tokens"],
+                usage["web_search_requests"], usage["cost_cents"]))
     return result

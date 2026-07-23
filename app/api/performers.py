@@ -6,9 +6,15 @@ managed here too. Grouping "everything by a person" lives on the Artist side
 (api/artists.py), not here.
 """
 
-from flask import Blueprint, jsonify, request
-from flask_login import login_required
+import os
+from pathlib import Path
+
+import json
+
+from flask import Blueprint, jsonify, request, send_file, current_app
+from flask_login import login_required, current_user
 from sqlalchemy import func
+from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models.performer import Performer, PerformerResource
@@ -16,12 +22,32 @@ from app.models.artist import Artist, Membership
 from app.models.performance import Performance
 from app.models.recording import Recording
 from app.utils.serialize import recording_summary
+from app.utils.ingest import _sanitize_path
 from app.utils.performers import (
     set_performer_members, add_membership_stint,
     update_membership_stint_bounds, remove_membership_stint,
 )
+from app.utils.performer_research import run_performer_research
+from app.utils.ai_assist import AiAssistError
+from app.utils.prefs import get_api_key, get_pref
 
 bp = Blueprint("performers", __name__)
+
+_ALLOWED_IMAGE_EXTS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                       ".png": "image/png", ".webp": "image/webp"}
+
+
+def _performer_images_dir(performer):
+    """
+    LIBRARY_ROOT/<sanitized name>/_images — the leading underscore sorts it
+    first alongside/before recording folders in a Finder listing (Ryan,
+    2026-07-22). NOTE: derived from the Performer's CURRENT name at request
+    time, not a stored path — see Performer.image_ext's docstring for the
+    rename-orphan caveat this carries (matches how existing recording
+    folders already behave on a rename: nothing moves those either).
+    """
+    library_root = current_app.config["LIBRARY_ROOT"]
+    return Path(library_root) / _sanitize_path(performer.name) / "_images"
 
 
 def _serialize_roster(performer):
@@ -154,6 +180,8 @@ def get_performer(performer_id):
         # list the Performer page's stint editor uses.
         "members":   _serialize_roster(p),
         "resources": [{"id": r.id, "label": r.label, "url": r.url} for r in p.resources],
+        "has_image": bool(p.image_ext),
+        "dossier":   json.loads(p.dossier_json) if p.dossier_json else None,
     })
 
 
@@ -232,6 +260,135 @@ def update_performer(performer_id):
         _set_resources(p, data["resources"])
     db.session.commit()
     return jsonify({"id": p.id})
+
+
+# ── Profile picture (2026-07-22) ─────────────────────────────────────────────
+# One image slot per Performer, stored on disk (not in the DB) at
+# LIBRARY_ROOT/<sanitized name>/_images/profile<ext> — see
+# _performer_images_dir() above and Performer.image_ext's docstring.
+
+@bp.route("/<int:performer_id>/image", methods=["POST"])
+@login_required
+def upload_performer_image(performer_id):
+    p = db.session.get(Performer, performer_id)
+    if not p:
+        return jsonify({"error": "Not found"}), 404
+    f = request.files.get("image")
+    if not f or not f.filename:
+        return jsonify({"error": "No image file provided"}), 400
+    ext = os.path.splitext(secure_filename(f.filename))[1].lower()
+    if ext not in _ALLOWED_IMAGE_EXTS:
+        return jsonify({"error": "Unsupported image type '%s' — use jpg, png, or webp" % ext}), 400
+
+    images_dir = _performer_images_dir(p)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    # Overwrite semantics: exactly one profile image ever exists for this
+    # Performer. If the new upload has a different extension than the old
+    # one, remove the old file first so it doesn't linger orphaned on disk.
+    if p.image_ext and p.image_ext != ext:
+        old = images_dir / ("profile" + p.image_ext)
+        if old.exists():
+            old.unlink()
+    dest = images_dir / ("profile" + ext)
+    f.save(str(dest))
+    p.image_ext = ext
+    db.session.commit()
+    return jsonify({"image_ext": ext})
+
+
+@bp.route("/<int:performer_id>/image", methods=["GET"])
+@login_required
+def get_performer_image(performer_id):
+    p = db.session.get(Performer, performer_id)
+    if not p or not p.image_ext:
+        return jsonify({"error": "No image"}), 404
+    path = _performer_images_dir(p) / ("profile" + p.image_ext)
+    if not path.exists():
+        return jsonify({"error": "Image file missing on disk"}), 404
+    return send_file(str(path), mimetype=_ALLOWED_IMAGE_EXTS[p.image_ext])
+
+
+@bp.route("/<int:performer_id>/image", methods=["DELETE"])
+@login_required
+def delete_performer_image(performer_id):
+    p = db.session.get(Performer, performer_id)
+    if not p:
+        return jsonify({"error": "Not found"}), 404
+    if p.image_ext:
+        path = _performer_images_dir(p) / ("profile" + p.image_ext)
+        if path.exists():
+            path.unlink()
+        p.image_ext = None
+        db.session.commit()
+    return jsonify({"ok": True})
+
+
+# ── Dossier — AI-drafted biography + suggested resource links (2026-07-22) ──
+# Background job, same shape as ingest.py's AI Assist (_AI_JOBS / poll):
+# the synchronous Anthropic call is too slow for the webview's fetch timeout,
+# so this starts a daemon thread and the client polls for the result. On
+# success the raw result is persisted to Performer.dossier_json — nothing
+# else is auto-applied (see performer_research.py's module docstring).
+_DOSSIER_JOBS = {}  # job_id -> {"status": running|done|error, "result"/"error"}
+
+
+def _run_dossier_job(job_id, performer_id, performer_name, current_bio, api_key, model, app):
+    import traceback as _tb
+    try:
+        result = run_performer_research(
+            performer_name, current_bio, api_key, model)
+        _DOSSIER_JOBS[job_id] = {"status": "done", "result": result}
+        try:
+            with app.app_context():
+                p = db.session.get(Performer, performer_id)
+                if p:
+                    p.dossier_json = json.dumps(result)
+                    db.session.commit()
+        except Exception:
+            _tb.print_exc()   # best-effort — client already has the result via the job dict
+    except AiAssistError as e:
+        _DOSSIER_JOBS[job_id] = {"status": "error", "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        _tb.print_exc()
+        _DOSSIER_JOBS[job_id] = {"status": "error", "error": "Unexpected error: %s" % e}
+
+
+@bp.route("/<int:performer_id>/dossier", methods=["POST"])
+@login_required
+def start_dossier(performer_id):
+    import threading
+    import uuid
+
+    p = db.session.get(Performer, performer_id)
+    if not p:
+        return jsonify({"error": "Not found"}), 404
+    api_key = get_api_key(current_user.id)
+    if not api_key:
+        return jsonify({"error": "no_api_key"}), 428
+    model = get_pref(current_user.id, "ai_model") or "claude-sonnet-5"
+
+    job_id = uuid.uuid4().hex
+    _DOSSIER_JOBS[job_id] = {"status": "running"}
+    threading.Thread(
+        target=_run_dossier_job,
+        args=(job_id, performer_id, p.name, p.bio or "", api_key, model, current_app._get_current_object()),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id}), 202
+
+
+@bp.route("/<int:performer_id>/dossier/<job_id>", methods=["GET"])
+@login_required
+def dossier_status(performer_id, job_id):
+    job = _DOSSIER_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    if job["status"] == "running":
+        return jsonify({"status": "running"})
+    _DOSSIER_JOBS.pop(job_id, None)   # deliver terminal state once, then discard
+    if job["status"] == "error":
+        return jsonify({"status": "error", "error": job["error"]})
+    return jsonify({"status": "done", "result": job["result"]})
 
 
 @bp.route("/<int:performer_id>/members/<int:artist_id>/stints", methods=["POST"])

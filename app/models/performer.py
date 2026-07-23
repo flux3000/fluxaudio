@@ -28,8 +28,31 @@ class Performer(db.Model):
     # 'inherit' (default) = act roster/stints apply; 'explicit' = every show
     # starts with an empty lineup that must be entered per-show (rotating
     # billings like "Acoustic All-Stars" set this once and never fight the
-    # default again). See app/utils/personnel.py.
+    # default again). See app/utils/personnel.py. No manual UI control since
+    # the 2026-07-22 Members/Guests redesign — the field and its automatic
+    # behavior (new-performance default, case-5 auto-flip) are unchanged.
     default_personnel_mode = db.Column(db.String(16), nullable=False, default="inherit")
+
+    # Profile picture (2026-07-22). The file itself lives on disk, not in the
+    # DB — LIBRARY_ROOT/<sanitized name>/_images/profile<image_ext>, see
+    # app/api/performers.py's image upload/serve routes. image_ext is
+    # nullable — None means no picture uploaded. NOTE: the folder path is
+    # derived from the Performer's CURRENT name at request time, not stored —
+    # renaming an act without a corresponding folder rename would orphan an
+    # already-uploaded picture. Matches how recording folders already behave
+    # on a Performer rename (nothing renames those either); flagged here
+    # rather than solved, per Ryan's scope-discipline call on this feature.
+    image_ext = db.Column(db.String(8), nullable=True)
+
+    # Latest AI Dossier research pass (2026-07-22) — a drafted biography +
+    # suggested external resource links, JSON-encoded like
+    # Recording.ai_research_json. Nothing is auto-applied: the Dossier UI
+    # only ever proposes; Ryan copies the bio into `bio` and picks which
+    # resource links to add, by hand — same "AI suggests, human approves"
+    # rule as the ingest-side AI Assist (see the 2026-07-20/21 AI Assist
+    # Refinement spec in Context Library — auto-apply was removed there
+    # after it silently overwrote a recording with a wrong date).
+    dossier_json = db.Column(db.Text, nullable=True)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),

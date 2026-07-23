@@ -1032,12 +1032,28 @@ def build_scan_payload(folder_path):
     Returns the full scan payload (audio files, parsed tag/info-file
     suggestions, fingerprints, and a compute_health() score), or None if the
     folder has no audio files.
+
+    Logs a "step" checkpoint (see utils/debug_log.py) after each phase so a
+    slow/stuck scan is visible in the debug panel's Live Server Activity
+    section WHILE it's still running, keyed to this folder's path — this is
+    the shared foundation for both the interactive Review scan and batch
+    import, so instrumenting it here covers both for free.
     """
+    from app.utils.debug_log import log_step
+    job = f"scan:{folder_path}"
+    log_step(job, "start", "walking folder (os.listdir/os.walk — this is where a slow "
+                           "NAS mount or a huge folder shows up as a long gap before the next step)")
+
     files = scan_folder(folder_path)
+    log_step(job, "walked folder",
+             f"{len(files['audio_files'])} audio · {len(files['text_files'])} text · "
+             f"{len(files['fingerprints'])} fingerprint file(s)")
     if not files["audio_files"]:
+        log_step(job, "done", "no audio files found")
         return None
 
     from_tags = read_flac_tags(files["audio_files"])
+    log_step(job, "read FLAC tags", f"{len(files['audio_files'])} file(s)")
 
     # Parse CONCERTLOCATION tag into city/state/country using the same
     # geonamescache-backed parser as the info file (best-effort, graceful fallback)
@@ -1055,6 +1071,7 @@ def build_scan_payload(folder_path):
     parsed_candidates = []
     for tf in files["text_files"]:
         parsed = parse_info_file(tf["path"])
+        log_step(job, "parsed info file", tf["filename"])
         entry  = {
             "filename":    tf["filename"],
             "score":       tf.get("score", 0),
@@ -1096,6 +1113,8 @@ def build_scan_payload(folder_path):
             "filename": fp["filename"],
             "content":  content,
         })
+    if files["fingerprints"]:
+        log_step(job, "read fingerprint files", f"{len(files['fingerprints'])} file(s)")
 
     resp = {
         "folder_path":      folder_path,
@@ -1159,6 +1178,7 @@ def build_scan_payload(folder_path):
         },
     }
     resp["health"] = compute_health(resp)
+    log_step(job, "done", f"health {resp['health']['score']} ({resp['health']['band']})")
     return resp
 
 
@@ -1234,9 +1254,78 @@ def move_to_library(source_folder, library_root, artist_name, folder_name,
         # Files are gone from source; clear out the now-empty (or
         # empty-of-anything-useful) directory tree that's left behind.
         shutil.rmtree(str(src), ignore_errors=True)
+        # The recording folder itself is gone — now check whether ITS parent
+        # (typically the "Performer Name" staging folder in a Bulk Import
+        # layout, e.g. Import/Performer Name/Show Folder/) is left empty too,
+        # and remove it if so (Ryan, 2026-07-23 — applies to every
+        # move-behavior ingest, not just Bulk Import; see
+        # _cleanup_empty_parent's own docstring for the safety guards).
+        _cleanup_empty_parent(src)
 
     # Return path relative to library_root for storage in DB
     return str(dest_folder.relative_to(library_root))
+
+
+# Folder-metadata cruft that shouldn't count as "real content" when deciding
+# whether a staging folder is empty enough to remove — a folder Finder has
+# ever opened almost always has a stray .DS_Store in it, which would
+# otherwise block cleanup every single time.
+_JUNK_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini", ".localized"}
+
+# Standard macOS/user directories that must never be auto-deleted even if
+# they happen to be empty — this cleanup is meant for disposable Bulk Import
+# staging folders (e.g. "Performer Name"), not general-purpose folders a
+# user might legitimately empty out for unrelated reasons.
+_PROTECTED_DIR_NAMES = {
+    "Desktop", "Downloads", "Documents", "Music", "Movies",
+    "Pictures", "Public", "Applications", "Library",
+}
+
+
+def _cleanup_empty_parent(folder):
+    """
+    After a MOVE ingest empties out and removes `folder` (the source show
+    folder itself — already gone by the time this runs, see the rmtree
+    above), remove ITS parent too if that parent is now empty. One level
+    only — never walks further up the tree (Ryan's ask was specifically
+    "the Performer Name source directory," singular, not an arbitrary climb
+    toward the filesystem root).
+
+    Best-effort and silent: this is a courtesy cleanup, not something that
+    should ever fail — or even be noticed to fail — an otherwise-successful
+    ingest. Refuses to touch anything that isn't unambiguously a disposable
+    staging folder:
+      - the user's home directory
+      - a filesystem/volume root or mount point (e.g. "/Volumes/music")
+      - a handful of standard macOS folders by name (Desktop, Downloads,
+        Documents, ...) even if reached via a longer path, since deleting
+        someone's Desktop because it happened to be empty would be a far
+        worse outcome than leaving one harmless empty folder behind.
+    """
+    try:
+        parent = Path(folder).parent.resolve()
+
+        if parent == Path.home().resolve():
+            return
+        if parent == parent.parent:            # true filesystem root "/"
+            return
+        if os.path.ismount(str(parent)):        # volume root / mount point
+            return
+        if parent.name in _PROTECTED_DIR_NAMES:
+            return
+        if not parent.is_dir():
+            return
+
+        entries = list(parent.iterdir())
+        real = [e for e in entries if not (e.is_file() and e.name in _JUNK_FILENAMES)]
+        if real:
+            return   # still has real content — leave it alone
+
+        for e in entries:
+            e.unlink()
+        parent.rmdir()
+    except OSError:
+        pass   # best-effort — never let cleanup failure affect the ingest
 
 
 def compute_audio_rename_map(tracks):

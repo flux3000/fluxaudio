@@ -19,7 +19,7 @@ from app.utils.format import format_partial_date
 from app.utils.serialize import recording_summary
 from app.utils.performers import resolve_or_create_performer
 from app.utils.personnel import (
-    resolve_performance_personnel, sync_performance_personnel_from_names,
+    resolve_performance_personnel, sync_performance_personnel,
     set_performance_personnel_mode,
 )
 from app.utils.pruning import prune_performer_if_orphaned
@@ -163,10 +163,16 @@ def update_performance(performance_id):
     # Performer page). This used to call set_performer_members(p.performer,
     # ...), silently rewriting the act's GLOBAL roster from a single show's
     # pill-row edit — that was the actual bug the Per-Show Personnel design
-    # doc set out to fix. Now it only ever touches performance_personnel
-    # rows scoped to this performance; see utils/personnel.py.
-    if data.get("members") is not None:
-        sync_performance_personnel_from_names(p, data["members"])
+    # doc set out to fix. Now it only ever touches performance_personnel rows
+    # scoped to this performance; see utils/personnel.py.
+    #
+    # Members/Guests two-row UI (2026-07-22): 'members' and 'guests' are two
+    # independent name lists, not one list with guest-vs-member inferred by
+    # diffing. Either key can be omitted (not sent) to leave that row
+    # untouched — the frontend always sends both together on any edit, so in
+    # practice this only matters for API callers that don't.
+    if "members" in data or "guests" in data:
+        sync_performance_personnel(p, data.get("members"), data.get("guests"))
 
     for f in ["title", "stage", "start_year", "start_month", "start_day",
               "end_year", "end_month", "end_day", "venue_id", "event_id",

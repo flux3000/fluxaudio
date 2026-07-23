@@ -7,13 +7,41 @@ Usage:
 """
 
 from flask import Flask
-from config import Config
+from config import Config, DEV_SECRET_DEFAULT
 from app.extensions import db, login_manager
+
+
+def _validate_server_mode(app):
+    """
+    Boot-time guards for SERVER_MODE (a shared/public deployment, as opposed
+    to a single-user local machine). Refuses to start rather than boot into
+    a known-insecure configuration.
+    """
+    if not app.config.get("SERVER_MODE"):
+        return
+
+    if app.config.get("DEV_MODE"):
+        raise RuntimeError(
+            "Refusing to boot: SERVER_MODE and DEV_MODE are both enabled. "
+            "DEV_MODE auto-logs-in the first admin user with no credentials — "
+            "combined with SERVER_MODE (a publicly reachable instance), this "
+            "is an open admin panel. Unset DEV_MODE or disable SERVER_MODE."
+        )
+
+    secret_key = app.config.get("SECRET_KEY")
+    if not secret_key or secret_key == DEV_SECRET_DEFAULT:
+        raise RuntimeError(
+            "Refusing to boot: SERVER_MODE is enabled but SECRET_KEY is "
+            "unset or is the known dev default. Set a unique, unpredictable "
+            "SECRET_KEY in the environment before running in SERVER_MODE."
+        )
 
 
 def create_app(config_class=Config):
     app = Flask(__name__, static_folder="static")
     app.config.from_object(config_class)
+
+    _validate_server_mode(app)
 
     # ── Initialize extensions ──────────────────────────────────
     db.init_app(app)

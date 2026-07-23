@@ -212,6 +212,138 @@ def test_do_confirm_copies_files_and_reports_progress(app, db, tmp_path):
     assert progress and progress[-1][0] == progress[-1][1]   # finished at 100%
 
 
+def test_do_confirm_does_not_corrupt_existing_roster(app, db, tmp_path):
+    """Regression test for the ingest-time act-roster-corruption bug
+    (2026-07-22 fix): confirming a recording for an EXISTING Performer with
+    'members' set to (a subset of) its already-resolved lineup must NOT call
+    set_performer_members and rewrite the act roster — that was the same
+    Phase-1 bug, just never ported to the ingest confirm path. Membership
+    stint history must survive untouched, and a 'guests' name must attach as
+    performance-level personnel only, never touching the roster."""
+    from app.api.ingest import _do_confirm
+    from app.models.user import User
+    from app.utils.performers import resolve_or_create_performer, add_membership_stint
+    from app.utils.personnel import resolve_performance_personnel
+
+    uid = db.session.query(User).first().id
+    lib = tmp_path / "lib"; lib.mkdir()
+    app.config["LIBRARY_ROOT"] = str(lib)
+
+    # An existing act with a DATED stint — exactly what set_performer_members'
+    # wholesale-rewrite behavior used to be able to destroy.
+    performer = resolve_or_create_performer("Existing Act With History")
+    stint = add_membership_stint(performer, "Roster Person",
+                                  start_year=1970, end_year=1975)
+    _db.session.commit()
+
+    src = tmp_path / "src_show"; src.mkdir()
+    (src / "t01.flac").write_bytes(b"x" * 500)
+    data = {
+        "source_folder_path": str(src),
+        "artist_name": "Existing Act With History",
+        "start_year": 1972, "start_month": 6, "start_day": 1,
+        "source": "AUD",
+        "members": ["Roster Person"],   # the Add Recording form's pre-populated Members row
+        "guests":  ["Sit-In Player"],
+        "tracks": [{"track_number": 1, "title": "One", "duration": 100, "filename": "t01.flac"}],
+    }
+    result = _do_confirm(data, uid, None)
+    assert result["recording_id"]
+
+    # Roster untouched: still exactly one stint, same dates, not duplicated.
+    roster = _db.session.query(Membership).filter_by(performer_id=performer.id).all()
+    assert len(roster) == 1
+    assert roster[0].id == stint.id
+    assert (roster[0].start_year, roster[0].end_year) == (1970, 1975)
+
+    rec = _db.session.get(Recording, result["recording_id"])
+    resolved = resolve_performance_personnel(rec.performance)
+    by_name = {r["name"]: (r["source"], r["is_guest"]) for r in resolved}
+    assert by_name == {
+        "Roster Person": ("inherited", False),
+        "Sit-In Player": ("guest", True),
+    }
+
+
+def test_do_confirm_seeds_roster_for_brand_new_performer(app, db, tmp_path):
+    """The other half of the same fix: a BRAND NEW Performer's first-show
+    'members' still seeds its initial roster (unchanged behavior) — only
+    an EXISTING Performer's roster is protected from being overwritten."""
+    from app.api.ingest import _do_confirm
+    from app.models.user import User
+
+    uid = db.session.query(User).first().id
+    lib = tmp_path / "lib"; lib.mkdir()
+    app.config["LIBRARY_ROOT"] = str(lib)
+
+    src = tmp_path / "src_show"; src.mkdir()
+    (src / "t01.flac").write_bytes(b"x" * 500)
+    data = {
+        "source_folder_path": str(src),
+        "artist_name": "Brand New Duo",
+        "start_year": 2002, "start_month": 6, "start_day": 23,
+        "source": "AUD",
+        "members": ["Person A", "Person B"],
+        "tracks": [{"track_number": 1, "title": "One", "duration": 100, "filename": "t01.flac"}],
+    }
+    result = _do_confirm(data, uid, None)
+    assert result["recording_id"]
+
+    performer = _db.session.query(Performer).filter_by(name="Brand New Duo").first()
+    roster_names = {m.artist.name for m in
+                    _db.session.query(Membership).filter_by(performer_id=performer.id).all()}
+    assert roster_names == {"Person A", "Person B"}
+
+
+def test_do_confirm_omitted_members_key_does_not_wipe_inherited_roster(app, db, tmp_path):
+    """Regression test for the Batch Import Auto-Ingest bug (2026-07-23 fix):
+    that path never sends "members"/"guests" in its confirm payload at all
+    (no review wizard, no pre-fill) — data.get("members") is None, not [].
+    _do_confirm used to collapse that None to [] before ever reaching
+    sync_performance_personnel(), which reads [] as "the user just cleared
+    every member," tripping the case-5 safeguard: flip to personnel_mode=
+    'explicit' and snapshot the (empty) surviving lineup. Net effect: an
+    existing act's Members row on View Recording came out blank even though
+    the performer's own roster was fully intact (Ryan's report — "Bela Fleck
+    & Tony Trischka" ingested via Bulk Import's Auto-Ingest button).
+    The fix preserves the None/[] distinction through to
+    sync_performance_personnel, so an omitted key means "leave the resolved
+    lineup exactly as it is" — a true no-op for a brand-new inherit-mode
+    performance, since the resolved lineup IS the roster already."""
+    from app.api.ingest import _do_confirm
+    from app.models.user import User
+    from app.utils.performers import resolve_or_create_performer, add_membership_stint
+    from app.utils.personnel import resolve_performance_personnel
+
+    uid = db.session.query(User).first().id
+    lib = tmp_path / "lib"; lib.mkdir()
+    app.config["LIBRARY_ROOT"] = str(lib)
+
+    performer = resolve_or_create_performer("Auto Ingest Duo")
+    add_membership_stint(performer, "Fleck-Like Person")
+    add_membership_stint(performer, "Trischka-Like Person")
+    _db.session.commit()
+
+    src = tmp_path / "src_show_auto"; src.mkdir()
+    (src / "t01.flac").write_bytes(b"x" * 500)
+    data = {
+        # No "members" / "guests" keys at all — matches _batchIngestOne's
+        # payload in app.js, which never visits the review wizard.
+        "source_folder_path": str(src),
+        "artist_name": "Auto Ingest Duo",
+        "start_year": 2002, "start_month": 7, "start_day": 28,
+        "source": "AUD",
+        "tracks": [{"track_number": 1, "title": "One", "duration": 100, "filename": "t01.flac"}],
+    }
+    result = _do_confirm(data, uid, None)
+    rec = _db.session.get(Recording, result["recording_id"])
+
+    assert rec.performance.personnel_mode == "inherit"   # never flipped
+    resolved = resolve_performance_personnel(rec.performance)
+    names = {r["name"] for r in resolved}
+    assert names == {"Fleck-Like Person", "Trischka-Like Person"}
+
+
 def test_do_confirm_persists_pre_save_ai_result(app, db, tmp_path):
     """A recording ingested after running AI Assist pre-confirm (Add
     Recording's own button, before the row exists) should land with

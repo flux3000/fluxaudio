@@ -22,7 +22,8 @@ _AUDIO_EXTS = {'.flac', '.mp3', '.wav', '.aiff', '.aif', '.m4a', '.ogg', '.ape',
 from app.extensions import db
 from app.models.performer import Performer
 from app.models.artist import Artist, Membership
-from app.utils.performers import resolve_or_create_performer, set_performer_members
+from app.utils.performers import resolve_or_create_performer
+from app.utils.personnel import sync_performance_personnel
 from app.utils.venues import is_placeholder_venue_name
 from app.models.venue import Venue
 from app.models.event import Event
@@ -456,15 +457,42 @@ def _do_confirm(data, user_id, progress_cb=None):
     end_month   = data.get("end_month")
     end_day     = data.get("end_day")
 
-    # ── 1. Find or create Performer (the act) + its member Artists ────────────
-    # `members` is an ordered list of Artist (person) names. A new Performer
-    # auto-seeds a single member matching its name; if members are supplied they
-    # set the roster (applies to an existing Performer too — members belong to
-    # the act, not the show).
-    member_names = data.get("members") or []
-    performer = resolve_or_create_performer(artist_name)
-    if member_names:
-        set_performer_members(performer, member_names)
+    # ── 1. Find or create Performer (the act) ─────────────────────────────────
+    # `members`/`guests` are the Add Recording form's two personnel rows — see
+    # app/utils/personnel.py::sync_performance_personnel for what they mean at
+    # the PERFORMANCE level. Historically this block also used member_names to
+    # seed/overwrite the act's ROSTER via set_performer_members, unconditionally,
+    # for an existing Performer too — that's the same act-roster-corruption bug
+    # Phase 1 already fixed for the recording page's PUT endpoint, just never
+    # ported to ingest (flagged as an open gap in the design doc's ripple list,
+    # item 5). resolve_or_create_performer(name, member_names) already has the
+    # correct behavior baked in — it only seeds member_names as the roster when
+    # the Performer is BRAND NEW, and leaves an existing act's roster alone —
+    # so passing member_names straight through here fixes it with no new code.
+    # Two different needs for the same payload key, so two variables:
+    #  - member_names/guest_names (never None) for resolve_or_create_performer,
+    #    which just wants "what to seed a BRAND NEW performer's roster with,
+    #    if anything."
+    #  - member_names_sync/guest_names_sync (RAW, preserves None) for
+    #    sync_performance_personnel below, which treats None as "leave this
+    #    bucket exactly as currently resolved" vs. [] as "the user cleared
+    #    it, wipe it" (see that function's docstring). Batch Import's
+    #    Auto-Ingest path (_batchIngestOne in app.js) never visits the review
+    #    wizard, so it never sends "members"/"guests" at all — collapsing
+    #    that omission to [] here made sync_performance_personnel think every
+    #    inherited roster member had just been removed, which trips its
+    #    case-5 safeguard: flip to 'explicit' and snapshot nothing, since
+    #    nothing was in the list to keep. Net effect: the recording's
+    #    Members row came out blank even though the performer's own roster
+    #    was intact (Ryan, 2026-07-23 bug report — Bela Fleck & Tony
+    #    Trischka). Only the manual Add Recording/Batch Review form pre-fills
+    #    and always sends both keys (even an intentionally-emptied one), so
+    #    that path's behavior is unchanged by this fix.
+    member_names_sync = data.get("members")
+    guest_names_sync  = data.get("guests")
+    member_names = member_names_sync or []
+    guest_names  = guest_names_sync  or []
+    performer = resolve_or_create_performer(artist_name, member_names)
 
     # ── 3. Find or create Venue (optional) ────────────────────────────────────
     # Placeholder names ("Unknown Venue", "TBD", ...) are never linked as a
@@ -549,6 +577,16 @@ def _do_confirm(data, user_id, progress_cb=None):
         )
         db.session.add(performance)
         db.session.flush()
+
+    # Apply the Add Recording form's Members/Guests rows to THIS performance.
+    # For the common case (new act, or an existing act's roster left
+    # untouched in the form) this is a no-op — sync_performance_personnel
+    # diffs against what's already resolved, and the form was pre-populated
+    # from that same resolved state. It only actually writes rows when the
+    # user edited something (added a guest, or removed a roster member for
+    # this one show). Runs whether the Performance is brand new or an
+    # already-existing one being re-confirmed with a second recording.
+    sync_performance_personnel(performance, member_names_sync, guest_names_sync)
 
     # ── 5. Build canonical folder name ────────────────────────────────────────
     folder_name = build_folder_name(
@@ -900,12 +938,20 @@ def batch_scan():
     from app.utils.ingest import build_scan_payload
     from app.models.recording import Recording
     from app.utils.paula import compute_paula_score
+    from app.utils.debug_log import log_step
 
     data       = request.get_json() or {}
     source_dir = (data.get("source_dir") or "").strip()
 
     if not source_dir or not os.path.isdir(source_dir):
         return jsonify({"error": f"Directory not found: {source_dir!r}"}), 400
+
+    # Umbrella job for the whole batch — each individual folder ALSO gets its
+    # own "scan:<folder_path>" job from build_scan_payload() itself, so a
+    # hang shows both "batch is on folder 3/6" and exactly which phase of
+    # THAT folder's scan is stuck.
+    batch_job = f"batch-scan:{source_dir}"
+    log_step(batch_job, "start", "POST /api/ingest/batch-scan")
 
     # Known artist/venue records — same lookups the interactive Add Recording
     # scan uses, so Paula's per-item confidence scoring here (added 2026-07-15,
@@ -981,8 +1027,11 @@ def batch_scan():
     for entry in sorted(os.scandir(source_dir), key=lambda e: e.name.lower()):
         if entry.is_dir():
             show_paths.extend(_resolve_shows(entry.path))
+    log_step(batch_job, "resolved shows", f"{len(show_paths)} folder(s) to scan")
 
-    for folder_path in show_paths:
+    for i, folder_path in enumerate(show_paths):
+        log_step(batch_job, "scanning folder",
+                 f"{i + 1}/{len(show_paths)}: {os.path.basename(folder_path)}")
         already_ingested = os.path.basename(folder_path) in ingested_paths
 
         # ── Filesystem audit ──────────────────────────────────────────────────
@@ -1183,6 +1232,9 @@ def batch_scan():
     green  = sum(1 for r in results if r["tier"] == "green")
     yellow = sum(1 for r in results if r["tier"] == "yellow")
     red    = sum(1 for r in results if r["tier"] == "red")
+
+    log_step(batch_job, "done", f"{len(results)} folder(s) scored "
+                                 f"({green} green, {yellow} yellow, {red} red)")
 
     return jsonify({
         "source_dir": source_dir,

@@ -23,6 +23,16 @@ CHUNK_SIZE = 1024 * 256  # 256 KB chunks
 MIMETYPE   = "audio/flac"
 
 
+def _path_within(candidate, base):
+    """
+    True if the resolved `candidate` path is equal to, or nested inside,
+    the resolved `base` directory. Both inputs should already be
+    os.path.realpath()'d by the caller — this only does the string
+    comparison, shared by every containment check in this module.
+    """
+    return candidate == base or candidate.startswith(base + os.sep)
+
+
 def _serve_file(full_path, mimetype=MIMETYPE):
     """
     Stream a file with HTTP Range support (enables seeking): a 206 partial
@@ -79,8 +89,17 @@ def stream_track(track_id):
     if not recording:
         abort(404)
 
-    library_root = current_app.config["LIBRARY_ROOT"]
-    full_path    = os.path.join(library_root, recording.folder_path, track.file_path)
+    library_root      = current_app.config["LIBRARY_ROOT"]
+    real_library_root = os.path.realpath(library_root)
+    full_path         = os.path.realpath(
+        os.path.join(library_root, recording.folder_path, track.file_path)
+    )
+
+    # Defense in depth: folder_path/file_path come from the DB, not directly
+    # from the request, but a corrupted or maliciously-written row should
+    # still not be able to serve a file outside LIBRARY_ROOT.
+    if not _path_within(full_path, real_library_root):
+        abort(403)
 
     if not os.path.isfile(full_path):
         abort(404)
@@ -101,10 +120,17 @@ def stream_ingest_preview():
     if not folder or not filename:
         abort(400)
 
-    # Resolve both paths and confirm filename stays inside the folder (no traversal)
-    real_folder = os.path.realpath(folder)
-    full_path   = os.path.realpath(os.path.join(real_folder, filename))
-    if not full_path.startswith(real_folder + os.sep):
+    # Resolve the folder and confirm it lives inside one of the configured
+    # IMPORT_ROOTS — otherwise any logged-in user could read arbitrary files
+    # off the server (e.g. ?folder=/etc&file=passwd).
+    real_folder  = os.path.realpath(folder)
+    import_roots = [os.path.realpath(root) for root in current_app.config.get("IMPORT_ROOTS", [])]
+    if not any(_path_within(real_folder, root) for root in import_roots):
+        abort(403)
+
+    # Resolve the file and confirm it stays inside the folder (no traversal)
+    full_path = os.path.realpath(os.path.join(real_folder, filename))
+    if not _path_within(full_path, real_folder):
         abort(403)
     if not os.path.isfile(full_path):
         abort(404)

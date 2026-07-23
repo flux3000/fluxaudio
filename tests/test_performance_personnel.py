@@ -230,7 +230,9 @@ def test_recording_page_edit_does_not_touch_act_roster(api, seeded_ids):
     """The original bug: editing a recording page's Artists pills used to
     call set_performer_members(p.performer, ...), rewriting the ACT's global
     roster. Adding a guest here must leave the act roster — and any OTHER
-    performance of that act — untouched."""
+    performance of that act — untouched. Members/Guests two-row UI
+    (2026-07-22): the two roles are now two separate submitted lists, not one
+    list with guest-vs-member inferred by diffing."""
     perf_id = seeded_ids["performance_id"]
     performer_id = seeded_ids["performer_id"]
 
@@ -238,7 +240,7 @@ def test_recording_page_edit_does_not_touch_act_roster(api, seeded_ids):
     _db.session.commit()
 
     resp = api.put(f"/api/performances/{perf_id}",
-                   json={"members": ["Bill Evans", "Sit-In Guest"]})
+                   json={"members": ["Bill Evans"], "guests": ["Sit-In Guest"]})
     assert resp.status_code == 200
 
     roster = _db.session.query(Membership).filter_by(performer_id=performer_id).all()
@@ -250,8 +252,11 @@ def test_recording_page_edit_does_not_touch_act_roster(api, seeded_ids):
 
     this_perf = _db.session.get(Performance, perf_id)
     assert this_perf.personnel_mode == "inherit"
-    by_name = {r["name"]: r["source"] for r in resolve_performance_personnel(this_perf)}
+    resolved = resolve_performance_personnel(this_perf)
+    by_name = {r["name"]: r["source"] for r in resolved}
     assert by_name == {"Bill Evans": "inherited", "Sit-In Guest": "guest"}
+    is_guest_by_name = {r["name"]: r["is_guest"] for r in resolved}
+    assert is_guest_by_name == {"Bill Evans": False, "Sit-In Guest": True}
 
 
 def test_dropping_inherited_member_switches_to_explicit(api, seeded_ids):
@@ -272,6 +277,102 @@ def test_dropping_inherited_member_switches_to_explicit(api, seeded_ids):
         performer_id=seeded_ids["performer_id"]).first()
     assert membership is not None
     assert membership.artist.name == "Bill Evans"
+
+
+def test_adding_member_in_inherit_mode_does_not_flip_to_explicit(api, seeded_ids):
+    """Members/Guests two-row UI (2026-07-22): adding someone via the Members
+    row who isn't on the act roster is a full-member addition for this show,
+    not a guest sit-in — but it must NOT flip the performance to explicit
+    mode (only DROPPING an inherited member does that, per case 5)."""
+    perf_id = seeded_ids["performance_id"]
+
+    resp = api.put(f"/api/performances/{perf_id}",
+                   json={"members": ["Bill Evans", "Subbing In"], "guests": []})
+    assert resp.status_code == 200
+
+    perf = _db.session.get(Performance, perf_id)
+    assert perf.personnel_mode == "inherit"   # unchanged — nobody was dropped
+    resolved = resolve_performance_personnel(perf)
+    by_name = {r["name"]: (r["source"], r["is_guest"]) for r in resolved}
+    assert by_name == {"Bill Evans": ("inherited", False), "Subbing In": ("added", False)}
+
+
+def test_added_member_later_joining_roster_does_not_duplicate(api, seeded_ids):
+    """Regression test (Ryan, 2026-07-23 — JD Crowe & the New South, recording
+    #239): add someone via the recording page's Members row (creates a
+    performance_personnel 'added' row), then separately add that SAME person
+    to the act's roster on the Performer page (a new Membership). Both
+    mechanisms now cover them, but resolve_performance_personnel must show
+    them exactly once — and removing that one pill must actually remove
+    them, not silently no-op because a duplicate with the same name kept the
+    name "in the target set" from the diffing's point of view."""
+    perf_id = seeded_ids["performance_id"]
+    performer = _db.session.get(Performance, perf_id).performer
+
+    # Step 1: add three people via the recording page's Members row — none of
+    # them are on the act roster yet, so these land as 'added' rows.
+    resp = api.put(f"/api/performances/{perf_id}",
+                   json={"members": ["Bill Evans", "Bobby Sloane", "Tony Rice", "Ricky Skaggs"],
+                         "guests": []})
+    assert resp.status_code == 200
+    resolved = resolve_performance_personnel(_db.session.get(Performance, perf_id))
+    assert len(resolved) == 4   # sanity check before the roster edit
+
+    # Step 2: separately add those same three people to the ACT roster (the
+    # Performer page's "+" button) — unbounded stints, so they cover every
+    # date including this one.
+    add_membership_stint(performer, "Bobby Sloane")
+    add_membership_stint(performer, "Tony Rice")
+    add_membership_stint(performer, "Ricky Skaggs")
+    _db.session.commit()
+
+    # Bug: without dedup, this would be 7 (4 + 3 redundant leftover rows).
+    resolved = resolve_performance_personnel(_db.session.get(Performance, perf_id))
+    names = [r["name"] for r in resolved]
+    assert len(names) == len(set(names)) == 4
+    assert set(names) == {"Bill Evans", "Bobby Sloane", "Tony Rice", "Ricky Skaggs"}
+    # The surviving entry for each newly-rostered person must be the
+    # 'inherited' one (not the stale 'added' row) — that's what makes
+    # removing them go through the correct case-5 flow next.
+    by_name = {r["name"]: r["source"] for r in resolved}
+    assert by_name["Tony Rice"] == "inherited"
+
+    # Step 3: click X on Tony Rice's (now single) pill — must actually
+    # remove him, not silently no-op.
+    resp = api.put(f"/api/performances/{perf_id}",
+                   json={"members": ["Bill Evans", "Bobby Sloane", "Ricky Skaggs"],
+                         "guests": []})
+    assert resp.status_code == 200
+    resolved = resolve_performance_personnel(_db.session.get(Performance, perf_id))
+    names = {r["name"] for r in resolved}
+    assert "Tony Rice" not in names
+    assert names == {"Bill Evans", "Bobby Sloane", "Ricky Skaggs"}
+
+
+def test_guests_list_independent_of_members_list(api, seeded_ids):
+    """Omitting 'members' from the PUT payload must leave the Members row
+    untouched while still reconciling 'guests' — the two rows are
+    independently updatable, not one combined list."""
+    perf_id = seeded_ids["performance_id"]
+
+    api.put(f"/api/performances/{perf_id}", json={"guests": ["Guest One"]})
+    resolved = resolve_performance_personnel(_db.session.get(Performance, perf_id))
+    by_name = {r["name"]: r["is_guest"] for r in resolved}
+    assert by_name == {"Bill Evans": False, "Guest One": True}
+
+    # Add a second guest without resending 'members' — Bill Evans must survive.
+    api.put(f"/api/performances/{perf_id}", json={"guests": ["Guest One", "Guest Two"]})
+    resolved = resolve_performance_personnel(_db.session.get(Performance, perf_id))
+    by_name = {r["name"]: r["is_guest"] for r in resolved}
+    assert by_name == {"Bill Evans": False, "Guest One": True, "Guest Two": True}
+
+    # Remove Guest One by resending guests without it — a plain row delete,
+    # no mode flip (guests never trigger case 5).
+    api.put(f"/api/performances/{perf_id}", json={"guests": ["Guest Two"]})
+    perf = _db.session.get(Performance, perf_id)
+    assert perf.personnel_mode == "inherit"
+    resolved = resolve_performance_personnel(perf)
+    assert {r["name"] for r in resolved} == {"Bill Evans", "Guest Two"}
 
 
 def test_get_performance_reflects_resolved_personnel(api, seeded_ids):
