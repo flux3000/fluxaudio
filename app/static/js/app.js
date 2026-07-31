@@ -163,8 +163,11 @@ const App = (() => {
 
   // Ingest wizard state — persists across step renders
   const ingest = {
-    step:       'folder',  // 'folder' | 'review' | 'success' (Confirm step removed 2026-07-15 —
-                           // review's own "Add Recording →" button now submits directly)
+    step:       'source',  // 'source' | 'triage' | 'review' | 'success' — unified ingestion flow
+                           // (2026-07-30): source picker -> Listening Quality triage -> metadata
+                           // review (renders as the '#/batch' stage, see the `batch`/`lq` state
+                           // below) -> ingest. (Confirm step removed 2026-07-15 — review's own
+                           // "Add Recording →" button now submits directly)
     folderPath: null,
     scan:       null,      // full scan API response
     behavior:   'copy',    // 'copy' | 'move' — default copy: never destroy source unless asked
@@ -176,6 +179,11 @@ const App = (() => {
     // redirect target (Ryan, 2026-07-15: bulk reviewers need a fast way back
     // to the queue, not a forced detour through the new recording's page).
     fromBatch:  false,
+    // True when this review was opened from the Listening Quality triage
+    // queue's "Review" action. Distinct from fromBatch because the two return
+    // to different places — triage returns to '#/ingest' in its triage step,
+    // which is the only place that knows the queue's state.
+    fromTriage: false,
   }
 
   // ── DOM refs ───────────────────────────────────────────────────────────────
@@ -330,6 +338,14 @@ const App = (() => {
   }
 
   function esc(s) { return escHtml(s) }
+
+  // Canonical form for comparing filesystem paths client-side. macOS hands out
+  // decomposed (NFD) filenames; the quality API's staging rows are always
+  // NFC-normalised server-side (app/utils/quality_store.py), but batch-scan's
+  // item.path is a raw, un-normalised os.scandir() result — so a straight ===
+  // between the two can silently miss a match on any accented folder name
+  // (the "Guitar Trio" bug, 2026-07-28). Normalise both sides before comparing.
+  const nfc = s => (s || '').normalize('NFC')
 
   // Title-case a string: capitalize each word, lowercase the rest.
   // Keeps short connective words lowercase unless they're the first word.
@@ -816,7 +832,7 @@ const App = (() => {
     if (!nav) return
     _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = null
     nav.innerHTML = `
-      <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recording</a>
+      <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recordings</a>
       <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
       <a class="nav-item nav-top" data-nav="recent" href="#/recent"><span class="nav-icon">◷</span> Recently Added</a>
       ${_dimSection('collections', null, 'Collections', true)}
@@ -3264,24 +3280,48 @@ const App = (() => {
 
   // ── Batch Import ────────────────────────────────────────────────────────────
 
-  // State for the batch import session
+  // State for the batch import session (now the "Metadata review" stage of
+  // the unified ingestion flow, reached at '#/batch' once Listening Quality
+  // triage has accepted at least one folder — see `lq` state below).
   const batch = {
     sourceDir:   null,   // scanned directory path
     results:     null,   // full scan response
+    acceptedPaths: null, // Set of NFC-normalised folder paths triaged 'accepted'
+                         // (from GET /api/quality/staging) — null means "no LQ
+                         // gate", i.e. this directory was never triaged, in
+                         // which case everything scanned is shown (keeps this
+                         // view usable if it's ever reached without going
+                         // through Listening Quality first).
     ingestedIds: new Map(), // path → recording_id for items ingested this session
     expandedPaths: new Set(), // expanded row paths
     behavior:    null,   // 'copy' | 'move' — synced with the shared ingest_file_behavior pref
   }
 
   async function renderBatchImportView() {
-    setActiveNav('ingest')   // Batch is reached from Add Recording; keep it lit
-    if (!batch.sourceDir) { renderBatchPickerView(); return }
+    setActiveNav('ingest')   // reached from Add Recording; keep it lit
+    // No directory to review — this stage is only reachable after Listening
+    // Quality triage set one (or via a stale '#/batch' bookmark/back-nav from
+    // before 2026-07-30's unification, which no longer has its own picker).
+    // Either way, the unified flow's source step is the right place to land.
+    if (!batch.sourceDir) { window.location.hash = '#/ingest'; return }
     // Re-scan the last directory every time we land on this route (not just
     // the first time) — so returning here always reflects current disk + DB
     // state and anything ingested (this session or otherwise) drops off the list.
     setMainHTML(`<div class="empty-state">Refreshing <code>${esc(batch.sourceDir)}</code>…</div>`)
     try {
-      batch.results = await API.ingest.batchScan(batch.sourceDir)
+      // Scan + the current triage state both come fresh off the server on
+      // every entry, so the accepted-set can never go stale (a re-scan after
+      // a later triage change, app restart, etc. is always correct).
+      const [scanResult, stagingResult] = await Promise.all([
+        API.ingest.batchScan(batch.sourceDir),
+        API.quality.staging(batch.sourceDir),
+      ])
+      batch.results = scanResult
+      batch.acceptedPaths = new Set(
+        stagingResult.results
+          .filter(r => r.triage_status === 'accepted')
+          .map(r => nfc(r.folder_path))
+      )
     } catch (e) {
       if (/^Directory not found:/.test(e.message)) {
         // Not a real failure — the scanned folder itself is gone, almost
@@ -3290,66 +3330,16 @@ const App = (() => {
         // its last show just deleted it as empty (move_to_library's
         // empty-parent cleanup, 2026-07-23 — Ryan hit this immediately:
         // "Mr. Sun"). There's nothing left to import here, not an error.
-        // Drop back to the picker, pre-filled with the parent directory so
-        // the next act's folder is one click away.
-        const parentDir = batch.sourceDir.replace(/\/[^/]+\/?$/, '')
+        // Nothing to fall back to but a fresh run of the unified flow.
         batch.sourceDir = null
         batch.results   = null
-        renderBatchPickerView({
-          suggestedDir: parentDir,
-          note: 'That folder is empty and was cleaned up — pick the next one to continue.',
-        })
+        window.location.hash = '#/ingest'
         return
       }
       setMainHTML(`<div class="empty-state" style="color:var(--red)">Scan failed: ${esc(e.message)}</div>`)
       return
     }
     renderBatchResultsView()
-  }
-
-  function renderBatchPickerView({ suggestedDir = null, note = null } = {}) {
-    setNavCurrent('Batch Import')
-    const defaultDir = '/Volumes/music/Live Music Archive/Workshop/Import'
-    setMainHTML(`
-      <div class="batch-shell">
-        <div class="batch-header">
-          <h2>Batch Import</h2>
-          <p class="batch-subtitle">Scan a folder — each subfolder is graded green / yellow / red. You decide what to ingest.</p>
-          ${note ? `<p class="batch-subtitle" style="color:var(--accent)">${esc(note)}</p>` : ''}
-        </div>
-        <div class="batch-pick-form">
-          <label class="batch-pick-label">Source directory</label>
-          <div class="batch-pick-row">
-            <input type="text" id="batch-dir-input" class="batch-dir-input"
-                   value="${esc(suggestedDir || batch.sourceDir || defaultDir)}"
-                   placeholder="/path/to/folder" />
-            <button class="btn btn-ghost btn-sm" id="batch-pick-btn">Browse…</button>
-          </div>
-          <button class="btn btn-primary" id="batch-scan-btn" style="margin-top:16px">Scan Folder</button>
-        </div>
-      </div>`)
-
-    document.getElementById('batch-pick-btn').addEventListener('click', async () => {
-      try {
-        const path = await window.pywebview.api.pick_folder()
-        if (path) document.getElementById('batch-dir-input').value = path
-      } catch (e) { /* no-op outside pywebview */ }
-    })
-
-    document.getElementById('batch-scan-btn').addEventListener('click', async () => {
-      const dir = document.getElementById('batch-dir-input').value.trim()
-      if (!dir) return
-      setMainHTML(`<div class="empty-state">Scanning <code>${esc(dir)}</code>…</div>`)
-      try {
-        batch.sourceDir    = dir
-        batch.results      = await API.ingest.batchScan(dir)
-        batch.ingestedIds  = new Map()
-        batch.expandedPaths = new Set()
-        renderBatchResultsView()
-      } catch (e) {
-        setMainHTML(`<div class="empty-state" style="color:var(--red)">Scan failed: ${esc(e.message)}</div>`)
-      }
-    })
   }
 
   function _batchDateStr(e) {
@@ -3460,7 +3450,7 @@ const App = (() => {
   async function renderBatchResultsView() {
     setNavCurrent('Batch Import')
     const r = batch.results
-    if (!r) { renderBatchPickerView(); return }
+    if (!r) { window.location.hash = '#/ingest'; return }
 
     // Default the file-behavior choice from the shared preference, once per session.
     if (batch.behavior == null) {
@@ -3470,22 +3460,33 @@ const App = (() => {
       } catch (_) { batch.behavior = 'copy' }
     }
 
-    const greens  = r.items.filter(i => i.tier === 'green')
-    const yellows = r.items.filter(i => i.tier === 'yellow')
-    const reds    = r.items.filter(i => i.tier === 'red')
+    // Listening Quality gate (2026-07-30): only folders the triage step
+    // accepted make it to metadata review. `acceptedPaths` is null when this
+    // directory was never triaged (e.g. a stale '#/batch' bookmark) — in that
+    // case fall back to showing everything scanned, so the page never just
+    // silently shows nothing for a reason the user can't see.
+    const scannedItems = r.items
+    const items = batch.acceptedPaths
+      ? scannedItems.filter(i => batch.acceptedPaths.has(nfc(i.path)))
+      : scannedItems
+    const hiddenCount = scannedItems.length - items.length
+
+    const greens  = items.filter(i => i.tier === 'green')
+    const yellows = items.filter(i => i.tier === 'yellow')
+    const reds    = items.filter(i => i.tier === 'red')
     const nDone   = batch.ingestedIds.size
 
     const tierPill = (label, count, cls) => count > 0
       ? `<span class="batch-tier-pill batch-tier-${cls}">${count} ${label}</span>` : ''
 
-    const allRows = r.items.map(item => _batchRow(item)).join('')
+    const allRows = items.map(item => _batchRow(item)).join('')
 
     // Auto-Ingest All covers green + yellow — yellows are frequently good
     // enough to trust (Ryan, 2026-07-16: "the user may be just fine with
     // blank track titles"). Red stays manual — those are missing artist or
     // date entirely, a real gap worth a human look before it lands in the
     // library.
-    const autoIngestPending = r.items.filter(i =>
+    const autoIngestPending = items.filter(i =>
       (i.tier === 'green' || i.tier === 'yellow') && !batch.ingestedIds.has(i.path))
 
     setMainHTML(`
@@ -3496,6 +3497,7 @@ const App = (() => {
             <span class="batch-dir-label">${esc(r.source_dir)}</span>
             <button class="btn btn-ghost btn-sm" id="batch-rescan-btn">↺ New Scan</button>
           </div>
+          ${hiddenCount > 0 ? `<p class="batch-subtitle" style="margin:6px 0 0">${hiddenCount} scanned folder${hiddenCount === 1 ? '' : 's'} not shown — rejected or still pending in Listening Quality.</p>` : ''}
           <div class="batch-behavior-row">
             <label class="batch-behavior-label" for="batch-behavior-select">File handling</label>
             <select id="batch-behavior-select">
@@ -3513,11 +3515,11 @@ const App = (() => {
                    ⇉ Auto-Ingest All Green + Yellow (${autoIngestPending.length})
                  </button>`
               : ''}
-            <span class="batch-tier-pill batch-tier-total">${r.total} total</span>
+            <span class="batch-tier-pill batch-tier-total">${items.length} total</span>
           </div>
         </div>
         <div class="batch-list">${allRows}</div>
-        ${r.total === 0 ? `<div class="empty-state">No subfolders found.</div>` : ''}
+        ${items.length === 0 ? `<div class="empty-state">No accepted recordings to review. <a href="#/ingest">← Back to Listening Quality</a></div>` : ''}
       </div>`)
 
     // ── Events ──────────────────────────────────────────────────────────────
@@ -3528,16 +3530,19 @@ const App = (() => {
     })
 
     document.getElementById('batch-rescan-btn')?.addEventListener('click', () => {
-      // Explicit "start over" — let the user reconsider the directory, rather
-      // than silently reusing it (that's what returning-to-the-page already does).
+      // Explicit "start over" — restart the whole unified flow (source picker
+      // -> Listening Quality) rather than silently reusing this directory
+      // (that's what returning to this page already does).
+      batch.sourceDir = null
       batch.results = null
-      renderBatchPickerView()
+      batch.acceptedPaths = null
+      window.location.hash = '#/ingest'
     })
 
     // Ingest All Green + Yellow — red stays manual (missing artist/date entirely).
     document.getElementById('batch-ingest-all-btn')?.addEventListener('click', async () => {
       const btn = document.getElementById('batch-ingest-all-btn')
-      const pending = batch.results.items.filter(i =>
+      const pending = items.filter(i =>
         (i.tier === 'green' || i.tier === 'yellow') && !batch.ingestedIds.has(i.path))
       if (!pending.length) return
       btn.disabled = true
@@ -3631,7 +3636,7 @@ const App = (() => {
       return {
         track_number: tagTrack?.track_number ? parseInt(tagTrack.track_number) : idx + 1,
         title:        tagTrack?.title || infoTrack?.title || `Track ${idx + 1}`,
-        set:          af.set || null,
+        set_number:   af.set_number || null,
         duration:     tagTrack?.duration || null,
         filename:     af.rel_path || af.filename,
       }
@@ -3690,74 +3695,748 @@ const App = (() => {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // Unified ingestion flow (2026-07-30)
+  //
+  //   Source  →  Listening Quality triage  →  Metadata review  →  Ingest
+  //
+  // One entry point for single-show and bulk. The backend resolves a folder to
+  // its shows either way (utils/ingest.py::resolve_shows_in_dir), so "batch"
+  // and "individual" are the same screens — a bulk run just has more cards.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Server-side preferences snapshot (config.IMPORT_DIR, ingest_file_behavior…).
+  // Module-scoped and cached: several views need `import_dir`, it doesn't change
+  // within a session, and there is deliberately NO bare `prefs` global — the
+  // only other `prefs` in this file is a local inside openSettingsModal().
+  let appPrefs = null
+  async function getPrefs() {
+    if (appPrefs) return appPrefs
+    try { appPrefs = await API.preferences.get() } catch (_) { appPrefs = {} }
+    return appPrefs
+  }
+
+  // Listening Quality triage state.
+  const lq = {
+    sourceDir: null,
+    rows:      [],          // serialized staging rows (+ health/extracted)
+    jobId:     null,
+    progress:  null,        // { done, total, current } while analysing
+    expanded:  new Set(),   // folder_paths whose detail panel is open
+    features:  new Map(),   // folder_path → features+interpretation, lazily fetched
+    // Queue-ingest state. `cancel` is checked between shows; `activeJob` is the
+    // in-flight confirm job so Cancel can also stop the current copy.
+    running:   false,
+    cancel:    false,
+    activeJob: null,
+    log:       [],          // [{name, status, recording_id|error}]
+  }
+
   function renderIngestView() {
     setActiveNav('ingest')
     setActiveArtist(null)
     setNavCurrent('Add Recording')
-    // Fresh navigation to Add Recording always starts with an empty form. The one
-    // exception is Batch Import opening a pre-scanned folder, which sets a
-    // one-shot _resume flag so the in-progress review isn't wiped.
+    // Fresh navigation always starts at the source picker. The exception is
+    // Metadata review opening a pre-scanned folder, which sets a one-shot
+    // _resume flag so the in-progress review isn't wiped.
     if (ingest._resume) {
       ingest._resume = false
-    } else {
-      ingest.step       = 'folder'
+    } else if (ingest.step !== 'triage' || !lq.rows.length) {
+      ingest.step       = 'source'
       ingest.scan       = null
       ingest.folderPath = null
       ingest.form       = {}
       ingest.tracks     = []
       ingest.aiResult   = null
       ingest.fromBatch  = false
+      ingest.fromTriage = false
     }
     renderIngestStep()
   }
 
   function renderIngestStep() {
+    // renderIngestSource is async (it needs the preferences snapshot for the
+    // default folder). Without an explicit catch a failure in there becomes a
+    // silent unhandled rejection and the page just stays blank — which is
+    // exactly how the `prefs` ReferenceError presented.
+    const show = fn => {
+      try {
+        const r = fn()
+        if (r && typeof r.catch === 'function') r.catch(_ingestRenderFailed)
+      } catch (e) { _ingestRenderFailed(e) }
+    }
     switch (ingest.step) {
-      case 'folder':  renderIngestFolder();  break
-      case 'review':  renderIngestReview();  break
-      case 'tracks':  renderIngestReview();  break  // merged into review step
-      case 'success': renderIngestSuccess(); break
+      case 'source':  show(renderIngestSource);  break
+      case 'folder':  show(renderIngestSource);  break  // legacy alias
+      case 'triage':  show(renderTriageView);    break
+      case 'review':  show(renderIngestReview);  break
+      case 'tracks':  show(renderIngestReview);  break  // merged into review step
+      case 'success': show(renderIngestSuccess); break
     }
   }
 
-  // ── Step 1: Choose folder ──────────────────────────────────────────────────
+  function _ingestRenderFailed(e) {
+    console.error('[ingest] render failed', e)
+    setMainHTML(`<div class="empty-state" style="color:var(--red)">
+      Could not open this step — ${esc(e && e.message || String(e))}</div>`)
+  }
 
-  function renderIngestFolder() {
-    const pathDisplay = ingest.folderPath
-      ? `<div class="folder-path">${esc(ingest.folderPath)}</div>`
-      : `<div class="folder-label">Click to choose source folder</div>`
+  // ── Stage 1: Source ────────────────────────────────────────────────────────
+  // Deliberately ONE box. Point it at a single show or at a folder of shows —
+  // the server figures out which, so there is no mode to choose.
+
+  // Ported from tools/quality/quality_app.html rather than reinvented: the
+  // breadcrumb picker with "audio" tags tells you which folders are analysable
+  // before you click into them, which the native folder dialog cannot.
+  async function renderIngestSource() {
+    setNavCurrent('Add Recording')
+    const defaultDir = (await getPrefs()).import_dir
+                       || '/Volumes/music/Flux Workshop/Download'
 
     setMainHTML(`
-      <div class="ingest-view">
-        <div class="ingest-topbar">
-          <button class="btn btn-ghost btn-sm" id="btn-goto-batch" title="Import many folders at once">⇪ Batch Import</button>
+      <div class="lq-wrap">
+        <h1 class="lq-h1">Listening Quality</h1>
+        <div class="lq-sub-head">Point at a folder — a single show, or a whole artist.
+          Every recording inside gets analyzed.</div>
+
+        <div class="lq-bar">
+          <input type="text" id="lq-path" class="lq-path-input" spellcheck="false"
+                 placeholder="Pick a folder below, or type a path"
+                 value="${esc(lq.sourceDir || defaultDir)}">
+          <button class="btn btn-ghost" id="lq-browse">Browse</button>
+          <button class="btn btn-primary" id="lq-go">Analyze</button>
         </div>
-        <div class="ingest-step-header">
-          <h2>Add Recording</h2>
-          ${stepDots('folder')}
-        </div>
-        <div class="sub">Select a folder containing FLAC files to scan and add to the library.</div>
-        <div class="folder-picker" id="folder-picker">
-          <span class="folder-icon" style="font-size:20px">📂</span>
-          <div>${pathDisplay}</div>
-        </div>
-        <div id="scan-status"></div>
+        <div class="lq-hint">From each recording we pick 3 tracks, take two 20-second clips
+          from each, and measure all six. Roughly 15 seconds per recording.</div>
+
+        <div id="lq-picker" class="lq-picker" hidden></div>
+        <div id="lq-msg"></div>
       </div>`)
 
-    document.getElementById('btn-goto-batch').addEventListener('click', () => { window.location.hash = '#/batch' })
+    const pickerEl = document.getElementById('lq-picker')
+    const msgEl    = document.getElementById('lq-msg')
+    const pathEl   = document.getElementById('lq-path')
+    const say = t => { msgEl.innerHTML = t ? `<div class="lq-err">${esc(t)}</div>` : '' }
 
-    document.getElementById('folder-picker').addEventListener('click', async () => {
-      let path = null
-      if (window.pywebview?.api?.pick_folder) {
-        path = await window.pywebview.api.pick_folder()
-      } else {
-        path = prompt('Folder path (dev mode):')
-      }
-      if (path) {
-        ingest.folderPath = path
-        runScan(path)
-      }
+    async function openPicker(path) {
+      let j
+      try { j = await API.quality.browse(path || pathEl.value.trim()) }
+      catch (e) { say('Could not browse: ' + e.message); return }
+      if (j.error) { say(j.error); return }
+
+      const parts = j.path.split('/').filter(Boolean)
+      let acc = ''
+      const crumbs = ['<a data-go="/">/</a>'].concat(parts.map(p => {
+        acc += '/' + p
+        return `<a data-go="${esc(acc)}">${esc(p)}</a>`
+      })).join('<span style="color:var(--t3)">/</span>')
+
+      const LABEL = { '/Volumes': 'All volumes' }
+      const shortcuts = (j.shortcuts || []).map((s, i) => {
+        const label = LABEL[s] || (i === 0 ? 'Downloads' : s.split('/').filter(Boolean).pop())
+        return `<span class="lq-shortcut" data-go="${esc(s)}">${esc(label)}</span>`
+      }).join('')
+
+      const dirs = j.dirs.length ? j.dirs.map(d => `
+        <div class="lq-dir" data-go="${esc(d.path)}">
+          <span class="ic">${d.subdirs || !d.audio ? '▸' : '·'}</span>
+          <span class="nm">${esc(d.name)}</span>
+          ${d.audio ? '<span class="tag">audio</span>' : ''}
+        </div>`).join('') : '<div class="lq-dir" style="color:var(--t3)">No sub-folders here</div>'
+
+      pickerEl.innerHTML = `
+        <div class="lq-crumbs">${j.parent
+          ? `<span class="lq-shortcut" data-go="${esc(j.parent)}">↑ up</span>` : ''}
+          ${shortcuts}<span style="flex:1"></span></div>
+        <div class="lq-crumbs">${crumbs}</div>
+        <div class="lq-dirs">${dirs}</div>
+        <div class="lq-pick-foot">
+          <button class="btn btn-primary btn-sm" data-use="${esc(j.path)}">Use this folder</button>
+          <span>${j.here_has_audio ? 'This folder contains audio.'
+            : 'Pick a folder holding shows, or one show itself.'}</span>
+        </div>`
+      pickerEl.hidden = false
+      pathEl.value = j.path
+      say('')
+    }
+
+    pickerEl.addEventListener('click', e => {
+      const go  = e.target.closest('[data-go]')
+      const use = e.target.closest('[data-use]')
+      if (go) openPicker(go.dataset.go)
+      else if (use) { pathEl.value = use.dataset.use; pickerEl.hidden = true; startAnalysis(use.dataset.use, false) }
     })
+
+    document.getElementById('lq-browse').addEventListener('click', () => {
+      if (pickerEl.hidden) openPicker(); else pickerEl.hidden = true
+    })
+    document.getElementById('lq-go').addEventListener('click', () => {
+      const dir = pathEl.value.trim()
+      if (dir) startAnalysis(dir, false)
+    })
+
+    // Open at the import folder so the page starts somewhere useful.
+    openPicker(lq.sourceDir || defaultDir)
+  }
+
+  async function startAnalysis(sourceDir, reanalyze) {
+    const statusEl = document.getElementById('lq-status')
+    if (statusEl) statusEl.innerHTML = `<div class="empty-state">Resolving <code>${esc(sourceDir)}</code>…</div>`
+    try {
+      const res = await API.quality.analyze(sourceDir, reanalyze)
+      lq.sourceDir = res.source_dir
+      lq.jobId     = res.job_id
+      lq.expanded  = new Set()
+      lq.features  = new Map()
+      lq.log       = []
+      // Placeholder rows so every show is on screen immediately — analysis
+      // fills them in at roughly 2s each rather than showing a blank wait.
+      lq.rows = res.folders.map(f => ({
+        folder_path: f.folder_path, name: f.name,
+        triage_status: 'pending', listening_quality: null, _pending: true,
+      }))
+      lq.progress = { done: 0, total: res.folders.length, current: null }
+      ingest.step = 'triage'
+      renderTriageView()
+      pollAnalysis()
+    } catch (e) {
+      if (statusEl) statusEl.innerHTML =
+        `<div class="empty-state" style="color:var(--red)">${esc(e.message)}</div>`
+    }
+  }
+
+  async function pollAnalysis() {
+    const sleep = ms => new Promise(r => setTimeout(r, ms))
+    while (lq.jobId) {
+      await sleep(900)
+      let s
+      try {
+        s = await API.quality.analyzeStatus(lq.jobId, lq.sourceDir)
+      } catch (_) { break }
+      if (s.results?.length) lq.rows = s.results
+      lq.progress = { done: s.done, total: s.total, current: s.current }
+      if (s.status !== 'running') {
+        lq.jobId = null
+        lq.progress = null
+      }
+      // Don't fight the user: re-render only the parts that change during a run.
+      if (ingest.step === 'triage') renderTriageView({ preserveScroll: true })
+    }
+  }
+
+  // ── Stage 2: Listening Quality triage ──────────────────────────────────────
+
+  // Same bands as the interpretation text, ported from the standalone app so a
+  // score is never a different colour in the two places it can be read.
+  function _lqColour(s) {
+    if (s == null) return 'var(--t2)'
+    if (s >= 90) return 'var(--green)'
+    if (s >= 80) return 'var(--accent-lit)'
+    if (s >= 60) return 'var(--amber)'
+    return 'var(--red)'
+  }
+
+  // Advanced-metric and quick-glance states run on their own scale — these are
+  // verdicts on a raw measurement, not 0-100 scores.
+  const _LQ_STATE = { good: 'var(--green)', ok: 'var(--accent-lit)',
+                      poor: 'var(--amber)', bad: 'var(--red)' }
+  const _stateColour = s => _LQ_STATE[s] || 'var(--t2)'
+
+  const _fmt1 = v => (v == null ? '—' : Number(v).toFixed(1))
+  const _fmtN = (v, unit, dp) =>
+    v == null ? '—' : `${Number(v).toFixed(dp == null ? 1 : dp)}${unit || ''}`
+
+  // Group weights, shown per meter as "35% of score". Mirrors GROUP_WEIGHTS in
+  // app/utils/quality/quality_scoring.py — update both together.
+  const _LQ_WEIGHTS = { tone: 35, noise: 15, dynamics: 50 }
+  const _lqWeight = k => (_LQ_WEIGHTS[k] != null ? `${_LQ_WEIGHTS[k]}% of score` : '')
+
+  function _mmss(sec) {
+    const s = Math.round(sec || 0)
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  }
+
+  function _lqDateStr(e) {
+    if (!e) return ''
+    return [e.year, e.month ? String(e.month).padStart(2, '0') : null,
+            e.day ? String(e.day).padStart(2, '0') : null].filter(Boolean).join('-')
+  }
+
+  // One triage row = the CARD (a faithful port of the standalone app's card)
+  // plus an ACTION COLUMN sitting outside it. Keeping the actions outside the
+  // card boundary is deliberate: the card is a report on the recording, the
+  // column is what you do about it, and blurring the two is what made the
+  // first attempt read as a list row instead of a report.
+  function _lqCard(row) {
+    const open = lq.expanded.has(row.folder_path)
+    const done = lq.log.find(l => l.folder_path === row.folder_path)
+
+    if (row.error) {
+      return `<div class="lq-row"><div class="lq-card">
+        <div class="lq-card-title"><h2>${esc(row.name)}</h2></div>
+        <div class="lq-err" style="margin:12px 0 0">${esc(row.error)}</div>
+      </div>${_lqActions(row, done)}</div>`
+    }
+    if (row._pending) {
+      return `<div class="lq-row"><div class="lq-card lq-card--pending">
+        <div class="lq-card-head"><div class="lq-card-title"><h2>${esc(row.name)}</h2>
+          <div class="lq-overall-txt">Analyzing…</div></div></div>
+      </div><div class="lq-actions"></div></div>`
+    }
+
+    const it  = row.interp || {}
+    const lqs = row.listening_quality
+    const health = row.health
+
+    const groups = (it.groups || []).map(g => `
+      <div class="lq-grp">
+        <div class="lq-grp-head">
+          <span class="lq-grp-name lq-tip">${esc(g.label)}
+            <span class="lq-tipbox">${esc(g.blurb || '')}</span></span>
+          <span class="lq-grp-score" style="color:${_lqColour(g.score)}">${_fmt1(g.score)}</span>
+          <span class="lq-grp-weight">${_lqWeight(g.key)}</span>
+        </div>
+        <div class="lq-meter"><div class="lq-meter-fill"
+             style="width:${g.score || 0}%;background:${_lqColour(g.score)}"></div></div>
+        <div class="lq-grp-txt">${esc(g.text || '')}</div>
+      </div>`).join('')
+
+    const q = it.quick || {}, cut = it.cutoff || {}
+    const quick = `
+      <div class="lq-qbar">
+        <div class="lq-qc"><div class="k">Format</div>
+          <div class="v">${esc(q.format || '—')}</div>
+          <div class="d">${q.bit_depth ? q.bit_depth + '-bit' : ''}${
+            q.sample_rate_hz ? ' / ' + (q.sample_rate_hz / 1000).toFixed(1) : ''}</div></div>
+        <div class="lq-qc"><div class="k">Bitrate</div>
+          <div class="v">${q.bitrate_kbps ?? '—'}</div>
+          <div class="d">${q.bitrate_kbps ? 'kbps' : ''}</div></div>
+        <div class="lq-qc lq-tip"><div class="k">Cutoff</div>
+          <div class="v" style="color:${_stateColour(cut.state)}">${
+            cut.khz != null ? cut.khz + ' kHz' : '—'}</div>
+          <div class="d">${esc(cut.short || '')}</div>
+          <span class="lq-tipbox"><div class="tt">Frequency cutoff — ${esc(cut.verdict || '')}</div>
+            <div class="ab">${esc(cut.detail || '')}</div></span></div>
+      </div>`
+
+    const metrics = (it.metrics || []).map(m => {
+      // No ladder (e.g. mains frequency) → no colour and no range: a range is
+      // meaningless for a categorical value.
+      const hasScale = m.scale && m.scale.length
+      const col = hasScale ? _stateColour(m.state) : 'var(--t1)'
+      const dp  = m.dp != null ? m.dp : (m.unit === ' Hz' ? 0 : 1)
+      const shown = m.abs ? Math.abs(m.value) : m.value
+      const ladder = hasScale ? m.scale.map((s, i) => {
+        const prev = i ? m.scale[i - 1].upto : null
+        const range = prev === null ? `< ${s.upto}`
+          : (s.upto >= 9 && i === m.scale.length - 1 && m.unit !== ' Hz') ? `> ${prev}`
+          : `${prev} to ${s.upto}`
+        return `<div class="rg${s.text === m.verdict ? ' on' : ''}">
+          <span>${esc(s.text)}</span><span class="b">${esc(range)}</span></div>`
+      }).join('') : ''
+      return `
+      <div class="lq-mrow lq-tip">
+        <span class="lq-mdot" style="background:${hasScale ? col : 'transparent'}"></span>
+        <span class="lq-mlabel">${esc(m.label)}</span>
+        <span class="lq-mval" style="color:${col}">${_fmtN(shown, m.unit, dp)}</span>
+        <span class="lq-mverdict">${esc(m.verdict || '')}</span>
+        <span class="lq-minfo">i</span>
+        <span class="lq-tipbox">
+          <div class="tt">${esc(m.label)} — ${esc(m.verdict || '')}</div>
+          <div class="ab">${esc(m.about || '')}</div>
+          ${hasScale ? `<div class="th">Ranges</div>${ladder}` : ''}
+        </span>
+      </div>`
+    }).join('')
+
+    const issues = (it.issues || []).length ? `
+      <div class="lq-issues"><h4>Technical Issues</h4>
+        ${it.issues.map(i => `<div class="lq-issue"><b>${esc(i.issue)}</b> — ${esc(i.detail)}
+          (−${i.deduction}) <span>${esc(i.text || '')}</span></div>`).join('')}
+      </div>` : `<div class="lq-clean"><span class="lq-dot"></span>No technical issues detected —
+        no clipping, dead channel, phase problem or dropouts.</div>`
+
+    const tracks = (row.sampled || []).map(t => `
+      <div class="lq-trk">
+        <button class="lq-trk-play" title="Play"
+                data-folder="${esc(row.folder_path)}" data-file="${esc(t.rel || t.track)}"
+                data-seek="0">▶</button>
+        <span class="lq-trk-name">${esc(t.track)}</span>
+        <span class="lq-trk-win">${(t.offsets || []).map(o =>
+          `<span class="lq-win" data-folder="${esc(row.folder_path)}"
+                 data-file="${esc(t.rel || t.track)}" data-seek="${o}"
+                 title="Jump to the analyzed window">${_mmss(o)}</span>`).join('')}</span>
+      </div>`).join('')
+
+    const flags = (row.flags || []).length
+      ? `<div class="lq-flags">${row.flags.map(x => `<span>${esc(x)}</span>`).join('')}</div>` : ''
+
+    return `<div class="lq-row">
+      <div class="lq-card ${open ? 'open' : ''}" data-path="${esc(row.folder_path)}">
+        <div class="lq-card-head">
+          <div class="lq-card-title"><h2>${esc(row.name)}</h2>
+            <div class="lq-overall-txt">${esc(it.overall?.text || '')}</div></div>
+          ${quick}
+          <div class="lq-score">
+            <div class="n" style="color:${_lqColour(lqs)}">${_fmt1(lqs)}</div>
+            <div class="l">Listening Quality</div>
+          </div>
+          <div class="lq-score lq-score--meta">
+            <div class="n batch-score--${health?.band || 'red'}">${health ? health.score : '—'}</div>
+            <div class="l">Metadata Quality</div>
+          </div>
+        </div>
+        <div class="lq-expand" data-path="${esc(row.folder_path)}">
+          <span class="chev">${open ? '▴' : '▾'}</span>
+          <span class="lbl">${open ? 'Hide details' : 'Details'}</span>
+        </div>
+        <div class="lq-detail">
+          ${groups}
+          ${issues}
+          <div class="lq-samp">
+            <div class="lq-samp-head">
+              <h4>Track Analysis</h4>
+              <span class="lq-samp-note">Click a timestamp to hear the portion that was analyzed</span>
+            </div>
+            ${tracks}
+          </div>
+          <details class="lq-adv-wrap"><summary>Advanced Metrics</summary>
+            <div class="lq-adv">${metrics}</div>${flags}
+          </details>
+        </div>
+      </div>
+      ${_lqActions(row, done)}
+    </div>`
+  }
+
+  // The action column — outside the card. Ingest / Review / Move, with Move
+  // opening a small menu (Backlog | Working). Once a recording is in, its
+  // actions collapse to a single View link to the finished record.
+  function _lqActions(row, done) {
+    // `done` is this session's log; `row.recording_id` is the DURABLE fact,
+    // written onto the staging row when the ingest committed. Checking only
+    // the log meant a folder ingested in an earlier session was offered for
+    // ingest all over again (2026-07-31).
+    const recId = done?.status === 'done' ? done.recording_id : row.recording_id
+    if (recId) {
+      return `<div class="lq-actions">
+        <span class="lq-act-done">✓ Ingested</span>
+        <a class="lq-act lq-act--view" href="#/recording/${recId}">View</a>
+      </div>`
+    }
+    // Folder is gone from disk but the analysis row remains — nothing here can
+    // act on it, so say so instead of offering buttons that must fail.
+    if (row.exists === false) {
+      return `<div class="lq-actions">
+        <span class="lq-act-cancelled" title="${esc(row.folder_path)}">Folder moved</span>
+      </div>`
+    }
+    if (done?.status === 'error') {
+      return `<div class="lq-actions">
+        <span class="lq-act-failed" title="${esc(done.error || '')}">✗ ${esc(done.error || 'Failed')}</span>
+        <button class="lq-act lq-act--ingest" data-path="${esc(row.folder_path)}">Retry</button>
+      </div>`
+    }
+    if (done?.status === 'cancelled') {
+      return `<div class="lq-actions">
+        <span class="lq-act-cancelled">Cancelled</span>
+        <button class="lq-act lq-act--ingest" data-path="${esc(row.folder_path)}">Ingest</button>
+      </div>`
+    }
+    return `<div class="lq-actions">
+      <button class="lq-act lq-act--ingest" data-path="${esc(row.folder_path)}"
+              title="Auto-ingest using the metadata shown">Ingest</button>
+      <button class="lq-act lq-act--review" data-path="${esc(row.folder_path)}"
+              title="Open the full Add Recording page">Review</button>
+      <div class="lq-move-wrap">
+        <button class="lq-act lq-act--move" data-path="${esc(row.folder_path)}">Move ›</button>
+        <div class="lq-move-menu" hidden>
+          <button class="lq-move-opt" data-dest="backlog" data-path="${esc(row.folder_path)}">Backlog</button>
+          <button class="lq-move-opt" data-dest="working" data-path="${esc(row.folder_path)}">Working</button>
+        </div>
+      </div>
+    </div>`
+  }
+
+  function renderTriageView({ preserveScroll = false } = {}) {
+    setActiveNav('ingest')
+    setNavCurrent('Add Recordings')
+    const scrollY = preserveScroll ? window.scrollY : 0
+
+    // Anything still in the list is still a candidate — moving a show to
+    // Backlog/Working physically removes it from the scanned folder, so the
+    // queue IS the remaining work. No separate accept step to forget.
+    const queue     = lq.rows.filter(_lqIngestable)
+    const analysing = !!lq.progress && lq.progress.done < lq.progress.total
+
+    const progressBar = analysing ? `
+      <div class="lq-progress">
+        <div class="lq-progress-bar"><i style="width:${
+          Math.round(100 * lq.progress.done / Math.max(1, lq.progress.total))}%"></i></div>
+        <span>Analysing ${lq.progress.done}/${lq.progress.total}${
+          lq.progress.current ? ` — ${esc(lq.progress.current)}` : ''}</span>
+      </div>` : ''
+
+    // The single action. Cancel replaces it mid-run rather than sitting next to
+    // it, so there is never a question about which button is live.
+    const runBar = lq.running
+      ? `<button class="btn btn-danger" id="lq-cancel-btn">■ Cancel</button>
+         <span class="lq-run-note" id="lq-run-note"></span>`
+      : `<button class="btn btn-primary" id="lq-ingest-all-btn" ${queue.length ? '' : 'disabled'}>
+           ⇉ Ingest ${queue.length} recording${queue.length === 1 ? '' : 's'}
+         </button>`
+
+    setMainHTML(`
+      <div class="batch-shell lq-shell">
+        <div class="batch-header lq-header">
+          <div>
+            <h2>Review &amp; Ingest</h2>
+            <p class="batch-subtitle"><code>${esc(lq.sourceDir || '')}</code></p>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="lq-back-btn">↺ Choose another folder</button>
+        </div>
+        ${progressBar}
+        <div class="lq-runbar">
+          ${runBar}
+          <label class="lq-behavior">
+            <span>Files:</span>
+            <select id="lq-behavior" ${lq.running ? 'disabled' : ''}>
+              <option value="copy"${batch.behavior !== 'move' ? ' selected' : ''}>Copy</option>
+              <option value="move"${batch.behavior === 'move' ? ' selected' : ''}>Move</option>
+            </select>
+          </label>
+        </div>
+        <div class="lq-cards" id="lq-cards">
+          ${lq.rows.length ? lq.rows.map(_lqCard).join('')
+                           : `<div class="empty-state">Nothing to show.</div>`}
+        </div>
+      </div>`)
+
+    if (preserveScroll) window.scrollTo(0, scrollY)
+    _wireTriage()
+  }
+
+  function _wireTriage() {
+    document.getElementById('lq-back-btn')?.addEventListener('click', () => {
+      lq.rows = []; lq.jobId = null; lq.progress = null; lq.log = []
+      ingest.step = 'source'
+      renderIngestSource()
+    })
+
+    document.getElementById('lq-behavior')?.addEventListener('change', e => {
+      batch.behavior = e.target.value
+    })
+
+    // Expand/collapse. The detail panel is already in the DOM (rendered up
+    // front, hidden by CSS — same as the standalone app), so this is a class
+    // toggle, not a fetch.
+    mainContent.querySelectorAll('.lq-expand').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const p = btn.dataset.path
+        if (lq.expanded.has(p)) lq.expanded.delete(p); else lq.expanded.add(p)
+        const card = btn.closest('.lq-card')
+        card.classList.toggle('open', lq.expanded.has(p))
+        btn.querySelector('.chev').textContent = lq.expanded.has(p) ? '▴' : '▾'
+        btn.querySelector('.lbl').textContent  = lq.expanded.has(p) ? 'Hide details' : 'Details'
+      })
+    })
+
+    // Move ›  → menu (Backlog | Working). One menu open at a time.
+    mainContent.querySelectorAll('.lq-act--move').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation()
+        const menu = btn.nextElementSibling
+        const wasHidden = menu.hidden
+        mainContent.querySelectorAll('.lq-move-menu').forEach(m => { m.hidden = true })
+        menu.hidden = !wasHidden
+      })
+    })
+    document.addEventListener('click', _closeMoveMenus)
+
+    // Physically moves the folder out of the scanned directory, so it simply
+    // stops being offered — no status to filter on later.
+    mainContent.querySelectorAll('.lq-move-opt').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const p = btn.dataset.path, dest = btn.dataset.dest
+        btn.disabled = true; btn.textContent = '…'
+        try {
+          await API.quality.move(p, dest)
+          lq.rows = lq.rows.filter(r => r.folder_path !== p)
+          renderTriageView({ preserveScroll: true })
+        } catch (e) {
+          btn.disabled = false
+          btn.textContent = dest === 'backlog' ? 'Backlog' : 'Working'
+          alert(`Move failed: ${e.message}`)
+        }
+      })
+    })
+
+    // Ingest this one now.
+    mainContent.querySelectorAll('.lq-act--ingest').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const row = lq.rows.find(r => r.folder_path === btn.dataset.path)
+        if (!row) return
+        btn.disabled = true; btn.textContent = '…'
+        await ingestOne(row)
+        renderTriageView({ preserveScroll: true })
+      })
+    })
+
+    // Review → the existing Add Recording page, pre-scanned.
+    mainContent.querySelectorAll('.lq-act--review').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const p = btn.dataset.path
+        btn.disabled = true; btn.textContent = '⏳'
+        try {
+          const scan = await API.recordings.scan(p)
+          ingest.scan = scan; ingest.step = 'review'; ingest.folderPath = p
+          ingest.form = {}; ingest.tracks = []
+          // fromTriage, NOT fromBatch: fromBatch sends the back-link and the
+          // post-submit redirect to '#/batch', which has no scan in this flow,
+          // so it bounced to '#/ingest' and re-rendered this very form — the
+          // recording having just been created, complete with an "already in
+          // your library" warning (2026-07-31).
+          ingest.fromBatch  = false
+          ingest.fromTriage = true
+          ingest._resume    = true
+          renderIngestReview()
+        } catch (e) {
+          btn.disabled = false; btn.textContent = 'Review'
+          alert(`Scan failed: ${e.message}`)
+        }
+      })
+    })
+
+    // Preview playback. Deliberately its own <audio> element, NOT the shared
+    // player bar: this is a pre-ingest file that has no track ID and no queue,
+    // and hijacking the persistent player for it would blow away whatever the
+    // user was actually listening to.
+    const playAt = (folder, file, seek) => {
+      let el = document.getElementById('lq-preview-audio')
+      if (!el) {
+        el = document.createElement('audio')
+        el.id = 'lq-preview-audio'
+        el.controls = true
+        el.className = 'lq-preview-audio'
+        document.body.appendChild(el)
+      }
+      const url = `/api/stream/ingest-preview?folder=${encodeURIComponent(folder)}`
+                + `&file=${encodeURIComponent(file)}`
+      if (el.dataset.src !== url) { el.src = url; el.dataset.src = url }
+      const go = () => { try { el.currentTime = seek } catch (_) {} ; el.play() }
+      // Seeking before metadata lands silently no-ops, so wait when cold.
+      if (el.readyState >= 1) go()
+      else el.addEventListener('loadedmetadata', go, { once: true })
+    }
+
+    mainContent.querySelectorAll('.lq-trk-play, .lq-win').forEach(btn => {
+      btn.addEventListener('click', () => {
+        playAt(btn.dataset.folder, btn.dataset.file, parseFloat(btn.dataset.seek) || 0)
+      })
+    })
+
+    document.getElementById('lq-ingest-all-btn')?.addEventListener('click', runIngestQueue)
+    document.getElementById('lq-cancel-btn')?.addEventListener('click', async () => {
+      lq.cancel = true
+      const note = document.getElementById('lq-run-note')
+      if (note) note.textContent = 'Cancelling — finishing safely…'
+      // Also stop the show currently mid-copy. The worker undoes its own
+      // filesystem work and rolls back; earlier recordings are untouched.
+      if (lq.activeJob) { try { await API.ingest.confirmCancel(lq.activeJob) } catch (_) {} }
+    })
+  }
+
+  // What "Ingest all" will actually act on. One definition, used by both the
+  // button's count and the loop, so the number on the button can never promise
+  // more than the loop delivers.
+  function _lqIngestable(r) {
+    return !r.error
+        && !r._pending
+        && r.exists !== false                     // folder still on disk
+        && !r.recording_id                        // not already in the library
+        && !lq.log.some(l => l.folder_path === r.folder_path)
+  }
+
+  function _closeMoveMenus() {
+    mainContent.querySelectorAll('.lq-move-menu').forEach(m => { m.hidden = true })
+  }
+
+  // Ingest ONE recording, recording the outcome in lq.log. Shared by the
+  // per-card Ingest button and the queue loop so the two can't drift apart.
+  async function ingestOne(row) {
+    try {
+      const e = row.extracted || {}
+      // Auto-ingest needs a performer name and cannot invent one. Failing here
+      // with something readable beats letting the server return a bare
+      // "artist_name is required" 400 from a button press.
+      if (!e.artist) {
+        throw new Error('No performer could be read from this folder — '
+                      + 'use Review to fill it in.')
+      }
+      const scan = await API.recordings.scan(row.folder_path)
+      const tracks = scan.audio_files.map((af, idx) => {
+        const t = scan.suggestions.from_tags.tracks?.[idx]
+        const i = scan.suggestions.from_info_file.tracks?.[idx]
+        return {
+          track_number: t?.track_number ? parseInt(t.track_number) : idx + 1,
+          title:        t?.title || i?.title || `Track ${idx + 1}`,
+          set_number:   af.set_number || null,
+          duration:     t?.duration || null,
+          filename:     af.rel_path || af.filename,
+        }
+      })
+
+      const { job_id } = await API.ingest.confirm({
+        source_folder_path: row.folder_path,
+        artist_name: e.artist, start_year: e.year,
+        start_month: e.month, start_day: e.day,
+        venue_name: e.venue || null, city: e.city || null,
+        state: e.state || null, country: e.country || null,
+        source: e.source || null, lineage: e.lineage || null,
+        is_complete: true,
+        behavior: batch.behavior || 'copy',
+        info_file_content: scan.info_file_content || null,
+        fingerprints: scan.fingerprints || [],
+        tracks,
+      })
+      lq.activeJob = job_id
+      const result = await pollConfirmJob(job_id)
+      lq.activeJob = null
+
+      lq.log.push(result === null
+        ? { folder_path: row.folder_path, name: row.name, status: 'cancelled' }
+        : { folder_path: row.folder_path, name: row.name,
+            status: 'done', recording_id: result.recording_id })
+      if (result) invalidateDims()
+      return result
+    } catch (err) {
+      lq.activeJob = null
+      lq.log.push({ folder_path: row.folder_path, name: row.name,
+                    status: 'error', error: err.message })
+      return null
+    }
+  }
+
+  // Sequential queue ingest. Sequential on purpose: parallel copies to one
+  // spinning NAS volume are slower, not faster, and a serial queue makes
+  // "stop after the current one" a well-defined thing to ask for.
+  async function runIngestQueue() {
+    lq.running = true; lq.cancel = false
+    renderTriageView({ preserveScroll: true })
+
+    const queue = lq.rows.filter(_lqIngestable)
+
+    for (const row of queue) {
+      if (lq.cancel) break
+      const note = document.getElementById('lq-run-note')
+      if (note) note.textContent = `Ingesting ${row.name}…`
+      await ingestOne(row)
+      renderTriageView({ preserveScroll: true })
+    }
+
+    lq.running = false; lq.activeJob = null
+    invalidateDims()
+    renderTriageView({ preserveScroll: true })
   }
 
   async function runScan(folderPath) {
@@ -3938,7 +4617,7 @@ const App = (() => {
     L.push('', 'Setlist:', '')
     let lastSet = null
     ;(ingest.tracks || []).forEach((t, i) => {
-      if (t.set && t.set !== lastSet) { L.push(t.set); lastSet = t.set }
+      if (t.set_number && t.set_number !== lastSet) { L.push(t.set_number); lastSet = t.set_number }
       L.push(`${String(t.track_number || i + 1).padStart(2, '0')}. ${t.title || ''}`.trimEnd())
     })
     const prov = ingest.aiResult?.provenance_notes || []
@@ -4143,6 +4822,11 @@ const App = (() => {
         if (onProgress) onProgress(s.copied || 0, s.total || 0)
       } else if (s.status === 'done') {
         return s.result
+      } else if (s.status === 'cancelled') {
+        // Null, not an exception: a cancel is something the user asked for, and
+        // the worker has already undone its own work. Callers distinguish this
+        // from success by the null.
+        return null
       } else if (s.status === 'error') {
         throw new Error(s.error)
       }
@@ -4264,7 +4948,7 @@ const App = (() => {
       // shares a name) → set label, from scan's subdir detection.
       const audioSetByRelPath = {}
       ;(ingest.scan.audio_files || []).forEach(af => {
-        if (af.set && af.rel_path) audioSetByRelPath[af.rel_path] = af.set
+        if (af.set_number && af.rel_path) audioSetByRelPath[af.rel_path] = af.set_number
       })
       const setsDetected = ingest.scan.sets_detected || false
 
@@ -4281,7 +4965,7 @@ const App = (() => {
           // (Ryan, 2026-07-14 — this was the CD1/CD2 duplicate-numbering bug.)
           track_number: (!setsDetected && t.track_number) ? parseInt(t.track_number) : t.index,
           title,
-          set:          audioSetByRelPath[relPath] || '',
+          set_number:   audioSetByRelPath[relPath] || '',
           duration:     t.duration,
           filename:     relPath,
           // Pre-suggested from the title text — archivist approves/removes via flag pills
@@ -4297,7 +4981,7 @@ const App = (() => {
           return {
             track_number: t.number,
             title,
-            set:          audioSetByRelPath[scanFile.rel_path] || '',
+            set_number:   audioSetByRelPath[scanFile.rel_path] || '',
             duration:     null,
             filename:     scanFile.rel_path || scanFile.filename || '',
             flags:        detectTrackFlags(title),
@@ -4489,7 +5173,9 @@ const App = (() => {
     setMainHTML(`
       <div class="ingest-review-outer">
       <div class="ingest-review-topbar">
-        <a href="#" id="ingest-back-link" class="ingest-back-link">${ingest.fromBatch ? '← Back to Bulk Import' : '← Back'}</a>
+        <a href="#" id="ingest-back-link" class="ingest-back-link">${
+          ingest.fromTriage ? '← Back to Ingest Queue'
+          : ingest.fromBatch ? '← Back to Bulk Import' : '← Back'}</a>
         <h2 class="ingest-topbar-title">Add Recording: <span class="rev-header-folder">${esc(ingest.folderPath?.split('/').pop() || '')}</span></h2>
       </div>
       <div class="ingest-review-shell">
@@ -4631,7 +5317,15 @@ const App = (() => {
               <span id="ingest-audio-label">Preview Track:</span>
               <audio id="ingest-preview-audio" preload="metadata" controls></audio>
             </div>
-            <button class="btn btn-primary" id="btn-confirm">Add Recording →</button>
+            <!-- Two exits, because a reviewer working a queue and a reviewer
+                 adding one show want opposite things. "Add & Return" is primary:
+                 mid-queue is the common case, and it goes straight back to the
+                 ingest list with this row marked done. "Add & View" opens the
+                 finished record instead. -->
+            <button class="btn btn-primary" id="btn-confirm"
+                    data-after="return">Add &amp; Return →</button>
+            <button class="btn btn-ghost" id="btn-confirm-view"
+                    data-after="view">Add &amp; View</button>
           </div>
           <div id="review-submit-error" class="review-submit-error" style="display:none"></div>
         </div>
@@ -5259,7 +5953,12 @@ const App = (() => {
     // bulk reviewer working through many folders. Otherwise: the folder step.
     document.getElementById('ingest-back-link').addEventListener('click', e => {
       e.preventDefault()
-      if (ingest.fromBatch) {
+      if (ingest.fromTriage) {
+        ingest.step = 'triage'
+        ingest.fromTriage = false
+        history.replaceState(null, '', '#/ingest')
+        renderTriageView()
+      } else if (ingest.fromBatch) {
         // renderBatchResultsView() paints the batch list directly, bypassing
         // the hash router — but window.location.hash is still '#/ingest' from
         // when we navigated in. Left uncorrected, the NEXT _batchOpenReview()
@@ -5284,7 +5983,10 @@ const App = (() => {
       tab.addEventListener('click', () => switchIngestPane(tab.dataset.ipane, tab))
     })
 
-    document.getElementById('btn-confirm').addEventListener('click', async () => {
+    const _submitReview = async (ev) => {
+      // Which exit the user chose: 'return' (back to the ingest queue) or
+      // 'view' (open the finished record).
+      const after = ev.currentTarget.dataset.after || 'view'
       // Collect metadata
       const f = ingest.form
       f.artist_name     = document.getElementById('f-artist').value.trim()
@@ -5322,17 +6024,30 @@ const App = (() => {
       // something i need to change"). File-behavior (copy/move) is no longer
       // a per-add choice either — it's a standing preference (Settings ⚙,
       // right next to the Anthropic key), read silently here.
-      const btn = document.getElementById('btn-confirm')
+      const btn = ev.currentTarget
+      const otherBtn = document.getElementById(
+        btn.id === 'btn-confirm' ? 'btn-confirm-view' : 'btn-confirm')
+      const btnLabel = btn.innerHTML
       const errEl = document.getElementById('review-submit-error')
       btn.disabled = true
+      if (otherBtn) otherBtn.disabled = true
       btn.textContent = 'Adding to library…'
       errEl.style.display = 'none'
 
+      // Copy/move had TWO sources of truth: the triage page's Files dropdown
+      // (batch.behavior) and the saved preference read here. A user who set the
+      // dropdown to Copy could still get a Move, because Review submitted
+      // through this path (2026-07-31). When the review was opened from triage,
+      // the dropdown the user was just looking at wins.
       let behavior = 'copy'
-      try {
-        const prefs = await API.preferences.get()
-        behavior = prefs.ingest_file_behavior || 'copy'
-      } catch (_) { /* fall back to copy */ }
+      if (ingest.fromTriage && batch.behavior) {
+        behavior = batch.behavior
+      } else {
+        try {
+          const prefs = await API.preferences.get()
+          behavior = prefs.ingest_file_behavior || 'copy'
+        } catch (_) { /* fall back to copy */ }
+      }
 
       const payload = {
         source_folder_path: ingest.folderPath,
@@ -5378,13 +6093,33 @@ const App = (() => {
             alert(`⚠ ${result.checksum_mismatches} track checksum${result.checksum_mismatches === 1 ? '' : 's'} did not match the fingerprint file for this show. Check the Checksums pane before trusting this copy.`)
           }
           await loadArtistList()   // new performer/venue/artist may exist
-          if (ingest.fromBatch) {
-            // Keep the batch list's ✓ Ingested state correct if they later
-            // navigate back here some other way, then go straight back to
-            // the queue — that's the whole point for a bulk reviewer working
-            // through many folders (Ryan, 2026-07-15).
-            batch.ingestedIds.set(ingest.folderPath, result.recording_id)
-            history.replaceState(null, '', '#/batch')   // see note on the back-link handler above
+          batch.ingestedIds.set(ingest.folderPath, result.recording_id)
+
+          // Record the outcome on the triage row so returning to the queue
+          // shows "✓ Ingested / View" rather than offering to ingest a folder
+          // that is already in the library — which is exactly what produced
+          // the "Already in your library" warning on re-entry (2026-07-31).
+          if (ingest.fromTriage &&
+              !lq.log.some(l => l.folder_path === ingest.folderPath)) {
+            const row = lq.rows.find(r => r.folder_path === ingest.folderPath)
+            lq.log.push({ folder_path: ingest.folderPath,
+                          name: row?.name || ingest.folderPath,
+                          status: 'done', recording_id: result.recording_id })
+          }
+
+          if (after === 'view') {
+            window.location.hash = `#/recording/${result.recording_id}`
+          } else if (ingest.fromTriage) {
+            // Straight back to the ingest queue, which is the point of
+            // "Add & Return" for someone working through a folder of shows.
+            ingest.step = 'triage'
+            ingest.fromTriage = false
+            history.replaceState(null, '', '#/ingest')
+            renderTriageView()
+          } else if (ingest.fromBatch) {
+            // Legacy metadata-review path — see the back-link handler's note on
+            // why the recorded hash has to be corrected without re-rendering.
+            history.replaceState(null, '', '#/batch')
             renderBatchResultsView()
           } else {
             window.location.hash = `#/recording/${result.recording_id}`
@@ -5398,10 +6133,14 @@ const App = (() => {
         errEl.textContent = `Error: ${e.message}`
         errEl.style.display = 'block'
         btn.disabled = false
-        btn.textContent = 'Add Recording →'
+        if (otherBtn) otherBtn.disabled = false
+        btn.innerHTML = btnLabel
         prog?.remove()
       }
-    })
+    }
+
+    document.getElementById('btn-confirm').addEventListener('click', _submitReview)
+    document.getElementById('btn-confirm-view')?.addEventListener('click', _submitReview)
 
     // Resize handle
     wireResizablePanel(

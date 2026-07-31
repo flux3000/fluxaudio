@@ -36,7 +36,11 @@ def test_recording_summary_shape(app, seeded_ids):
     assert s["quality"] == "B+"
     assert s["track_count"] == 2
     assert s["duration_sec"] == 360        # 300 + 60
-    assert set(s.keys()) == {"id", "source", "quality",
+    # `listening_quality` (automated, 0–100, audio only) sits alongside
+    # `quality` (the manual letter grade covering performance too). Two fields
+    # on purpose — neither replaces the other. None until analysed.
+    assert s["listening_quality"] is None
+    assert set(s.keys()) == {"id", "source", "quality", "listening_quality",
                              "rating", "is_complete", "is_official",
                              "track_count", "duration_sec", "created_at"}
 
@@ -662,7 +666,7 @@ def test_performer_and_venue_delete_when_empty(api):
 def test_scan_folder_detects_and_orders_multi_disc(tmp_path):
     """CD1 (3 tracks) + CD2 (2 tracks), plus a non-set Art/ dir and a loose
     info file — sets_detected True, audio_files in continuous CD1-then-CD2
-    order with correct 'set' labels and rel_path subdir prefixes intact
+    order with correct 'set_number' labels and rel_path subdir prefixes intact
     (rel_path is only used to locate the ORIGINAL file pre-flatten)."""
     root = tmp_path / "multidisc_src"; root.mkdir()
     cd1 = root / "CD1"; cd1.mkdir()
@@ -681,7 +685,7 @@ def test_scan_folder_detects_and_orders_multi_disc(tmp_path):
     assert len(result["audio_files"]) == 5
     indices = [f["index"] for f in result["audio_files"]]
     assert indices == [1, 2, 3, 4, 5]                     # continuous, no reset
-    assert [f["set"] for f in result["audio_files"]] == ["CD 1", "CD 1", "CD 1", "CD 2", "CD 2"]
+    assert [f["set_number"] for f in result["audio_files"]] == ["CD 1", "CD 1", "CD 1", "CD 2", "CD 2"]
     assert result["audio_files"][0]["rel_path"] in ("CD1/01.flac", "CD1\\01.flac")
     assert result["audio_files"][3]["rel_path"] in ("CD2/01.flac", "CD2\\01.flac")
     assert [o["filename"] for o in result["other_files"]] == ["cover.jpg"]
@@ -781,7 +785,7 @@ def test_do_confirm_flattens_and_renames_multi_disc_with_checksums(app, db, tmp_
 
     tracks_payload = [
         {"track_number": i + 1, "title": f"Track {i + 1}",
-         "duration": 100, "filename": af["rel_path"], "set": af["set"]}
+         "duration": 100, "filename": af["rel_path"], "set_number": af["set_number"]}
         for i, af in enumerate(scan["audio_files"])
     ]
     data = {

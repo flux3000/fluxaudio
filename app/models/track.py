@@ -4,9 +4,11 @@ models/track.py — Track model.
 A Track is a single audio file within a Recording. Track titles default
 to "Track {n}" when unknown so the UI always has something to display.
 
-`set` is a free string (nullable) — examples: "Set 1", "Set 2",
+`set_number` is a free string (nullable) — examples: "Set 1", "Set 2",
 "Early Set", "Late Set", "Encore", "Soundcheck". No enumeration enforced
-because collector conventions vary widely.
+because collector conventions vary widely. Named `set_number` rather than
+`set` because `set` is a SQL reserved word — it bit a raw-SQL repair script
+even though the ORM itself quotes it safely (2026-07-28).
 
 `file_path` is relative to the recording's folder_path. Full resolution:
   LIBRARY_ROOT / recording.folder_path / track.file_path
@@ -24,7 +26,7 @@ class Track(db.Model):
 
     track_number = db.Column(db.Integer,     nullable=False)
     title        = db.Column(db.String(255), nullable=False)   # defaults to "Track {n}" on creation
-    set          = db.Column(db.String(64),  nullable=True)    # e.g. "Set 1", "Encore"
+    set_number   = db.Column(db.String(64),  nullable=True)    # e.g. "Set 1", "Encore"
 
     # Duration in seconds, read from FLAC metadata on ingestion
     duration     = db.Column(db.Integer, nullable=True)

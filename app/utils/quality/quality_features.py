@@ -33,14 +33,34 @@ QUALITY_ANALYSIS_VERSION = "1"
 # tracks what the musicians were playing, not how it was captured.
 #
 # 3 tracks x 2 windows x 20 s covers both axes for ~120 s of decode.
+#
+# Tested at 2 tracks (2026-07-28) against all 20 graded recordings: average
+# error rose 4.94 -> 6.19, worst case 7.9 -> 13.3, correlation 0.857 -> 0.740,
+# and within-corpus ranking collapsed to chance on two of three artists.
+# Scores moved 2.7 points on average, above the +/-2 measurement noise floor.
+# Not worth the ~5 s saved. Decode is not the bottleneck anyway — see below.
 N_TRACKS       = 3      # distinct tracks to sample
 N_WINDOWS      = 2      # windows per track
 WINDOW_SEC     = 20.0   # seconds per window
 EDGE_SKIP_SEC  = 15.0   # ignore this much at track head/tail
-MIN_TRACK_SEC  = 180.0  # tracks shorter than this are ineligible
+MIN_TRACK_SEC  = 240.0  # 4 minutes — see select_tracks()
+SILENT_RMS_DB  = -55.0  # windows quieter than this are skipped as non-programme
 
 NOISE_WIN_SEC  = 0.400  # noise-floor analysis window (spec: 400 ms)
 NOISE_PCTILE   = 10     # quietest decile
+
+# Click detection is DISABLED in the score (weight 0 — it failed twice, once
+# reporting 1646 clicks/min and later 11223 clicks/min on clean recordings, and
+# it carries a systematic bias against plucked strings).
+#
+# It was nevertheless still being COMPUTED, and it is by far the most expensive
+# thing here: profiled at 2.72 s per 20-second window against 0.16 s to decode
+# that window, i.e. 16.3 s of an 18.1 s analysis — 90% of the runtime spent on
+# a number nothing reads. LPC at order 32, refit every second, is simply slow.
+#
+# Set this True to bring it back when the detector is rebuilt to require clicks
+# to be spectrally broadband as well as narrow.
+COMPUTE_CLICKS = False
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -77,18 +97,46 @@ def _db(x, floor=-140.0):
 # ═════════════════════════════════════════════════════════════════════════════
 # Track + window selection
 # ═════════════════════════════════════════════════════════════════════════════
-def select_track(folder, non_music_paths=None):
+def select_tracks(folder):
     """
-    Pick the representative track for a recording folder.
+    Choose which tracks to sample. Three rules, deliberately simple.
 
-    Spec §Track selection. `non_music_paths` is the set of filenames flagged
-    with NON_MUSIC_FLAGS in the DB; when running standalone it's empty and we
-    fall back to the ordering/duration filters alone.
+      1. Drop the first and last track
+      2. Keep tracks >= 4 minutes
+      3. From what remains, take 3 spread across the running order
 
-    Returns (path, duration_sec, note) or (None, None, reason).
+    Rule 2 is doing the work that DB track flags used to do. Banter, tuning,
+    stage announcements and applause tracks are almost always short, so
+    duration alone separates music from non-music reliably — and it needs no
+    audio decode and no metadata, which matters because flags will NOT be
+    populated at the time this runs.
+
+    Deliberately NOT used as a selector: HF edge. It swings 2x between tracks
+    of the same show (measured: 7079 Hz to 15703 Hz across one soundboard), so
+    it is far too noisy to gate on.
+
+    Each rule is dropped in turn if it would empty the set, so a 3-track
+    recording still gets scored.
+
+    Returns ([(path, duration_sec), ...], note) or (None, reason).
     """
-    non_music_paths = non_music_paths or set()
+    # Root files first; only recurse if the root has none.
+    #
+    # Recursing unconditionally was wrong. It was added because un-flattened
+    # recordings keep their audio in CD1/ CD2/ subdirs (the 1979 Balboa Jazz
+    # Club one), and a root-only glob skipped them entirely. But some folders
+    # contain a NESTED DUPLICATE — the 1976 Paris recording has an "(FM A)"
+    # folder inside it holding another copy of the same 11 tracks — and
+    # recursing there made select_tracks choose from 22 files spanning two
+    # different transfers, shifting that recording's score by 2.4 points.
+    #
+    # Preferring the root resolves both: an un-flattened recording has an empty
+    # root and falls through to the recursive search; a folder with its own
+    # audio ignores whatever is nested below it.
     paths = sorted(glob.glob(os.path.join(folder, "*.flac")))
+    if not paths:
+        # Path-string sort keeps discs in order: CD1/* then CD2/*.
+        paths = sorted(glob.glob(os.path.join(folder, "**", "*.flac"), recursive=True))
     if not paths:
         return None, "no flac files"
 
@@ -102,34 +150,29 @@ def select_track(folder, non_music_paths=None):
     if not paths:
         return None, "no readable flac files"
 
-    # Progressive relaxation: each filter is dropped in turn if it empties the set
-    stages = []
-    s = [p for p in paths if os.path.basename(p) not in non_music_paths]
-    stages.append(("full", s))
-    s2 = s[1:-1] if len(s) > 2 else []                       # drop first + last
-    stages.append(("kept first/last", s2))
-    s3 = [p for p in s2 if durations[p] >= MIN_TRACK_SEC]     # drop shorts
-    stages.append(("kept short tracks", s3))
+    trimmed = paths[1:-1] if len(paths) > 2 else []
+    long_only = [p for p in trimmed if durations[p] >= MIN_TRACK_SEC]
 
-    eligible, note = None, ""
-    for cand, (relaxed_note, _) in zip([s3, s2, s, paths],
-                                       [("", None), ("relaxed: kept short tracks", None),
-                                        ("relaxed: kept first/last", None),
-                                        ("relaxed: kept non-music", None)]):
+    # Progressive relaxation, strictest first
+    for cand, note in ((long_only, ""),
+                       (trimmed, "relaxed: kept tracks under 4 min"),
+                       (paths, "relaxed: kept first/last track")):
         if cand:
-            eligible, note = cand, relaxed_note
+            eligible = cand
             break
-    if not eligible:
+    else:
         return None, "no eligible tracks"
 
-    # Spread the picks across the running order rather than taking one
-    # "representative" track — bandwidth in particular varies enormously from
-    # song to song within a single recording.
+    # Spread across the running order rather than taking one "representative"
+    # track — bandwidth in particular varies enormously song to song.
     n = min(N_TRACKS, len(eligible))
-    idx = np.unique(np.linspace(0, len(eligible) - 1, n + 2)[1:-1].round().astype(int)) \
-        if len(eligible) > n else np.arange(len(eligible))
-    picks = [eligible[i] for i in idx][:n]
-    return [(p, durations[p]) for p in picks], note
+    idx = (np.unique(np.linspace(0, len(eligible) - 1, n + 2)[1:-1].round().astype(int))
+           if len(eligible) > n else np.arange(len(eligible)))
+    return [(eligible[i], durations[eligible[i]]) for i in idx][:n], note
+
+
+# Backwards-compatible alias — older callers used the singular name
+select_track = select_tracks
 
 
 def window_offsets(duration, n=N_WINDOWS):
@@ -315,8 +358,9 @@ def analyse_window(x, sr):
     out["clipping_pct"] = 100.0 * runs / n
     out["clip_longest_run"] = int(longest)
 
-    # Clicks: LPC(32) prediction residual outliers, per 1-second block
-    out["click_density_per_min"] = _click_density(mono, sr)
+    # Clicks: LPC(32) prediction residual outliers, per 1-second block.
+    # Skipped by default — see COMPUTE_CLICKS.
+    out["click_density_per_min"] = _click_density(mono, sr) if COMPUTE_CLICKS else None
 
     # Channels
     if x.shape[1] >= 2:
@@ -337,8 +381,22 @@ def analyse_window(x, sr):
     silent = np.abs(mono) < 1e-5
     out["dropout_count"] = _count_runs(silent, int(0.020 * sr))
 
-    # ── HUM: decimate to 1 kHz, high-resolution FFT ──────────────────────────
-    out.update(_hum(mono, sr))
+    # ── HUM: measured in the QUIET frames only ───────────────────────────────
+    # Measuring across the whole window counts sustained bass notes as hum —
+    # a held low E or B sits right on top of the 60/120 Hz harmonic series the
+    # detector is looking for. On the 1979 Danny Gatton recording that inflated
+    # the reading from 15.5 dB (real) to 30.3 dB ("strong hum"), which alone
+    # dragged its Noise facet down to 38.7.
+    #
+    # Hum is continuous, so it is fully present in the quiet frames; music is
+    # not. Same reasoning as the noise floor above.
+    frame_e = P.sum(axis=0)
+    quiet_idx = np.where(frame_e <= np.percentile(frame_e, 25))[0]
+    hop = nperseg // 2
+    segs = [mono[i * hop: i * hop + nperseg] for i in quiet_idx]
+    segs = [s for s in segs if len(s) == nperseg]
+    quiet_sig = np.concatenate(segs) if segs else mono
+    out.update(_hum(quiet_sig if len(quiet_sig) > sr else mono, sr))
 
     # ── FLAGS: lossy wall detection ──────────────────────────────────────────
     out.update(_lossy(avg_p, freqs))
@@ -537,6 +595,45 @@ def effective_bit_depth(path, claimed):
     return max(1, 32 - trailing)
 
 
+WAVEFORM_POINTS = 800
+
+
+def waveform_peaks(path, n=WAVEFORM_POINTS):
+    """
+    Min/max peak envelope across the whole track, for the preview player.
+
+    Streams the file in n blocks and keeps each block's true min and max rather
+    than an RMS average — a bipolar peak envelope is what actually looks like a
+    waveform, where a mirrored RMS curve looks smooth and lifeless.
+
+    Cheap enough to do during analysis: measured at ~390x realtime, so about
+    2 s for a 13-minute track. Values are quantised to integers in -100..100,
+    which keeps the JSON payload around 8 kB per track and is well beyond the
+    resolution a small player can show.
+    """
+    try:
+        with sf.SoundFile(path) as f:
+            total = f.frames
+            if not total:
+                return None
+            per = max(1, total // n)
+            lo, hi = [], []
+            for _ in range(n):
+                blk = f.read(per, dtype="float32", always_2d=True)
+                if not len(blk):
+                    break
+                m = blk.mean(axis=1)
+                lo.append(float(m.min()))
+                hi.append(float(m.max()))
+    except Exception:
+        return None
+    if not hi:
+        return None
+    norm = max(max(abs(v) for v in hi), max(abs(v) for v in lo), 1e-6)
+    return {"min": [int(round(v / norm * 100)) for v in lo],
+            "max": [int(round(v / norm * 100)) for v in hi]}
+
+
 def loudness_lufs(path, offsets):
     """Integrated LUFS (ITU-R BS.1770) over the sampled windows, concatenated."""
     try:
@@ -577,21 +674,33 @@ _MEDIAN_KEYS.append("click_density_per_min")
 
 def extract_recording_features(folder, non_music_paths=None):
     """Full raw-feature extraction for one recording folder."""
-    picks, note = select_track(folder, non_music_paths)
+    picks, note = select_tracks(folder)
     if not picks:
         return {"error": note}
 
     per_window, sampled = [], []
     for path, duration in picks:
-        offsets = window_offsets(duration)
+        offsets, used = window_offsets(duration), []
         for off in offsets:
             x, sr = read_window(path, off)
             if len(x) < sr:          # window ran off the end
                 continue
+            # Skip near-silent windows — an intro gap, a fade, or a stretch of
+            # room tone tells us nothing about the recording's quality and
+            # would drag the noise measurement around.
+            rms = float(np.sqrt(np.mean(x.mean(axis=1) ** 2)))
+            if 20 * np.log10(max(rms, 1e-10)) < SILENT_RMS_DB:
+                continue
             per_window.append(analyse_window(x, sr))
+            used.append(round(off, 1))
+        # `rel` (added 2026-07-30) is what the UI streams with: the preview
+        # endpoint joins folder + this path, and a bare basename does not
+        # resolve for an un-flattened recording whose audio sits in CD1/.
+        # `track` stays the basename because it is what gets displayed.
         sampled.append({"track": os.path.basename(path),
+                        "rel": os.path.relpath(path, folder),
                         "duration_s": round(duration, 1),
-                        "offsets": [round(o, 1) for o in offsets]})
+                        "offsets": used})
     if not per_window:
         return {"error": "no usable windows"}
 
@@ -608,13 +717,52 @@ def extract_recording_features(folder, non_music_paths=None):
     feats["likely_lossy_source"] = any(w.get("likely_lossy_source") for w in per_window)
     tiers = [w.get("lossy_tier_est") for w in per_window if w.get("lossy_tier_est")]
     feats["lossy_tier_est"] = tiers[0] if tiers else None
-    feats["hum_mains_hz"] = int(np.median([w["hum_mains_hz"] for w in per_window]))
+    # Where the steepest high-frequency wall sits. Needed for display: the
+    # cutoff number alone means nothing without the steepness that decides
+    # whether it is an encoder wall or an analogue rolloff.
+    walls = [w.get("lossy_wall_hz") for w in per_window if w.get("lossy_wall_hz")]
+    feats["lossy_wall_hz"] = float(np.median(walls)) if walls else None
+    # MODE, not median. A recording has one mains frequency — it is 50 or 60,
+    # never anything between. Taking the median of per-window readings produced
+    # a literal 55 Hz whenever the windows split evenly, which is not a
+    # frequency that exists.
+    _mains = [w["hum_mains_hz"] for w in per_window if w.get("hum_mains_hz")]
+    feats["hum_mains_hz"] = (max(set(_mains), key=_mains.count) if _mains else None)
+    # How consistently the windows agreed. Used to decide whether the reading
+    # is worth reporting at all.
+    feats["hum_mains_agreement"] = (round(_mains.count(feats["hum_mains_hz"]) / len(_mains), 2)
+                                    if _mains else None)
 
     path = picks[0][0]
     info = sf.info(path)
     claimed = {"PCM_16": 16, "PCM_24": 24, "PCM_32": 32,
                "PCM_S8": 8, "PCM_U8": 8}.get(info.subtype, 16)
     eff = effective_bit_depth(path, claimed)
+
+    # ── Container + real bitrate ─────────────────────────────────────────────
+    # Format comes from the extension rather than libsndfile's name, because
+    # what a collector wants to see is "FLAC" / "SHN" / "MP3", not "FLAC
+    # (Free Lossless Audio Codec)". SHN isn't decodable here but should still
+    # be reported honestly rather than shown as unknown.
+    ext = os.path.splitext(path)[1].lstrip(".").upper()
+    feats["format"] = {"FLAC": "FLAC", "SHN": "SHN", "MP3": "MP3",
+                       "WAV": "WAV", "AIFF": "AIFF", "AIF": "AIFF",
+                       "M4A": "ALAC/AAC", "APE": "APE",
+                       "WV": "WavPack"}.get(ext, ext or "unknown")
+
+    # Actual encoded bitrate across the sampled tracks — file bytes over
+    # duration. For a lossless container this is the real compressed rate, and
+    # a suspiciously low one is a hint the source had less information in it
+    # than the container implies.
+    tot_bytes = tot_secs = 0
+    for p, dur in picks:
+        try:
+            tot_bytes += os.path.getsize(p)
+            tot_secs += dur
+        except OSError:
+            continue
+    feats["bitrate_kbps"] = (round(tot_bytes * 8 / tot_secs / 1000)
+                             if tot_secs > 0 else None)
     feats["claimed_bit_depth"]   = claimed
     feats["effective_bit_depth"] = min(eff, claimed)
     feats["bit_depth_padded"]    = bool(eff < claimed - 2)

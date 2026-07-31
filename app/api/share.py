@@ -215,7 +215,7 @@ def recording_detail(recording_id):
                 "id":           t.id,
                 "track_number": t.track_number,
                 "title":        t.title,
-                "set":          t.set,
+                "set_number":   t.set_number,
                 "duration":     t.duration,
                 "is_official":  bool(t.is_official),
                 "flags":        _json.loads(t.flags) if t.flags else [],

@@ -47,6 +47,88 @@ _TEXT_PREFER_WORDS = {
 }
 
 
+# Broader than AUDIO_EXTENSIONS above (which governs what gets ingested as a
+# track). Show RESOLUTION needs to recognise a folder as "containing audio" even
+# for formats the ingest pipeline itself won't take, or a folder of .ape files
+# looks like an empty grouping folder and gets silently walked past.
+RESOLVE_AUDIO_EXTS = {".flac", ".mp3", ".wav", ".aiff", ".aif",
+                      ".m4a", ".ogg", ".ape", ".wv"}
+
+
+def _root_audio_count(path):
+    """Count audio files directly in `path` (non-recursive)."""
+    try:
+        return sum(
+            1 for f in os.scandir(path)
+            if f.is_file()
+            and os.path.splitext(f.name)[1].lower() in RESOLVE_AUDIO_EXTS
+        )
+    except OSError:
+        return 0
+
+
+def _audio_subdirs(path):
+    """Immediate subdirs of `path` that contain audio at any depth."""
+    result = []
+    try:
+        for sub in os.scandir(path):
+            if not sub.is_dir():
+                continue
+            for _, _, files in os.walk(sub.path):
+                if any(os.path.splitext(f)[1].lower() in RESOLVE_AUDIO_EXTS
+                       for f in files):
+                    result.append(sub)
+                    break
+    except OSError:
+        pass
+    return result
+
+
+def resolve_shows(path):
+    """
+    Recursively resolve a directory to its actual show-level paths.
+
+    Hoisted out of `api/ingest.py::batch_scan`'s closure on 2026-07-30 so the
+    Listening Quality analyser can resolve shows the SAME way batch scanning
+    does. Two implementations of "what counts as a show" would drift, and the
+    triage list disagreeing with the metadata list about which folders exist
+    would be a genuinely confusing bug.
+
+    Logic:
+      - Has root audio → it's a show, return it.
+      - Has >= 2 audio-containing subdirs → grouping folder, expand each.
+      - Has exactly 1 audio-containing subdir → could be a transparent wrapper
+        ('flac/') OR another nesting level; recurse to find out.
+      - Has no audio at all → return as-is (the scanner grades it red).
+    """
+    if _root_audio_count(path) > 0:
+        return [path]
+    subs = _audio_subdirs(path)
+    if not subs:
+        return [path]
+    if len(subs) == 1:
+        return resolve_shows(subs[0].path)
+    result = []
+    for sub in sorted(subs, key=lambda e: e.name.lower()):
+        result.extend(resolve_shows(sub.path))
+    return result
+
+
+def resolve_shows_in_dir(source_dir):
+    """
+    Every show folder under one scanned directory.
+
+    The top-level loop both `batch_scan` and the quality analyser run: each
+    immediate subdirectory is resolved to its real show paths, handling
+    arbitrary nesting (artist -> year -> show).
+    """
+    show_paths = []
+    for entry in sorted(os.scandir(source_dir), key=lambda e: e.name.lower()):
+        if entry.is_dir():
+            show_paths.extend(resolve_shows(entry.path))
+    return show_paths
+
+
 def _auto_set_label(subdir_name):
     """
     Convert a subdir name like 'cd1', 'Disc 2', 'Set 1' into a canonical
@@ -91,7 +173,7 @@ def scan_folder(folder_path):
       1. Flat folder — all audio in root (no subdirs with audio)
       2. Single transparent subdir — e.g. a 'flac/' subfolder; treated as flat
       3. Multi-set structure — subdirs named cd1/cd2, disc1/disc2, set1/set2, etc.
-         Audio files get a 'set' field auto-populated from the subdir name.
+         Audio files get a 'set_number' field auto-populated from the subdir name.
 
     When multiple .txt files are present, the most likely info file is surfaced
     as text_files[0] based on filename scoring. All candidates are returned so
@@ -99,7 +181,7 @@ def scan_folder(folder_path):
 
     Returns:
       {
-        "audio_files":    [ { index, filename, path, set } ],
+        "audio_files":    [ { index, filename, path, set_number } ],
         "text_files":     [ { filename, path, score } ],   # sorted best-first
         "fingerprints":   [ { type, filename, path } ],
         "other_files":    [ { filename, path } ],
@@ -193,7 +275,7 @@ def scan_folder(folder_path):
                 # only used to locate the original file pre-flatten.
                 "rel_path": os.path.relpath(full, folder_path),
                 "path":     full,
-                "set":      set_label,   # None for flat; "CD 1" etc. for multi-set
+                "set_number": set_label,   # None for flat; "CD 1" etc. for multi-set
             })
         elif ext == TEXT_EXTENSION:
             if any(m in low for m in FINGERPRINT_MARKERS):
@@ -1126,7 +1208,7 @@ def build_scan_payload(folder_path):
                 "index":    f["index"],
                 "filename": f["filename"],
                 "rel_path": f.get("rel_path", f["filename"]),
-                "set":      f.get("set"),
+                "set_number": f.get("set_number"),
             }
             for f in files["audio_files"]
         ],
@@ -1184,8 +1266,45 @@ def build_scan_payload(folder_path):
 
 # ── File system operations ─────────────────────────────────────────────────────
 
+def _undo_transfer(moved, dest_folder, behavior):
+    """
+    Put things back after a cancelled `move_to_library`.
+
+    For a MOVE, every file already relocated goes back to where it came from —
+    otherwise cancelling would silently scatter a show across two directories.
+    For a COPY the source was never touched, so deleting the half-built
+    destination is enough.
+
+    Best-effort throughout: a failure to clean up must not mask the
+    cancellation itself, which is what the user actually asked for.
+    """
+    if behavior == "move":
+        for original, target in reversed(moved):
+            try:
+                original.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(original))
+            except OSError:
+                pass
+    try:
+        shutil.rmtree(str(dest_folder), ignore_errors=True)
+    except OSError:
+        pass
+
+
+class IngestCancelled(Exception):
+    """
+    Raised when a user cancels an in-flight ingest.
+
+    Not an error: `move_to_library` has already undone its own filesystem work
+    by the time this propagates, and the caller only needs to roll back the DB
+    session (which has not committed yet — `_do_confirm` flushes throughout and
+    commits exactly once, at the very end).
+    """
+
+
 def move_to_library(source_folder, library_root, artist_name, folder_name,
-                    behavior="copy", progress_cb=None, audio_rename_map=None):
+                    behavior="copy", progress_cb=None, audio_rename_map=None,
+                    cancel_cb=None):
     """
     Move or copy a source folder into the library under the artist directory.
 
@@ -1214,6 +1333,15 @@ def move_to_library(source_folder, library_root, artist_name, folder_name,
                               compute_audio_rename_map(). An audio file with
                               no entry keeps its original basename, still
                               flattened to dest_folder's root.
+        cancel_cb          : callable() -> bool | None — polled BETWEEN files.
+                              When it returns True this function undoes
+                              everything it has done so far and raises
+                              IngestCancelled.
+
+    Cancellation is handled HERE rather than by the caller because this is the
+    only place that knows what has been written where. For a copy that means
+    deleting the half-built destination; for a MOVE it means putting the files
+    already moved back where they came from, which no caller could do.
 
     Returns:
         str — new folder path relative to library_root
@@ -1231,7 +1359,18 @@ def move_to_library(source_folder, library_root, artist_name, folder_name,
     if progress_cb:
         progress_cb(0, total)
 
+    # (source, destination) for every file actually transferred, so a cancel can
+    # be undone precisely. Only meaningful for behavior="move"; a copy is undone
+    # by deleting the destination tree.
+    moved = []
+
     for p in files:
+        # Poll BETWEEN files, never mid-file: a partially written file is the one
+        # thing that would be genuinely hard to clean up.
+        if cancel_cb is not None and cancel_cb():
+            _undo_transfer(moved, dest_folder, behavior)
+            raise IngestCancelled("ingest cancelled by user")
+
         rel  = str(p.relative_to(src)).replace(os.sep, "/")
         size = p.stat().st_size
         if p.suffix.lower() in AUDIO_EXTENSIONS:
@@ -1244,6 +1383,7 @@ def move_to_library(source_folder, library_root, artist_name, folder_name,
         target.parent.mkdir(parents=True, exist_ok=True)
         if behavior == "move":
             shutil.move(str(p), str(target))
+            moved.append((p, target))
         else:
             shutil.copy2(str(p), str(target))
         done += size

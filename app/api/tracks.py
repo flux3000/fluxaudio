@@ -64,7 +64,7 @@ def get_track(track_id):
         "recording_id": t.recording_id,
         "track_number": t.track_number,
         "title":        t.title,
-        "set":          t.set,
+        "set_number":   t.set_number,
         "duration":     t.duration,
         "is_official":  bool(t.is_official),
         "flags":        json.loads(t.flags) if t.flags else [],
@@ -108,7 +108,7 @@ def update_track(track_id):
                 log.warning("Track file not found for rename: %s", old_abs)
 
     # ── DB field updates ──────────────────────────────────────────────────────
-    for field in ["title", "set", "notes", "songwriter"]:
+    for field in ["title", "set_number", "notes", "songwriter"]:
         if field in data:
             setattr(t, field, data[field] or None)
 

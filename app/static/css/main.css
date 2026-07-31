@@ -4365,3 +4365,260 @@ input[type="range"].progress-bar {
   color: rgba(0,255,160,0.5);
 }
 .dbg-log-ts     { color: var(--t2); text-align: right; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Unified ingestion — Listening Quality (2026-07-30)
+
+   Ported from tools/quality/quality_app.html, not reinvented. The standalone
+   app's layout was worked out against real recordings; this keeps it and adds
+   two things: a second score (Metadata Quality) beside the first, and an
+   action column that sits OUTSIDE the card — the card reports on a recording,
+   the column is what you do about it.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.lq-wrap { max-width: 1034px; }
+.lq-h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.01em; }
+.lq-sub-head { color: var(--t2); font-size: 13px; margin-bottom: 24px; }
+.lq-hint { color: var(--t3); font-size: 12px; margin-bottom: 24px; }
+
+/* ── Source bar + folder picker ──────────────────────────────────────────── */
+.lq-bar { display: flex; gap: 8px; margin-bottom: 8px; }
+.lq-path-input {
+  flex: 1; background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--t0);
+  border-radius: var(--r-md); padding: 10px 13px;
+  font-family: var(--font-mono); font-size: 13px;
+}
+.lq-path-input:focus { outline: none; border-color: var(--accent); }
+
+.lq-picker {
+  background: var(--bg-3); border: 1px solid var(--bd-1);
+  border-radius: var(--r-md); padding: 13px 15px; margin-bottom: 20px;
+}
+.lq-crumbs {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px;
+  font-family: var(--font-mono); font-size: 12px; color: var(--t2);
+}
+.lq-crumbs a { color: var(--t1); cursor: pointer; text-decoration: none; }
+.lq-crumbs a:hover { color: var(--accent-lit); }
+.lq-shortcut {
+  background: var(--bg-5); border: 1px solid var(--bd-1); border-radius: var(--r-sm);
+  padding: 3px 9px; font-size: 11.5px; color: var(--t2); cursor: pointer;
+}
+.lq-shortcut:hover { border-color: var(--accent); color: var(--accent-lit); }
+.lq-dirs { max-height: 290px; overflow-y: auto; border-top: 1px solid var(--bd-0); padding-top: 8px; }
+.lq-dir {
+  display: flex; align-items: center; gap: 9px; padding: 6px 9px;
+  border-radius: var(--r-sm); cursor: pointer; font-size: 13px;
+}
+.lq-dir:hover { background: var(--bg-4); }
+.lq-dir .ic { color: var(--t3); font-size: 12px; width: 14px; flex: none; }
+.lq-dir .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lq-dir .tag {
+  font-size: 10px; color: var(--green); background: rgba(106,184,128,.13);
+  border-radius: var(--r-sm); padding: 1px 7px;
+}
+.lq-pick-foot {
+  display: flex; align-items: center; gap: 10px; margin-top: 11px; padding-top: 11px;
+  border-top: 1px solid var(--bd-0); font-size: 12px; color: var(--t3);
+}
+.lq-err {
+  color: var(--red); padding: 14px 16px; background: rgba(217,96,85,.08);
+  border-radius: var(--r-md); font-size: 13px;
+}
+
+/* ── Progress + run bar ──────────────────────────────────────────────────── */
+.lq-progress { display: flex; align-items: center; gap: 12px; margin: 14px 0; font-size: 12.5px; color: var(--t2); }
+.lq-progress-bar { flex: 1; height: 4px; background: var(--bg-5); border-radius: 2px; overflow: hidden; }
+.lq-progress-bar i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.lq-runbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 0 16px; border-bottom: 1px solid var(--bd-0); margin-bottom: 16px;
+}
+.lq-run-note { font-size: 12.5px; color: var(--t2); }
+.lq-behavior { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--t2); margin-left: auto; }
+.lq-behavior select {
+  background: var(--bg-1); border: 1px solid var(--bd-1); color: var(--t0);
+  border-radius: var(--r-sm); padding: 4px 8px; font-size: 12.5px;
+}
+
+/* ── Row = card + action column ──────────────────────────────────────────── */
+.lq-cards { display: flex; flex-direction: column; gap: 12px; }
+.lq-row { display: flex; align-items: stretch; gap: 12px; }
+
+.lq-card {
+  flex: 1; min-width: 0;
+  background: var(--bg-3); border: 1px solid var(--bd-1);
+  border-radius: var(--r-lg); padding: 15px 17px;
+}
+.lq-card--pending { opacity: .6; }
+.lq-card-head { display: flex; align-items: center; gap: 14px; }
+.lq-card-title { flex: 1; min-width: 0; }
+.lq-card-title h2 { font-size: 14px; font-weight: 600; margin: 0; word-break: break-word; line-height: 1.35; }
+.lq-overall-txt { color: var(--t1); font-size: 12.5px; margin: 7px 0 0; }
+
+/* Quick-glance strip — Format · Bitrate · Cutoff */
+.lq-qbar {
+  display: flex; background: var(--bg-2); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); overflow: visible; flex: none;
+}
+.lq-qc { padding: 6px 13px; border-right: 1px solid var(--bd-0); text-align: center; position: relative; }
+.lq-qc:last-child { border-right: none; }
+.lq-qc .k { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); margin-bottom: 2px; }
+.lq-qc .v { font-family: var(--font-mono); font-size: 13px; font-weight: 500; line-height: 1.2; white-space: nowrap; }
+.lq-qc .d { font-size: 9.5px; color: var(--t2); margin-top: 1px; white-space: nowrap; }
+
+/* The two scores. Smaller than the standalone app's 32px — there are two of
+   them now and they share the row with the quick bar. */
+.lq-score { text-align: center; flex: none; min-width: 74px; }
+.lq-score .n { font-size: 23px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.lq-score .l { font-size: 8.5px; color: var(--t3); text-transform: uppercase; letter-spacing: .07em; margin-top: 4px; }
+.lq-score--meta { border-left: 1px solid var(--bd-0); padding-left: 12px; }
+
+/* ── Expand / detail ─────────────────────────────────────────────────────── */
+.lq-expand {
+  display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%;
+  margin-top: 12px; padding: 6px; background: var(--bg-2); border: 1px solid transparent;
+  border-radius: var(--r-sm); color: var(--t2); font-size: 11.5px; cursor: pointer;
+}
+.lq-expand:hover { background: var(--bg-4); color: var(--t0); border-color: var(--bd-1); }
+.lq-detail { display: none; }
+.lq-card.open .lq-detail { display: block; }
+.lq-card.open .lq-expand { margin-bottom: 2px; }
+
+/* Group meters */
+.lq-grp { padding: 8px 0; border-top: 1px solid var(--bd-0); }
+.lq-grp:first-of-type { margin-top: 10px; }
+.lq-grp-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 5px; }
+.lq-grp-name { font-weight: 600; font-size: 12.5px; min-width: 66px; border-bottom: 1px dotted var(--t3); cursor: help; }
+.lq-grp-score { font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.lq-grp-weight { color: var(--t3); font-size: 10.5px; margin-left: auto; }
+.lq-meter { height: 5px; background: var(--bg-5); border-radius: 3px; overflow: hidden; margin-bottom: 5px; }
+.lq-meter-fill { height: 100%; border-radius: 3px; transition: width .5s ease; }
+.lq-grp-txt { color: var(--t1); font-size: 12.5px; }
+
+/* Hover tooltips */
+.lq-tip { position: relative; }
+.lq-tip .lq-tipbox {
+  visibility: hidden; opacity: 0; position: absolute; left: 0; top: calc(100% + 7px); z-index: 20;
+  width: 300px; background: var(--bg-5); border: 1px solid var(--bd-2); border-radius: var(--r-md);
+  padding: 11px 13px; font-size: 11.5px; line-height: 1.5; color: var(--t0); font-weight: 400;
+  text-align: left; text-transform: none; letter-spacing: normal;
+  box-shadow: 0 8px 26px rgba(0,0,0,.42); transition: opacity .12s;
+}
+.lq-tip:hover .lq-tipbox { visibility: visible; opacity: 1; }
+.lq-tipbox .tt { font-weight: 600; margin-bottom: 5px; }
+.lq-tipbox .ab { color: var(--t1); }
+.lq-qbar .lq-tipbox { left: auto; right: 0; }
+.lq-tipbox .th {
+  color: var(--t2); font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+  margin: 9px 0 4px; padding-top: 7px; border-top: 1px solid var(--bd-1);
+}
+.lq-tipbox .rg { display: flex; justify-content: space-between; gap: 10px; padding: 1.5px 0; color: var(--t1); }
+.lq-tipbox .rg.on { color: var(--t0); font-weight: 500; }
+.lq-tipbox .rg .b { font-family: var(--font-mono); font-size: 10.5px; color: var(--t2); }
+.lq-tipbox .rg.on .b { color: var(--accent-lit); }
+
+/* Technical issues */
+.lq-issues { margin-top: 14px; padding: 11px 13px; background: rgba(217,96,85,.07); border-radius: var(--r-md); }
+.lq-issues h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--red); }
+.lq-issue { font-size: 12.5px; margin-bottom: 6px; }
+.lq-issue b { color: var(--t0); }
+.lq-issue span { color: var(--t2); }
+.lq-clean { margin-top: 12px; font-size: 12px; color: var(--t3); display: flex; align-items: center; gap: 7px; }
+.lq-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; }
+
+/* Track Analysis */
+.lq-samp { margin-top: 16px; border-top: 1px solid var(--bd-0); padding-top: 12px; }
+.lq-samp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 6px; }
+.lq-samp h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--t3); }
+.lq-samp-note { font-size: 11px; color: var(--t3); text-align: right; }
+.lq-trk { display: flex; align-items: center; gap: 10px; padding: 6px 9px; border-radius: var(--r-sm); }
+.lq-trk:hover { background: var(--bg-4); }
+.lq-trk-play {
+  background: none; border: 1px solid var(--bd-2); color: var(--t1);
+  width: 25px; height: 25px; border-radius: 50%; cursor: pointer; flex: none;
+  font-size: 10px; line-height: 1;
+}
+.lq-trk-play:hover { border-color: var(--accent); color: var(--accent-lit); background: var(--accent-dim); }
+.lq-trk-name { flex: 1; font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lq-trk-win { display: flex; gap: 5px; }
+.lq-win {
+  background: var(--bg-5); border: 1px solid var(--bd-1); color: var(--t2);
+  font-size: 10.5px; font-family: var(--font-mono); border-radius: var(--r-sm);
+  padding: 2px 7px; cursor: pointer;
+}
+.lq-win:hover { border-color: var(--accent); color: var(--accent-lit); }
+
+/* Advanced Metrics */
+.lq-adv-wrap { margin-top: 12px; }
+.lq-adv-wrap summary { font-size: 11.5px; color: var(--t3); cursor: pointer; padding: 4px 0; }
+.lq-adv-wrap summary:hover { color: var(--t1); }
+.lq-adv { margin-top: 6px; }
+.lq-mrow {
+  display: flex; align-items: center; gap: 10px; padding: 5px 8px;
+  border-radius: var(--r-sm); border-bottom: 1px solid var(--bd-0); position: relative;
+}
+.lq-mrow:last-child { border-bottom: none; }
+.lq-mrow:hover { background: var(--bg-4); }
+.lq-mdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.lq-mlabel { flex: 0 0 132px; font-size: 12px; color: var(--t1); }
+.lq-mval { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 0 96px; }
+.lq-mverdict { flex: 1; font-size: 11.5px; color: var(--t2); min-width: 0; }
+.lq-minfo {
+  flex: none; color: var(--t3); font-size: 11px; border: 1px solid var(--bd-1);
+  border-radius: 50%; width: 15px; height: 15px; line-height: 13px; text-align: center;
+}
+.lq-mrow:hover .lq-minfo { color: var(--accent-lit); border-color: var(--accent); }
+.lq-flags { margin-top: 9px; font-size: 11.5px; color: var(--t2); }
+.lq-flags span { display: inline-block; background: var(--bg-5); border-radius: var(--r-sm); padding: 2px 8px; margin: 0 6px 4px 0; }
+
+/* ── Action column — outside the card ────────────────────────────────────── */
+.lq-actions {
+  flex: 0 0 116px; display: flex; flex-direction: column; gap: 6px;
+  align-items: stretch; justify-content: flex-start; padding-top: 15px;
+}
+.lq-act {
+  display: block; width: 100%; text-align: center; cursor: pointer;
+  background: transparent; border: 1px solid var(--bd-1); color: var(--t1);
+  border-radius: var(--r-sm); padding: 7px 10px; font-size: 12px;
+  font-family: inherit; text-decoration: none;
+}
+.lq-act:hover { border-color: var(--accent); color: var(--accent-lit); }
+.lq-act:disabled { opacity: .5; cursor: default; }
+.lq-act--ingest { color: var(--green); border-color: rgba(106,184,128,.35); }
+.lq-act--ingest:hover { border-color: var(--green); color: var(--green); background: rgba(106,184,128,.08); }
+.lq-act--view { color: var(--accent-lit); border-color: var(--accent); }
+.lq-act-done     { font-size: 12px; color: var(--green); text-align: center; padding: 4px 0; }
+.lq-act-failed   { font-size: 12px; color: var(--red);   text-align: center; padding: 4px 0; }
+.lq-act-cancelled{ font-size: 12px; color: var(--t3);    text-align: center; padding: 4px 0; }
+
+.lq-move-wrap { position: relative; }
+.lq-move-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 116px;
+  background: var(--bg-5); border: 1px solid var(--bd-2); border-radius: var(--r-md);
+  padding: 4px; box-shadow: 0 8px 26px rgba(0,0,0,.42);
+}
+.lq-move-opt {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  color: var(--t1); font-size: 12px; font-family: inherit;
+  padding: 6px 9px; border-radius: var(--r-sm); cursor: pointer;
+}
+.lq-move-opt:hover { background: var(--bg-4); color: var(--accent-lit); }
+
+/* Floating preview player — pinned so it survives a re-render mid-listen */
+.lq-preview-audio {
+  position: fixed; bottom: 14px; right: 14px; z-index: 60;
+  width: 320px; height: 34px;
+  background: var(--bg-3); border: 1px solid var(--bd-1); border-radius: var(--r-md);
+}
+
+/* Triage shell header + the two action buttons that inherit .lq-act's base
+   styling and only need their own accent (Review/Move stay neutral so Ingest
+   is visibly the primary action). */
+.lq-shell { max-width: 1180px; }
+.lq-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.lq-act--review, .lq-act--move { color: var(--t2); }
+.lq-act--review:hover, .lq-act--move:hover { color: var(--accent-lit); }
+/* Failure text can now be a whole sentence, so let it wrap instead of
+   overflowing the action column. */
+.lq-act-failed { white-space: normal; line-height: 1.35; font-size: 11px; }

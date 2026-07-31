@@ -65,6 +65,28 @@ class Config:
     else:
         IMPORT_ROOTS = [str(LIBRARY_ROOT), "/Volumes"]
 
+    # Where new material lands before ingest. This is the folder every "pick a
+    # folder" box should open to. Defined here rather than hardcoded in the
+    # frontend so there is one place to change it — it moved once already
+    # (from Live Music Archive/Workshop/Import) and the old value was baked
+    # into app.js.
+    IMPORT_DIR = os.environ.get(
+        "IMPORT_DIR",
+        "/Volumes/music/Flux Workshop/Download"
+    )
+
+    # Triage destinations. During Listening Quality triage a show can be moved
+    # OUT of the ingest queue rather than ingested — either because the quality
+    # isn't good enough to bother with, or because it needs work first. These
+    # are real folders on disk (siblings of IMPORT_DIR); moving is a physical
+    # move, so the show leaves the scanned directory and stops being offered.
+    TRIAGE_DIRS = {
+        "backlog": os.environ.get(
+            "BACKLOG_DIR", "/Volumes/music/Flux Workshop/Backlog"),
+        "working": os.environ.get(
+            "WORKING_DIR", "/Volumes/music/Flux Workshop/Working"),
+    }
+
     # ── App ───────────────────────────────────────────────────
     # Note: Flask's own debug reloader is always forced off under PyWebView
     # (see run.py), so no DEBUG flag is carried here.

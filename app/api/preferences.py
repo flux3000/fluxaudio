@@ -5,7 +5,7 @@ Non-secret prefs round-trip through user_preference. The Anthropic API key is
 stored in the OS keychain (see utils/prefs); only its presence is exposed.
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 
 from app.utils.prefs import (get_pref, set_pref, has_api_key,
@@ -22,6 +22,10 @@ def _snapshot(uid):
         "ingest_file_behavior": get_pref(uid, "ingest_file_behavior", "copy"),
         "has_api_key":          has_api_key(uid),
         "keychain_available":   _HAS_KEYRING,
+        # Server-owned, not a user preference — surfaced here so the frontend
+        # never hardcodes a filesystem path. Read-only: update_preferences
+        # ignores it.
+        "import_dir":           current_app.config.get("IMPORT_DIR", ""),
     }
 
 

@@ -14,7 +14,14 @@ def recording_summary(rec):
     return {
         "id":              rec.id,
         "source":          rec.source,
+        # The MANUAL A/B+ letter grade. Rates the show as a whole — listening
+        # quality AND performance quality — and is a human judgement.
         "quality":         rec.quality,
+        # The AUTOMATED 0-100 Listening Quality score, measuring the audio only.
+        # Deliberately a separate field: it complements the letter grade and
+        # replaces neither. None until the recording has been analysed.
+        "listening_quality": (rec.quality_score.listening_quality
+                              if rec.quality_score else None),
         "rating":          rec.rating,
         "is_complete":     rec.is_complete,
         "is_official":     rec.is_official,
@@ -48,7 +55,14 @@ def recording_row(rec):
         "state":           v.state   if v else (p.state   if p else None),
         "country":         v.country if v else (p.country if p else None),
         "source":          rec.source,
+        # The MANUAL A/B+ letter grade. Rates the show as a whole — listening
+        # quality AND performance quality — and is a human judgement.
         "quality":         rec.quality,
+        # The AUTOMATED 0-100 Listening Quality score, measuring the audio only.
+        # Deliberately a separate field: it complements the letter grade and
+        # replaces neither. None until the recording has been analysed.
+        "listening_quality": (rec.quality_score.listening_quality
+                              if rec.quality_score else None),
         "rating":          rec.rating,
         "is_complete":     rec.is_complete,
         "track_count":     len(rec.tracks),

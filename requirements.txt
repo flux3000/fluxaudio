@@ -12,5 +12,14 @@ matplotlib>=3.8        # spectrogram rendering
 anthropic>=0.40.0      # AI Research Assistant (BYOK) — web-search + vision
 keyring>=24            # OS keychain storage for the BYOK API key
 
+# ── Listening Quality engine (app/utils/quality/) ──
+# Moved out of tools/ and into app runtime 2026-07-30. Librosa is deliberately
+# NOT used by this engine; soundfile's native seek decodes only the sampled
+# windows, which is what keeps analysis at ~2 s per recording.
+numpy>=1.26            # also used by utils/analysis.py
+scipy>=1.11            # STFT, filtering
+soundfile>=0.12        # windowed FLAC decode without loading whole files
+pyloudnorm>=0.1        # LUFS integrated loudness
+
 # ── Dev / test ──
 pytest>=8              # run: python3 -m pytest tests/

@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Listening Quality</title>
+<style>
+/* Design tokens lifted from Flux Audio's main.css so this reads as part of the
+   same product even though it runs standalone. */
+:root{
+  --bg-0:#141210; --bg-1:#1c1916; --bg-2:#1a1714; --bg-3:#252220; --bg-4:#2e2a25; --bg-5:#38322c;
+  --bd-0:rgba(255,255,255,.05); --bd-1:rgba(255,255,255,.09); --bd-2:rgba(255,255,255,.16);
+  --t0:#e0d8ce; --t1:#a89880; --t2:#7a6e64; --t3:#5a5048;
+  --accent:#c4956a; --accent-lit:#d4aa82; --accent-dim:rgba(196,149,106,.14); --accent-dim2:rgba(196,149,106,.24);
+  --green:#6ab880; --amber:#c89b50; --red:#d96055; --blue:#6898c8; --purple:#a07dc8;
+  --font:-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;
+  --font-mono:'SF Mono',ui-monospace,'Cascadia Code',monospace;
+  --r-sm:4px; --r-md:8px; --r-lg:12px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-0);color:var(--t0);font-family:var(--font);font-size:14px;line-height:1.5}
+.wrap{max-width:1034px;margin:0 auto;padding:32px 24px 80px}
+
+header{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+h1{font-size:20px;font-weight:600;margin:0;letter-spacing:-.01em}
+.sub{color:var(--t2);font-size:13px;margin-bottom:24px}
+
+/* ── input bar ─────────────────────────────────────────────── */
+.bar{display:flex;gap:8px;margin-bottom:8px}
+input[type=text]{flex:1;background:var(--bg-3);border:1px solid var(--bd-1);color:var(--t0);
+  padding:10px 12px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:13px}
+input[type=text]:focus{outline:none;border-color:var(--accent);background:var(--bg-4)}
+button{background:var(--accent-dim2);border:1px solid var(--accent);color:var(--accent-lit);
+  padding:10px 18px;border-radius:var(--r-md);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap}
+button:hover:not(:disabled){background:rgba(196,149,106,.34);color:#fff}
+button:disabled{opacity:.45;cursor:default}
+.hint{color:var(--t3);font-size:12px;margin-bottom:24px}
+button.ghost{background:transparent;border-color:var(--bd-2);color:var(--t1)}
+button.ghost:hover:not(:disabled){background:var(--bg-4);color:var(--t0);border-color:var(--bd-2)}
+
+/* ── folder picker ─────────────────────────────────────────── */
+.picker{background:var(--bg-3);border:1px solid var(--bd-1);border-radius:var(--r-md);
+  padding:12px 14px;margin-bottom:20px}
+.crumbs{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px;
+  font-family:var(--font-mono);font-size:11.5px;color:var(--t2)}
+.crumbs a{color:var(--t1);cursor:pointer;text-decoration:none}
+.crumbs a:hover{color:var(--accent-lit)}
+.shortcut{background:var(--bg-5);border:1px solid var(--bd-1);border-radius:var(--r-sm);
+  padding:2px 8px;cursor:pointer;font-size:11px;color:var(--t1)}
+.shortcut:hover{border-color:var(--accent);color:var(--accent-lit)}
+.dirs{max-height:290px;overflow-y:auto;border-top:1px solid var(--bd-0);padding-top:8px}
+.dir{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:var(--r-sm);cursor:pointer;font-size:13px}
+.dir:hover{background:var(--bg-4)}
+.dir .ic{color:var(--t3);font-size:12px;width:14px;flex:none}
+.dir .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dir .tag{font-size:10px;color:var(--green);background:rgba(106,184,128,.13);
+  border-radius:var(--r-sm);padding:1px 7px;flex:none}
+.pick-foot{display:flex;align-items:center;gap:10px;margin-top:11px;padding-top:11px;
+  border-top:1px solid var(--bd-0);font-size:12px;color:var(--t2)}
+.pick-foot button{padding:6px 14px;font-size:12px}
+
+/* ── progress ──────────────────────────────────────────────── */
+.prog{margin:20px 0;padding:14px 16px;background:var(--bg-3);border:1px solid var(--bd-1);border-radius:var(--r-md)}
+.prog-bar{height:4px;background:var(--bg-5);border-radius:2px;overflow:hidden;margin-top:10px}
+.prog-fill{height:100%;background:var(--accent);transition:width .3s}
+.err{color:var(--red);padding:14px 16px;background:rgba(217,96,85,.08);
+  border:1px solid rgba(217,96,85,.3);border-radius:var(--r-md);margin:16px 0}
+
+/* ── weighting sliders ─────────────────────────────────────── */
+.weights{background:var(--bg-3);border:1px solid var(--bd-1);border-radius:var(--r-md);
+  padding:12px 15px;margin-bottom:18px}
+.w-head{display:flex;align-items:baseline;gap:10px;margin-bottom:9px;font-size:11px;
+  text-transform:uppercase;letter-spacing:.08em;color:var(--t3)}
+.w-sub{text-transform:none;letter-spacing:normal;color:var(--t3);font-size:11px}
+.w-reset{margin-left:auto;background:transparent;border:1px solid var(--bd-1);color:var(--t2);
+  padding:3px 10px;font-size:10.5px;border-radius:var(--r-sm);text-transform:none;letter-spacing:normal}
+.w-reset:hover{border-color:var(--accent);color:var(--accent-lit);background:transparent}
+.w-row{display:flex;align-items:center;gap:12px;padding:3px 0}
+.w-row label{flex:0 0 68px;font-size:12px;color:var(--t1)}
+.w-row input[type=range]{flex:1;-webkit-appearance:none;height:4px;background:var(--bg-5);
+  border-radius:2px;outline:none}
+.w-row input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
+  border-radius:50%;background:var(--accent);cursor:pointer;border:none}
+.w-val{flex:0 0 44px;text-align:right;font-family:var(--font-mono);font-size:12px;color:var(--t1)}
+
+/* ── overall progress ──────────────────────────────────────── */
+.overall{position:sticky;top:0;z-index:5;background:var(--bg-0);padding:10px 0 12px;margin-bottom:12px}
+.overall-row{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--t1)}
+.overall-bar{flex:1;height:5px;background:var(--bg-5);border-radius:3px;overflow:hidden}
+.overall-fill{height:100%;background:var(--accent);transition:width .4s ease}
+.overall-n{font-family:var(--font-mono);font-size:11.5px;color:var(--t2);white-space:nowrap}
+
+/* ── recording card ────────────────────────────────────────── */
+.card{background:var(--bg-3);border:1px solid var(--bd-1);border-radius:var(--r-lg);
+  padding:14px 16px;margin-bottom:11px}
+.card-head{display:flex;align-items:center;gap:16px}
+.card-title{flex:1;min-width:0}
+.card-title h2{font-size:14px;font-weight:600;margin:0;word-break:break-word;line-height:1.35}
+.overall-txt{color:var(--t1);font-size:12.5px;margin:8px 0 0}
+
+.score-big{text-align:center;flex:none;min-width:78px}
+.score-big .n{font-size:32px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+.score-big .l{font-size:9px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;margin-top:3px}
+
+/* ── quick glance ──────────────────────────────────────────
+   A compact horizontal bar in the header, left of the score and always
+   visible. Format, bitrate, cutoff — the three facts most people want before
+   deciding whether to open anything. */
+.qbar{display:flex;background:var(--bg-2);border:1px solid var(--bd-0);
+  border-radius:var(--r-md);overflow:hidden;flex:none}
+.qc{padding:6px 13px;border-right:1px solid var(--bd-0);text-align:center}
+.qc:last-child{border-right:none}
+.qc .k{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--t3);margin-bottom:2px}
+.qc .v{font-family:var(--font-mono);font-size:13px;font-weight:500;line-height:1.2;white-space:nowrap}
+.qc .d{font-size:9.5px;color:var(--t2);margin-top:1px;white-space:nowrap}
+
+/* ── group rows ────────────────────────────────────────────── */
+.grp{padding:9px 0;border-top:1px solid var(--bd-0)}
+.grp:first-of-type{margin-top:12px}
+.grp-head{display:flex;align-items:baseline;gap:9px;margin-bottom:5px}
+.grp-name{font-weight:600;font-size:12.5px;min-width:66px;border-bottom:1px dotted var(--t3);cursor:help}
+.grp-score{font-family:var(--font-mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.grp-weight{color:var(--t3);font-size:10.5px;margin-left:auto}
+.meter{height:5px;background:var(--bg-5);border-radius:3px;overflow:hidden;margin-bottom:6px}
+.meter-fill{height:100%;border-radius:3px;transition:width .5s ease}
+.grp-txt{color:var(--t1);font-size:12.5px}
+
+/* ── tooltip ───────────────────────────────────────────────── */
+.tip{position:relative}
+.tip .tipbox{visibility:hidden;opacity:0;position:absolute;left:0;top:calc(100% + 7px);z-index:20;
+  width:400px;background:var(--bg-5);border:1px solid var(--bd-2);border-radius:var(--r-md);
+  padding:11px 13px;font-size:11.5px;line-height:1.5;color:var(--t0);font-weight:400;
+  font-family:var(--font);text-transform:none;letter-spacing:normal;transition:opacity .12s;
+  box-shadow:0 6px 18px rgba(0,0,0,.45);text-align:left}
+.tip:hover .tipbox{visibility:visible;opacity:1}
+.tipbox .tt{font-weight:600;margin-bottom:5px}
+.tipbox .ab{color:var(--t1)}
+/* Header tooltips anchor to their right edge — a 400px box hanging off left:0
+   from a narrow cell near the right of the card would overflow it. */
+.qbar .tipbox{left:auto;right:0}
+.tipbox .th{color:var(--t2);font-size:10px;text-transform:uppercase;letter-spacing:.07em;
+  margin:8px 0 5px;border-top:1px solid var(--bd-1);padding-top:7px}
+.tipbox .rg{display:flex;justify-content:space-between;gap:10px;padding:1.5px 0;color:var(--t1)}
+.tipbox .rg.on{color:var(--t0);font-weight:500}
+.tipbox .rg .b{font-family:var(--font-mono);font-size:10.5px;color:var(--t2)}
+.tipbox .rg.on .b{color:var(--accent-lit)}
+
+/* ── advanced metrics ──────────────────────────────────────── */
+.adv{margin-top:6px}
+/* The whole row is the hover target — one tooltip carrying both the
+   explanation and the range ladder, rather than two that had to be
+   discovered separately. */
+.mrow{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:var(--r-sm);
+  border-bottom:1px solid var(--bd-0);cursor:help}
+.mrow:last-child{border-bottom:none}
+.mrow:hover{background:var(--bg-4)}
+.mdot{width:7px;height:7px;border-radius:50%;flex:none}
+.mlabel{flex:0 0 132px;font-size:12px;color:var(--t1)}
+.mval{font-family:var(--font-mono);font-size:12px;font-variant-numeric:tabular-nums;
+  flex:0 0 96px;text-align:right}
+.mverdict{flex:1;font-size:11.5px;color:var(--t2);min-width:0}
+/* Persistent, quiet affordance — visible enough to invite a hover, dim
+   enough not to compete with the numbers. Brightens on hover. */
+.minfo{flex:none;color:var(--t3);font-size:11px;border:1px solid var(--bd-1);
+  border-radius:50%;width:14px;height:14px;line-height:12px;text-align:center}
+.mrow:hover .minfo{color:var(--accent-lit);border-color:var(--accent)}
+
+/* ── collapsible detail ────────────────────────────────────── */
+.expand{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;
+  margin-top:11px;padding:5px 0;background:var(--bg-2);border:1px solid var(--bd-0);
+  border-radius:var(--r-sm);color:var(--t2);font-size:11px;cursor:pointer;
+  letter-spacing:.04em}
+.expand:hover{background:var(--bg-4);color:var(--t0);border-color:var(--bd-1)}
+.detail{display:none}
+.card.open .detail{display:block}
+.card.open .expand{margin-bottom:2px}
+
+/* ── issues + flags ────────────────────────────────────────── */
+.issues{margin-top:16px;padding:12px 14px;background:rgba(217,96,85,.07);
+  border:1px solid rgba(217,96,85,.25);border-radius:var(--r-md)}
+.issues h4{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--red)}
+.issue{font-size:12.5px;margin-bottom:6px}
+.issue b{color:var(--t0)}
+.issue span{color:var(--t2)}
+
+.clean{margin-top:14px;font-size:12px;color:var(--t3);display:flex;align-items:center;gap:7px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:none}
+
+/* ── sampled tracks / player ───────────────────────────────── */
+.samp{margin-top:18px;border-top:1px solid var(--bd-0);padding-top:14px}
+/* Header row: title left, hint right — the hint sits directly above the
+   timestamp pills it refers to. */
+.samp-head{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:8px}
+.samp h4{margin:0;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--t3)}
+.samp-note{font-size:11px;color:var(--t3);text-align:right}
+.trk{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--r-sm);
+  background:var(--bg-2);margin-bottom:5px}
+.trk:hover{background:var(--bg-4)}
+.trk-play{background:none;border:1px solid var(--bd-2);color:var(--t1);width:26px;height:26px;
+  border-radius:50%;padding:0;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none}
+.trk-play:hover{border-color:var(--accent);color:var(--accent-lit);background:var(--accent-dim)}
+.trk-name{flex:1;font-size:12.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trk-win{display:flex;gap:5px}
+.win{background:var(--bg-5);border:1px solid var(--bd-1);color:var(--t2);font-size:10.5px;
+  padding:2px 7px;border-radius:var(--r-sm);cursor:pointer;font-family:var(--font-mono)}
+.win:hover{border-color:var(--accent);color:var(--accent-lit)}
+.playing{border-color:var(--accent)!important}
+.playing .trk-name{color:var(--accent-lit)}
+
+audio{width:100%;margin-top:10px;height:34px}
+audio::-webkit-media-controls-panel{background:var(--bg-2)}
+
+/* ── details ───────────────────────────────────────────────── */
+details{margin-top:12px}
+summary{cursor:pointer;color:var(--t3);font-size:11.5px;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary:before{content:'▸ ';color:var(--t3)}
+details[open] summary:before{content:'▾ '}
+summary:hover{color:var(--t1)}
+.feat{margin-top:9px;display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:5px 18px}
+.feat div{font-size:11.5px;color:var(--t2);font-family:var(--font-mono);
+  display:flex;justify-content:space-between;gap:8px}
+.feat b{color:var(--t1);font-weight:500}
+.flags{margin-top:9px;font-size:11.5px;color:var(--t2)}
+.flags span{display:inline-block;background:var(--bg-5);border-radius:var(--r-sm);
+  padding:2px 8px;margin:0 5px 5px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Listening Quality</h1></header>
+  <div class="sub">Point at a folder — a single show, or a whole artist. Every recording inside gets analyzed.</div>
+
+  <div class="bar">
+    <input type="text" id="path" placeholder="Pick a folder below, or type a path" spellcheck="false">
+    <button id="browse" class="ghost">Browse</button>
+    <button id="go">Analyze</button>
+  </div>
+  <div class="hint">From each recording we pick 3 tracks, take two 20-second clips from each,
+    and measure all six. Roughly 15 seconds per recording.</div>
+
+  <div id="picker" class="picker" hidden></div>
+  <div id="msg"></div>
+
+  <div class="weights" id="weights" hidden>
+    <div class="w-head">
+      <span>Weighting</span>
+      <span class="w-sub">Scores recompute instantly — no re-analysis</span>
+      <button class="w-reset" id="w-reset">Reset to 35 / 15 / 50</button>
+    </div>
+    <div class="w-row"><label for="w-tone">Tone</label>
+      <input type="range" id="w-tone" min="0" max="100" step="5" value="35">
+      <span class="w-val" id="w-tone-v">35%</span></div>
+    <div class="w-row"><label for="w-noise">Noise</label>
+      <input type="range" id="w-noise" min="0" max="100" step="5" value="15">
+      <span class="w-val" id="w-noise-v">15%</span></div>
+    <div class="w-row"><label for="w-dyn">Dynamics</label>
+      <input type="range" id="w-dyn" min="0" max="100" step="5" value="50">
+      <span class="w-val" id="w-dyn-v">50%</span></div>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<audio id="player" preload="none"></audio>
+
+<script>
+const $ = s => document.querySelector(s);
+const out = $('#out'), player = $('#player');
+
+// Colour follows the same bands as the interpretation text.
+function colour(s){
+  if (s == null) return 'var(--t2)';
+  if (s >= 90) return 'var(--green)';
+  if (s >= 80) return 'var(--accent-lit)';
+  if (s >= 70) return 'var(--amber)';
+  if (s >= 60) return 'var(--amber)';
+  return 'var(--red)';
+}
+const esc = t => String(t ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// Advanced-metric and quick-glance states use their own scale — these are
+// verdicts on a raw measurement, not 0-100 scores.
+const STATE = {good:'var(--green)', ok:'var(--accent-lit)',
+               poor:'var(--amber)', bad:'var(--red)'};
+const stateColour = s => STATE[s] || 'var(--t2)';
+
+function fmt(v, unit, dp = 1){
+  return v == null ? '—' : (typeof v === 'number' ? v.toFixed(dp) : v) + (unit || '');
+}
+
+// ── live re-weighting ───────────────────────────────────────
+// Scoring is a pure function over stored group scores, so the browser can
+// recompute the composite exactly — same weighted geometric mean the server
+// uses, same technical-issue deduction. Nothing is re-analysed.
+let W = {tone: 35, noise: 15, dynamics: 50};
+
+const OVERALL_TEXT = [
+  [90, "An excellent-sounding recording. Nothing about the sound should get between a listener and the performance."],
+  [80, "A good-sounding recording. Minor character of its own, but comfortable to sit through from start to finish."],
+  [70, "A listenable recording with obvious character. Fine on its own terms, but not one to hand to a skeptic first."],
+  [60, "Rough. Worth hearing for the performance, but the sound itself will be a distraction for most listeners."],
+  [50, "A difficult listen. Only worth it if you specifically want this show."],
+  [0,  "Very hard to listen to. Archival interest only."],
+];
+const overallText = s => (OVERALL_TEXT.find(([f]) => s >= f) || OVERALL_TEXT[5])[1];
+
+function composite(sc){
+  const parts = [[sc.score_tone, W.tone], [sc.score_noise, W.noise],
+                 [sc.score_dynamics, W.dynamics]].filter(([v,w]) => v != null && w > 0);
+  if (!parts.length) return null;
+  const tw = parts.reduce((a,[,w]) => a+w, 0);
+  const g = Math.exp(parts.reduce((a,[v,w]) => a + w*Math.log(Math.max(v,1)), 0) / tw);
+  return Math.max(0, Math.min(100, g - (sc.technical_deduction || 0)));
+}
+
+function weightLabels(){
+  const t = W.tone + W.noise + W.dynamics || 1;
+  return {tone: Math.round(100*W.tone/t) + '% of score',
+          noise: Math.round(100*W.noise/t) + '%',
+          dynamics: Math.round(100*W.dynamics/t) + '%'};
+}
+
+function card(r){
+  if (r.error) return `<div class="card"><div class="card-title"><h2>${esc(r.name)}</h2></div>
+    <div class="err" style="margin:12px 0 0">${esc(r.error)}</div></div>`;
+
+  const s = r.scores, it = r.interpretation;
+  const lq = composite(s);
+  const o = {text: overallText(lq)};
+  const WEIGHT = weightLabels();
+
+  const groups = it.groups.map(g => `
+    <div class="grp">
+      <div class="grp-head">
+        <span class="grp-name tip">${esc(g.label)}
+          <span class="tipbox">${esc(g.blurb)}</span></span>
+        <span class="grp-score" style="color:${colour(g.score)}">${fmt(g.score)}</span>
+        <span class="grp-weight">${WEIGHT[g.key]}</span>
+      </div>
+      <div class="meter"><div class="meter-fill" style="width:${g.score||0}%;background:${colour(g.score)}"></div></div>
+      <div class="grp-txt">${esc(g.text)}</div>
+    </div>`).join('');
+
+  // ── quick glance: what 90% of people want before opening anything ──
+  const q = it.quick || {}, cut = it.cutoff || {};
+  const quick = `
+    <div class="qbar">
+      <div class="qc">
+        <div class="k">Format</div>
+        <div class="v">${esc(q.format || '—')}</div>
+        <div class="d">${q.bit_depth ? q.bit_depth + '-bit' : ''}${q.sample_rate_hz ? ' / ' + (q.sample_rate_hz/1000).toFixed(1) : ''}</div>
+      </div>
+      <div class="qc">
+        <div class="k">Bitrate</div>
+        <div class="v">${q.bitrate_kbps ?? '—'}</div>
+        <div class="d">${q.bitrate_kbps ? 'kbps' : ''}</div>
+      </div>
+      <div class="qc tip">
+        <div class="k">Cutoff</div>
+        <div class="v" style="color:${stateColour(cut.state)}">${cut.khz != null ? cut.khz + ' kHz' : '—'}</div>
+        <div class="d">${esc(cut.short || '')}</div>
+        <span class="tipbox"><div class="tt">Frequency cutoff — ${esc(cut.verdict || '')}</div>
+          <div class="ab">${esc(cut.detail || '')}</div></span>
+      </div>
+    </div>`;
+
+  // ── advanced metrics: value, colour, and the full range on hover ──
+  const metrics = (it.metrics || []).map(m => {
+    // Metrics without a ladder (mains frequency) get no colour and no range —
+    // a range would be meaningless for a categorical value.
+    const hasScale = m.scale && m.scale.length;
+    const col = hasScale ? stateColour(m.state) : 'var(--t1)';
+    const dp = m.dp != null ? m.dp : (m.unit === ' Hz' ? 0 : 1);
+    const shown = m.abs ? Math.abs(m.value) : m.value;
+
+    const ladder = hasScale ? m.scale.map((s,i) => {
+      const prev = i ? m.scale[i-1].upto : null;
+      const range = prev === null ? `< ${s.upto}`
+                  : (s.upto >= 9 && i === m.scale.length-1 && m.unit !== ' Hz') ? `> ${prev}`
+                  : `${prev} to ${s.upto}`;
+      return `<div class="rg${s.text === m.verdict ? ' on' : ''}">
+        <span>${esc(s.text)}</span><span class="b">${esc(range)}</span></div>`;
+    }).join('') : '';
+
+    // One tooltip on the whole row: what the measure is, then where this
+    // value lands in the range.
+    return `
+    <div class="mrow tip">
+      <span class="mdot" style="background:${hasScale ? col : 'transparent'}"></span>
+      <span class="mlabel">${esc(m.label)}</span>
+      <span class="mval" style="color:${col}">${fmt(shown, m.unit, dp)}</span>
+      <span class="mverdict">${esc(m.verdict)}</span>
+      <span class="minfo">i</span>
+      <span class="tipbox">
+        <div class="tt">${esc(m.label)} — ${esc(m.verdict)}</div>
+        <div class="ab">${esc(m.about)}</div>
+        ${hasScale ? `<div class="th">Ranges</div>${ladder}` : ''}
+      </span>
+    </div>`;
+  }).join('');
+
+  const issues = it.issues.length ? `
+    <div class="issues"><h4>Technical Issues</h4>
+      ${it.issues.map(i => `<div class="issue"><b>${esc(i.issue)}</b> — ${esc(i.detail)}
+        (−${i.deduction}) <span>${esc(i.text)}</span></div>`).join('')}
+    </div>` : `<div class="clean"><span class="dot"></span>No technical issues detected —
+      no clipping, dead channel, phase problem or dropouts.</div>`;
+
+  const tracks = (r.sampled || []).map(t => `
+    <div class="trk" data-path="${esc(r.folder + '/' + t.track)}">
+      <button class="trk-play" title="Play">▶</button>
+      <span class="trk-name">${esc(t.track)}</span>
+      <span class="trk-win">${(t.offsets || []).map(o =>
+        `<span class="win" data-off="${o}" title="Jump to the analyzed window">${Math.floor(o/60)}:${String(Math.floor(o%60)).padStart(2,'0')}</span>`).join('')}</span>
+    </div>`).join('');
+
+  const flags = (r.flags||[]).length
+    ? `<div class="flags">${r.flags.map(x=>`<span>${esc(x)}</span>`).join('')}</div>` : '';
+
+  return `<div class="card" data-lq="${lq}">
+    <div class="card-head">
+      <div class="card-title"><h2>${esc(r.name)}</h2>
+        <div class="overall-txt">${esc(o.text)}</div></div>
+      ${quick}
+      <div class="score-big">
+        <div class="n" style="color:${colour(lq)}">${fmt(lq)}</div>
+        <div class="l">Listening Quality</div>
+      </div>
+    </div>
+    <div class="expand"><span class="chev">▾</span><span class="lbl">Details</span></div>
+    <div class="detail">
+      ${groups}
+      ${issues}
+      <div class="samp">
+        <div class="samp-head">
+          <h4>Track Analysis</h4>
+          <span class="samp-note">Click a timestamp to hear the portion that was analyzed</span>
+        </div>
+        ${tracks}
+      </div>
+      <details><summary>Advanced Metrics</summary>
+        <div class="adv">${metrics}</div>${flags}
+      </details>
+    </div>
+  </div>`;
+}
+
+// ── playback ────────────────────────────────────────────────
+// One <audio> element moves between rows. The row that owns it is `currentRow`;
+// its button reflects real playback state via the audio element's own events,
+// not by guessing at click time — otherwise pausing from the native controls
+// would leave the button showing the wrong glyph.
+let currentRow = null;
+
+function setGlyphs(){
+  document.querySelectorAll('.trk-play').forEach(b => b.textContent = '▶');
+  if (currentRow && !player.paused) currentRow.querySelector('.trk-play').textContent = '❚❚';
+}
+player.addEventListener('play',  setGlyphs);
+player.addEventListener('pause', setGlyphs);
+player.addEventListener('ended', () => {
+  currentRow?.classList.remove('playing');
+  currentRow = null; setGlyphs();
+});
+
+// ── expand / collapse ───────────────────────────────────────
+out.addEventListener('click', e => {
+  const tab = e.target.closest('.expand');
+  if (!tab) return;
+  const card = tab.closest('.card');
+  const open = card.classList.toggle('open');
+  tab.querySelector('.chev').textContent = open ? '▴' : '▾';
+  tab.querySelector('.lbl').textContent  = open ? 'Hide details' : 'Details';
+  // Pause on collapse — otherwise audio keeps playing from a card whose
+  // transport controls are no longer visible.
+  if (!open && currentRow && card.contains(currentRow)) player.pause();
+});
+
+out.addEventListener('click', e => {
+  const win  = e.target.closest('.win');
+  const play = e.target.closest('.trk-play');
+  if (!win && !play) return;
+  const row  = e.target.closest('.trk');
+  const path = row.dataset.path;
+  const same = currentRow === row;
+
+  // Play button on the row already playing = pause/resume toggle.
+  if (play && same) {
+    player.paused ? player.play() : player.pause();
+    return;
+  }
+
+  if (currentRow && !same) currentRow.classList.remove('playing');
+  row.classList.add('playing');
+  currentRow = row;
+  row.parentElement.appendChild(player);
+
+  const seek = win ? parseFloat(win.dataset.off) : 0;
+  if (!same) {
+    player.src = '/api/stream?path=' + encodeURIComponent(path);
+    player.addEventListener('loadedmetadata',
+      () => { player.currentTime = seek; player.play(); }, {once:true});
+    player.load();
+  } else {
+    player.currentTime = seek;
+    player.play();
+  }
+});
+
+// ── folder picker ───────────────────────────────────────────
+const picker = $('#picker'), msg = $('#msg');
+const say = t => msg.innerHTML = t ? `<div class="err">${esc(t)}</div>` : '';
+
+async function openPicker(path){
+  try {
+    const j = await jget('/api/browse?path=' + encodeURIComponent(path || $('#path').value.trim()));
+    if (j.error){ say(j.error); return; }
+    const parts = j.path.split('/').filter(Boolean);
+    let acc = '';
+    const crumbs = ['<a data-go="/">/</a>'].concat(parts.map(p => {
+      acc += '/' + p; return `<a data-go="${esc(acc)}">${esc(p)}</a>`;
+    })).join('<span style="color:var(--t3)">/</span>');
+
+    const LABEL = {'/Volumes':'All volumes'};
+    const shortcuts = (j.shortcuts||[]).map((s,i) => {
+      const label = LABEL[s] || (i === 0 ? 'Downloads' : s.split('/').filter(Boolean).pop());
+      return `<span class="shortcut" data-go="${esc(s)}">${esc(label)}</span>`;
+    }).join('');
+
+    const dirs = j.dirs.length ? j.dirs.map(d => `
+      <div class="dir" data-go="${esc(d.path)}" data-audio="${d.audio?1:0}">
+        <span class="ic">${d.subdirs || !d.audio ? '▸' : '·'}</span>
+        <span class="nm">${esc(d.name)}</span>
+        ${d.audio ? '<span class="tag">audio</span>' : ''}
+      </div>`).join('') : '<div class="dir" style="color:var(--t3)">No sub-folders here</div>';
+
+    picker.innerHTML = `
+      <div class="crumbs">${j.parent ? `<span class="shortcut" data-go="${esc(j.parent)}">↑ up</span>` : ''}
+        ${shortcuts}<span style="flex:1"></span></div>
+      <div class="crumbs">${crumbs}</div>
+      <div class="dirs">${dirs}</div>
+      <div class="pick-foot">
+        <button data-use="${esc(j.path)}">Use this folder</button>
+        <span>${j.here_has_audio ? 'This folder contains audio.'
+          : 'Pick a folder holding shows, or one show itself.'}</span>
+      </div>`;
+    picker.hidden = false;
+    $('#path').value = j.path;
+    say('');
+  } catch(e){ say('Could not browse: ' + e.message); }
+}
+
+picker.addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  const use = e.target.closest('[data-use]');
+  if (go) openPicker(go.dataset.go);
+  else if (use){ $('#path').value = use.dataset.use; picker.hidden = true; run(); }
+});
+
+// ── run ─────────────────────────────────────────────────────
+async function jget(url, opts){
+  const r = await fetch(url, opts);
+  const txt = await r.text();
+  try { return JSON.parse(txt); }
+  catch { throw new Error(`Server returned ${r.status}: ${txt.slice(0,180)}`); }
+}
+
+async function run(){
+  const path = $('#path').value.trim();
+  if (!path){ say('Enter a folder path, or press Browse to pick one.'); return; }
+  $('#go').disabled = true; say('');
+  out.innerHTML = `<div class="prog">Starting…<div class="prog-bar"><div class="prog-fill" style="width:0"></div></div></div>`;
+
+  let res;
+  try {
+    res = await jget('/api/analyse', {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body: JSON.stringify({path})});
+  } catch(e){ out.innerHTML=''; say(e.message); $('#go').disabled=false; return; }
+  if (res.error){ out.innerHTML=''; say(res.error); $('#go').disabled=false; return; }
+
+  // Sticky overall progress, then results appended below it as they finish.
+  out.innerHTML = `
+    <div class="overall" id="ov">
+      <div class="overall-row">
+        <span id="ov-label">Starting…</span>
+        <div class="overall-bar"><div class="overall-fill" id="ov-fill" style="width:0"></div></div>
+        <span class="overall-n" id="ov-n"></span>
+      </div>
+    </div>
+    <div id="cards"></div>`;
+  const cards = $('#cards');
+  let rendered = 0;   // results already on screen — append only, never re-sort
+  jobRunning = true; lastResults = [];
+  $('#weights').hidden = false;
+
+  const poll = setInterval(async () => {
+    let j;
+    try { j = await jget('/api/job/' + res.job_id); }
+    catch(e){ clearInterval(poll); jobRunning=false; say(e.message); $('#go').disabled=false; return; }
+    if (j.state === 'error'){ clearInterval(poll); jobRunning=false; out.innerHTML=''; say(j.error); $('#go').disabled=false; return; }
+    lastResults = j.results || [];
+
+    // Append newest entries at the bottom, in completion order. Re-sorting
+    // mid-run made finished cards jump around under the cursor.
+    const list = j.results || [];
+    for (let i = rendered; i < list.length; i++) cards.insertAdjacentHTML('beforeend', card(list[i]));
+    rendered = list.length;
+
+    const pct = j.total ? Math.round(100*j.done/j.total) : 0;
+    $('#ov-fill').style.width = pct + '%';
+    $('#ov-label').textContent = j.state === 'done'
+      ? `Done — ${j.total} recording${j.total===1?'':'s'}` : 'Analyzing…';
+    $('#ov-n').textContent = `${j.done} / ${j.total}`;
+
+    if (j.state === 'done'){ clearInterval(poll); jobRunning = false;
+      $('#go').disabled = false; applyWeights(true); }
+  }, 900);
+}
+
+// ── weighting sliders ───────────────────────────────────────
+// Keeps the last analysed results so a slider move re-renders from memory.
+let lastResults = [], jobRunning = false;
+
+function applyWeights(resort){
+  ['tone','noise','dyn'].forEach(k => {
+    const key = k === 'dyn' ? 'dynamics' : k;
+    W[key] = +$('#w-' + k).value;
+  });
+  const tot = W.tone + W.noise + W.dynamics || 1;
+  ['tone','noise','dyn'].forEach(k => {
+    const key = k === 'dyn' ? 'dynamics' : k;
+    $('#w-' + k + '-v').textContent = Math.round(100*W[key]/tot) + '%';
+  });
+  try { localStorage.setItem('lq-weights', JSON.stringify(W)); } catch(_) {}
+
+  const cards = $('#cards');
+  if (!cards || !lastResults.length) return;
+  // Preserve which cards were expanded across the re-render.
+  const open = new Set([...cards.querySelectorAll('.card.open h2')].map(h => h.textContent));
+  let list = lastResults.slice();
+  // Only re-sort once the run has finished — during a run, cards append in
+  // completion order and shuffling them under the cursor is disorienting.
+  if (resort && !jobRunning)
+    list.sort((a,b) => (b.scores ? composite(b.scores) : -1) - (a.scores ? composite(a.scores) : -1));
+  cards.innerHTML = list.map(card).join('');
+  cards.querySelectorAll('.card').forEach(c => {
+    const h = c.querySelector('h2');
+    if (h && open.has(h.textContent)) {
+      c.classList.add('open');
+      c.querySelector('.chev').textContent = '▴';
+      c.querySelector('.lbl').textContent = 'Hide details';
+    }
+  });
+}
+
+['w-tone','w-noise','w-dyn'].forEach(id => {
+  $('#'+id).addEventListener('input',  () => applyWeights(false));
+  $('#'+id).addEventListener('change', () => applyWeights(true));
+});
+$('#w-reset').addEventListener('click', () => {
+  $('#w-tone').value = 35; $('#w-noise').value = 15; $('#w-dyn').value = 50;
+  applyWeights(true);
+});
+try {
+  const saved = JSON.parse(localStorage.getItem('lq-weights') || 'null');
+  if (saved) { $('#w-tone').value = saved.tone; $('#w-noise').value = saved.noise;
+               $('#w-dyn').value = saved.dynamics; applyWeights(false); }
+} catch(_) {}
+
+$('#go').addEventListener('click', run);
+$('#browse').addEventListener('click', () => picker.hidden ? openPicker() : picker.hidden = true);
+$('#path').addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+
+// Open the picker on load at the import folder, so the tool starts somewhere
+// useful rather than with an empty box that looks pre-filled.
+openPicker();
+</script>
+</body>
+</html>

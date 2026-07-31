@@ -33,6 +33,7 @@ needs mutagen's already-parsed STREAMINFO, and md5 only needs raw bytes.
 import hashlib
 import os
 import re
+import unicodedata
 
 from mutagen.flac import FLAC
 
@@ -110,15 +111,34 @@ def parse_checksum_file(content):
     return entries
 
 
+def _norm_key(name):
+    """
+    NFC-normalize a filename before using it as a comparison key.
+
+    macOS/APFS commonly hands back decomposed (NFD) unicode for filenames
+    with accented characters (os.walk, scan_folder), while fingerprint text
+    files — usually generated on Windows/Linux, or just typed/pasted — are
+    typically composed (NFC). "Lucía" (NFC) and "Lucía" (NFD) are visually
+    identical but byte-for-byte different, so a bare string comparison
+    silently fails to match. Same failure class the quality-scoring tool hit
+    joining disk folder names to DB grades (2026-07-27) — see
+    `Context Library/Listening Quality — v2 Results.md`, "Two bugs found."
+    Without this, a recording with an accented track title could ingest with
+    every checksum unmatched and no error, because match_entries_to_tracks()
+    fails closed (leaves rows unmatched) rather than raising.
+    """
+    return unicodedata.normalize("NFC", name).lower() if name else None
+
+
 def match_entries_to_tracks(entries, tracks):
     """
     Match parsed fingerprint entries to Track rows. Prefers filename matching
-    (exact basename, then filename-stem, both case-insensitive — a fingerprint
-    generated against the original .shn/.wav set will still match the .flac
-    track by stem). Falls back to positional (file order == track_number
-    order) ONLY when none of the entries carry a filename at all and the
-    counts line up exactly — anything less certain is left unmatched rather
-    than guessed.
+    (exact basename, then filename-stem, both case-insensitive and unicode-
+    normalized — a fingerprint generated against the original .shn/.wav set
+    will still match the .flac track by stem). Falls back to positional (file
+    order == track_number order) ONLY when none of the entries carry a
+    filename at all and the counts line up exactly — anything less certain
+    is left unmatched rather than guessed.
 
     Note (2026-07-14): since library audio is now always flattened + renamed
     on ingest (compute_audio_rename_map/move_to_library in app.utils.ingest),
@@ -137,15 +157,15 @@ def match_entries_to_tracks(entries, tracks):
     def _stem(name):
         return os.path.splitext(name)[0].lower() if name else None
 
-    by_basename = {os.path.basename(t.file_path).lower(): t for t in tracks}
-    by_stem     = {_stem(t.file_path): t for t in tracks}
+    by_basename = {_norm_key(os.path.basename(t.file_path)): t for t in tracks}
+    by_stem     = {_norm_key(_stem(t.file_path)): t for t in tracks}
 
     matched = {}
     named_entries = [e for e in entries if e["filename"]]
 
     for e in named_entries:
-        key = e["filename"].lower()
-        track = by_basename.get(key) or by_stem.get(_stem(key))
+        key = _norm_key(e["filename"])
+        track = by_basename.get(key) or by_stem.get(_norm_key(_stem(e["filename"])))
         if track and track not in matched:
             matched[track] = e["checksum"]
 

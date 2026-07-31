@@ -64,6 +64,7 @@ def create_app(config_class=Config):
     from app.api.preferences  import bp as preferences_bp
     from app.api.share        import bp as share_bp
     from app.api.peers        import bp as peers_bp
+    from app.api.quality      import bp as quality_bp
 
     app.register_blueprint(auth_bp,         url_prefix="/api/auth")
     app.register_blueprint(artists_bp,      url_prefix="/api/artists")
@@ -80,6 +81,7 @@ def create_app(config_class=Config):
     app.register_blueprint(preferences_bp,  url_prefix="/api/preferences")
     app.register_blueprint(share_bp,        url_prefix="/api/share")
     app.register_blueprint(peers_bp,        url_prefix="/api/peers")
+    app.register_blueprint(quality_bp,      url_prefix="/api/quality")
 
     # ── Dev mode: auto-login as first admin ───────────────────
     if app.config.get("DEV_MODE"):

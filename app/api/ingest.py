@@ -32,7 +32,8 @@ from app.models.recording import Recording, RecordingFingerprint
 from app.models.recording_event import RecordingEvent
 from app.models.track import Track
 from app.models.user_preference import UserPreference
-from app.utils.ingest import move_to_library, compute_audio_rename_map
+from app.utils.ingest import (move_to_library, compute_audio_rename_map,
+                              IngestCancelled)
 from app.utils.folder_naming import build_folder_name
 from app.utils.ai_assist import run_ai_assist, AiAssistError
 from app.utils.prefs import get_api_key, get_pref
@@ -349,13 +350,27 @@ def _run_ingest_job(job_id, app, data, user_id):
     """Background worker: copy files (with progress) + create the DB chain."""
     import threading
     import traceback as _tb
+    from app.utils.ingest import IngestCancelled
     job = _INGEST_JOBS[job_id]
     try:
         with app.app_context():
             def prog(copied, total):
                 job["copied"] = copied
                 job["total"]  = total
-            job["result"] = _do_confirm(data, user_id, prog)
+
+            def cancelled():
+                return bool(job.get("cancel"))
+
+            try:
+                job["result"] = _do_confirm(data, user_id, prog, cancel_cb=cancelled)
+            except IngestCancelled:
+                # move_to_library has already put the filesystem back; the DB
+                # session has not committed yet, so rolling back leaves no trace
+                # of this recording. Anything ingested EARLIER in the queue was
+                # committed by its own job and is deliberately untouched.
+                db.session.rollback()
+                job["status"] = "cancelled"
+                return
             job["status"] = "done"
         # Kick off Librosa analysis in its own background thread once the
         # recording exists — decoupled from this job so it can't hold up
@@ -402,14 +417,35 @@ def confirm_status(job_id):
         return jsonify({"error": "unknown job"}), 404
     if job["status"] == "running":
         return jsonify({"status": "running", "copied": job.get("copied", 0),
-                        "total": job.get("total", 0)})
+                        "total": job.get("total", 0),
+                        "cancelling": bool(job.get("cancel"))})
     _INGEST_JOBS.pop(job_id, None)
     if job["status"] == "error":
         return jsonify({"status": "error", "error": job["error"]})
+    if job["status"] == "cancelled":
+        return jsonify({"status": "cancelled"})
     return jsonify({"status": "done", "result": job["result"]})
 
 
-def _do_confirm(data, user_id, progress_cb=None):
+@bp.route("/confirm/<job_id>/cancel", methods=["POST"])
+@login_required
+def confirm_cancel(job_id):
+    """
+    Ask an in-flight ingest to stop.
+
+    Cooperative, not a kill: the worker notices between files, undoes its own
+    filesystem work and rolls back its uncommitted DB session. Recordings
+    ingested earlier in a queue were committed by their own jobs and stay —
+    cancelling stops the queue, it does not unwind history.
+    """
+    job = _INGEST_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    job["cancel"] = True
+    return jsonify({"status": "cancelling"})
+
+
+def _do_confirm(data, user_id, progress_cb=None, cancel_cb=None):
     """
     Resolve or create the full object chain, then ingest the recording.
     Runs inside an app context (background thread). Returns a result dict;
@@ -438,7 +474,7 @@ def _do_confirm(data, user_id, progress_cb=None):
                                      # saved as-is to ai_research_json (see run_ai_assist)
       "fingerprints":       [{"type":"ffp","filename":"...","content":"..."}],
       "tracks": [
-        {"track_number":1,"title":"Dark Star","set":"Set 1","duration":1200,"filename":"t01.flac"}
+        {"track_number":1,"title":"Dark Star","set_number":"Set 1","duration":1200,"filename":"t01.flac"}
       ]
     }
     """
@@ -631,7 +667,14 @@ def _do_confirm(data, user_id, progress_cb=None):
             behavior         = behavior,
             progress_cb      = progress_cb,
             audio_rename_map = audio_rename_map,
+            cancel_cb        = cancel_cb,
         )
+    except IngestCancelled:
+        # A cancel is not a failure. move_to_library has already undone its own
+        # filesystem work; re-raise unchanged so the job reports "cancelled"
+        # rather than a scary "File operation failed".
+        db.session.rollback()
+        raise
     except Exception as e:
         db.session.rollback()
         raise RuntimeError(f"File operation failed: {e}")
@@ -682,7 +725,7 @@ def _do_confirm(data, user_id, progress_cb=None):
             recording_id = rec.id,
             track_number = t.get("track_number"),
             title        = t.get("title") or f"Track {t.get('track_number', '?')}",
-            set          = t.get("set") or None,
+            set_number   = t.get("set_number") or None,
             duration     = t.get("duration"),
             file_path    = new_filename,
             is_official  = track_official,
@@ -774,6 +817,22 @@ def _do_confirm(data, user_id, progress_cb=None):
         event_type   = "ingested",
         note         = f"behavior={behavior} original={os.path.basename(source_folder)}",
     ))
+
+    # ── 11. Carry the Listening Quality analysis across ───────────────────────
+    # MUST happen here, inside the ingest commit, and not lazily afterwards:
+    # the staging row is keyed by the SOURCE folder path, and on a Move ingest
+    # that folder no longer exists by now (move_to_library removed it, and the
+    # empty-parent cleanup may have taken its parent too). This is the last
+    # moment the association can be made.
+    #
+    # A no-op when the folder was never analysed — ingest does not require a
+    # quality pass, and never failing an ingest over a score is deliberate.
+    try:
+        from app.utils.quality_store import promote_to_recording
+        promote_to_recording(source_folder, rec.id, commit=False)
+    except Exception:  # noqa: BLE001
+        import traceback as _tb2
+        _tb2.print_exc()
 
     db.session.commit()
 
@@ -970,63 +1029,14 @@ def batch_scan():
 
     results = []
 
-    def _root_audio_count(path):
-        """Count audio files directly in path (non-recursive)."""
-        try:
-            return sum(
-                1 for f in os.scandir(path)
-                if f.is_file() and os.path.splitext(f.name)[1].lower() in _AUDIO_EXTS
-            )
-        except OSError:
-            return 0
-
-    def _audio_subdirs(path):
-        """Return immediate subdirs of path that contain audio (at any depth)."""
-        result = []
-        try:
-            for sub in os.scandir(path):
-                if not sub.is_dir():
-                    continue
-                # Quick check: any audio anywhere under sub
-                for _, _, files in os.walk(sub.path):
-                    if any(os.path.splitext(f)[1].lower() in _AUDIO_EXTS for f in files):
-                        result.append(sub)
-                        break
-        except OSError:
-            pass
-        return result
-
-    def _resolve_shows(path):
-        """
-        Recursively resolve a directory to its actual show-level paths.
-
-        Logic:
-          - Has root audio → it's a show, return it.
-          - Has ≥2 audio-containing subdirs → grouping folder, expand each recursively.
-          - Has exactly 1 audio-containing subdir → could be a transparent wrapper
-            (e.g. 'flac/') OR another nesting level; recurse to find out.
-          - Has no audio at all → return it as-is (gets red tier from scanner).
-        """
-        if _root_audio_count(path) > 0:
-            return [path]
-        subs = _audio_subdirs(path)
-        if not subs:
-            return [path]
-        if len(subs) == 1:
-            # Could be 'flac/' wrapper or another artist-grouping level — recurse
-            return _resolve_shows(subs[0].path)
-        # Multiple audio subdirs → grouping folder, expand each
-        result = []
-        for sub in sorted(subs, key=lambda e: e.name.lower()):
-            result.extend(_resolve_shows(sub.path))
-        return result
-
     # Resolve every top-level entry to its actual show paths before scanning.
-    # This handles arbitrary nesting depth (artist → year → show, etc.)
-    show_paths = []
-    for entry in sorted(os.scandir(source_dir), key=lambda e: e.name.lower()):
-        if entry.is_dir():
-            show_paths.extend(_resolve_shows(entry.path))
+    # Handles arbitrary nesting depth (artist → year → show, etc.).
+    #
+    # Hoisted into utils/ingest.py on 2026-07-30 — the Listening Quality
+    # analyser resolves shows through the SAME function, so the triage list and
+    # the metadata list can never disagree about which folders are shows.
+    from app.utils.ingest import resolve_shows_in_dir
+    show_paths = resolve_shows_in_dir(source_dir)
     log_step(batch_job, "resolved shows", f"{len(show_paths)} folder(s) to scan")
 
     for i, folder_path in enumerate(show_paths):

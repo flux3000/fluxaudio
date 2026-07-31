@@ -151,6 +151,10 @@ const API = (() => {
     ingest: {
       confirm:       (data)  => post('/api/ingest/confirm', data),
       confirmStatus: (jobId) => get(`/api/ingest/confirm/${jobId}`),
+      // Cooperative cancel. The worker stops between files, undoes its own
+      // filesystem work and rolls back its uncommitted DB session. Recordings
+      // already finished earlier in a queue are untouched.
+      confirmCancel: (jobId) => post(`/api/ingest/confirm/${jobId}/cancel`, {}),
       aiAssist:          (payload) => post('/api/ingest/ai-assist', payload),
       aiAssistRecording: (recId)   => post(`/api/ingest/ai-assist-recording/${recId}`),
       aiAssistStatus:    (jobId)   => get(`/api/ingest/ai-assist/${jobId}`),
@@ -164,6 +168,25 @@ const API = (() => {
       },
       health:         (scan)    => post('/api/ingest/health', scan),
       batchScan:  (source_dir) => post('/api/ingest/batch-scan', { source_dir }),
+    },
+
+    // ── Listening Quality ────────────────────────────────────────────────────
+    // Stage 1+2 of the unified ingestion flow (2026-07-30). See
+    // app/api/quality.py for the endpoint contracts.
+    quality: {
+      analyze: (source_dir, reanalyze) => post('/api/quality/analyze', { source_dir, reanalyze: !!reanalyze }),
+      analyzeStatus: (jobId, sourceDir) =>
+        get(`/api/quality/analyze/${jobId}?source_dir=${encodeURIComponent(sourceDir)}`),
+      triage:     (folder_path, status) => post('/api/quality/triage', { folder_path, status }),
+      triageBulk: (folder_paths, status) => post('/api/quality/triage-bulk', { folder_paths, status }),
+      staging:         (sourceDir)  => get(`/api/quality/staging?source_dir=${encodeURIComponent(sourceDir)}`),
+      stagingFeatures: (folderPath) => get(`/api/quality/staging/features?folder_path=${encodeURIComponent(folderPath)}`),
+      forRecording:    (recId)      => get(`/api/quality/recording/${recId}`),
+      // Physically moves a show out of the queue into Backlog or Working.
+      // Touches real files — see app/api/quality.py::move_out_of_queue for the
+      // guards (allowlisted destinations, import-root check, never overwrites).
+      move: (folder_path, destination) => post('/api/quality/move', { folder_path, destination }),
+      browse: (path) => get(`/api/quality/browse?path=${encodeURIComponent(path || '')}`),
     },
   }
 })()
