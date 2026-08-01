@@ -36,7 +36,12 @@ from .quality_scoring import (            # noqa: F401
     score_dynamics,
     technical_issues,
     informational_flags,
+    verdict_band,
+    predicted_grade,
+    guess_source_from_name,
     GROUP_WEIGHTS,
+    SOURCE_OFFSET,
+    BAND_LABEL,
     QUALITY_SCORE_VERSION,
 )
 from .quality_interpret import (          # noqa: F401
@@ -51,6 +56,7 @@ __all__ = [
     "window_offsets", "select_tracks", "QUALITY_ANALYSIS_VERSION",
     "score_recording", "score_tone", "score_noise", "score_dynamics",
     "technical_issues", "informational_flags", "GROUP_WEIGHTS",
+    "verdict_band", "predicted_grade", "guess_source_from_name", "SOURCE_OFFSET", "BAND_LABEL",
     "QUALITY_SCORE_VERSION",
     "interpret", "interpret_full", "band", "metric_rows",
 ]

@@ -39,6 +39,7 @@ sys.path.insert(0, _REPO_ROOT)
 from app.utils.quality import (                           # noqa: E402
     extract_recording_features,
     score_recording,
+    guess_source_from_name,
     interpret_full,
 )
 
@@ -112,6 +113,13 @@ def find_recordings(root):
     return sorted(out)
 
 
+# Source-from-folder-name lives in the ENGINE (quality_scoring) so this harness
+# and app/api/quality.py cannot drift apart — both need it at triage time, when
+# no Recording row exists yet. Imported above with the rest of the engine.
+def _guess_source(name):
+    return guess_source_from_name(name)
+
+
 def run_job(job_id, root):
     """Analyse every recording under `root`, updating job state as it goes."""
     folders = find_recordings(root)
@@ -137,14 +145,28 @@ def run_job(job_id, root):
             if "error" in feats:
                 entry = {"folder": folder, "name": name, "error": feats["error"]}
             else:
-                scored = score_recording(feats)
+                # Source is read off the folder name — "(SBD)", "(AUD)", "(FM)",
+                # "(MTX)" is near-universal in collector naming, and it is what
+                # `recording.source` gets populated from at ingest anyway.
+                # Source is the strongest single predictor of grade we have
+                # (CV r = +0.314 alone), so the harness must exercise it or it
+                # is not measuring what the app measures.
+                src = _guess_source(name)
+                scored = score_recording(feats, source=src)
                 entry = {
                     "folder": folder,
                     "name": name,
+                    "source": src,
                     "scores": scored,
                     "interpretation": interpret_full(scored, feats),
                     "sampled": feats.get("sampled", []),
                     "flags": scored.get("flags", []),
+                    # RAW FEATURES are exposed here and deliberately NOT in the
+                    # Flux app. Per Ryan 2026-07-31 this harness is the
+                    # development surface for the quantitative score, so it
+                    # needs everything the engine saw, not just the verdict.
+                    "features": {k: v for k, v in feats.items()
+                                 if isinstance(v, (int, float, bool)) or v is None},
                 }
         except Exception as e:                                  # noqa: BLE001
             entry = {"folder": folder,

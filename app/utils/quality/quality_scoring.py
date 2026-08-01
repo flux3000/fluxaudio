@@ -59,9 +59,11 @@ PRECISION: reported to one decimal because that is useful for ranking, but the
 honest resolution is roughly +/-2 points.
 """
 
+import re
+
 import numpy as np
 
-QUALITY_SCORE_VERSION = "2"
+QUALITY_SCORE_VERSION = "3"
 
 
 def curve(x, points):
@@ -159,7 +161,21 @@ MID_SNR = [(6, 3), (10, 15), (13, 28), (16, 42), (19, 57), (22, 70), (25, 82),
            (28, 92), (32, 100), (40, 100)]
 
 # Mains hum: dB above the local spectral median at 50/60 Hz and harmonics.
+# DISPLAY ONLY as of 2026-07-31 (r = -0.038 against 113 grades). Curve retained
+# so the Advanced Metrics row can still be colour-coded.
 HUM = [(0, 100), (6, 100), (12, 80), (20, 50), (30, 20), (40, 0)]
+
+# Crowd SNR: programme against the noise floor in 250-2500 Hz, the band where
+# an audience actually lives (chatter, shouting, applause). Added 2026-07-31 to
+# close the audience-tape blind spot — within AUD recordings this is the best
+# predictor we have (r = +0.318) while bandwidth measures are flat or even
+# non-monotonic across AUD grades.
+#
+# Anchors are set to the observed corpus range (14.5-31.4 dB) read as audibility
+# rather than as percentile position: below ~15 dB the room is competing with
+# the band, above ~28 dB the audience has stopped being a factor at all.
+CROWD_SNR = [(10, 0), (14, 15), (17, 35), (20, 55), (23, 72), (26, 86),
+             (28, 95), (31, 100), (40, 100)]
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DYNAMICS  (20%)
@@ -222,30 +238,55 @@ def _arith(parts):
 
 def score_tone(f):
     """
-    Reweighted 2026-07-28 after two recordings exposed the previous balance.
+    Presence balance and midrange scoop REMOVED from scoring 2026-07-31.
 
-    Presence dropped 0.45 -> 0.35 because it demonstrably cannot tell pleasant
-    brightness from harshness: the 1970 Georgia Tech tape reads +2.7 dB (Ryan:
-    "crazy tinniness", C) and the 1988 Danny Gatton reads +2.8 dB (Ryan:
-    "sounds excellent", A). Identical measurement, opposite verdicts — so it
-    should not be carrying nearly half the Tone score on its own.
+    They held 60% of this group (0.35 + 0.25) on the strength of correlations
+    measured at n=13 and n=20. Against the full 113 graded recordings in the
+    library they carry no signal at all:
 
-    HF extension added at 0.20 so Tone can see a recording with no top end.
-    Together these lifted correlation across the 20 graded recordings from
-    0.823 to 0.860 and put Ryan's best/worst Gatton pair in the right order.
+        presence balance   r = +0.057
+        midrange scoop     r = -0.016
+
+    and cross-validated together as a two-feature model they score r = -0.223,
+    i.e. worse than predicting the mean. The earlier r = +0.60 for scoop and
+    r = -0.42 for presence were small-sample artefacts.
+
+    This is also the whole explanation of the Danny Gatton inversion that
+    tabled the score on 2026-07-30. The PRESENCE curve slopes negative — darker
+    reads as better — but for soundboards the true relationship is POSITIVE
+    (r = +0.41): brighter grades better. Gatton's recordings are SBDs, so the
+    curve was rewarding exactly the wrong direction, scoring his worst tape 100
+    and his A-grade shows 43 and 21. No interaction term is needed and none
+    should be attempted: there is no signal in these two inputs to interact.
+
+    Both remain in quality_features.py and are still shown under Advanced
+    Metrics. They are measurements; they are simply not evidence of quality.
+
+    What is left is the two validated tonal measures, weighted by their
+    correlation with grade (tilt +0.283, HF ratio +0.327 — near enough equal).
     """
     return _arith([
-        (curve(f.get("presence_balance_db"), PRESENCE), 0.35),
-        (curve(f.get("midrange_scoop_db"), SCOOP), 0.25),
-        (curve(f.get("spectral_tilt_db_oct"), TILT), 0.20),
-        (curve(f.get("hf_energy_ratio_db"), HF_RATIO), 0.20),
+        (curve(f.get("spectral_tilt_db_oct"), TILT), 0.50),
+        (curve(f.get("hf_energy_ratio_db"), HF_RATIO), 0.50),
     ])
 
 
 def score_noise(f):
+    """
+    Hum dropped from 0.35 to display-only 2026-07-31; crowd SNR takes its place.
+
+    Hum correlates r = -0.038 with grade across 113 recordings — nothing. It
+    barely varies between recordings anyway once the 2026-07-28 fix stopped it
+    counting sustained bass notes, so it was 35% of this group doing no work.
+
+    Crowd SNR (250-2500 Hz, the voice band) correlates +0.286 overall and
+    +0.318 within audience tapes, where it is the single best predictor
+    available. Weighted below mid-band SNR because it is new and unproven
+    across a wide corpus.
+    """
     return _arith([
-        (curve(f.get("mid_snr_db"), MID_SNR), 0.65),
-        (curve(f.get("hum_ratio_db"), HUM), 0.35),
+        (curve(f.get("mid_snr_db"), MID_SNR), 0.60),
+        (curve(f.get("crowd_snr_db"), CROWD_SNR), 0.40),
     ])
 
 
@@ -320,8 +361,139 @@ def informational_flags(f):
 # ═════════════════════════════════════════════════════════════════════════════
 # Composite
 # ═════════════════════════════════════════════════════════════════════════════
-def score_recording(f, preset="listener"):
-    """Score a raw-feature dict. `preset` retained for API compatibility."""
+# ═════════════════════════════════════════════════════════════════════════════
+# Source adjustment + band verdict  (2026-07-31)
+# ═════════════════════════════════════════════════════════════════════════════
+# Recording source is the single strongest predictor of Ryan's grade that we
+# have. On its own it cross-validates at r = +0.314 — better than any individual
+# acoustic feature — and adding it to the feature set lifts CV correlation from
+# +0.431 to +0.512, the largest single improvement measured on 2026-07-31.
+#
+# Mean grade points by source across 113 recordings:
+#     MTX 96.0 · FM 94.2 · SBD 91.7 · AUD 83.2
+#
+# IMPORTANT — this is one shared model with source as an input, NOT a separate
+# scale per source. Separate per-source models were tested and are worse:
+# SBD +0.484 but AUD -0.015 and FM +0.043, because splitting an already thin
+# corpus starves each bucket. Ryan raised the separate-scale idea directly; the
+# data says adjust, do not fork.
+#
+# Offsets are expressed against the SBD baseline and are deliberately SMALL
+# relative to the raw grade differences above — most of the AUD/SBD gap is real
+# acoustic difference the features already see, and double-counting it would
+# push every audience tape into RED.
+SOURCE_OFFSET = {"SBD": 0.0, "FM": +1.5, "MTX": +2.0, "AUD": -3.0}
+
+
+def _source_offset(source):
+    """Normalise a free-text source string ('FM Peterw', 'Radio') to an offset."""
+    if not source:
+        return 0.0
+    s = str(source).strip().upper()
+    for key in ("MTX", "SBD", "AUD", "FM"):
+        if s.startswith(key):
+            return SOURCE_OFFSET[key]
+    if s.startswith("RADIO"):
+        return SOURCE_OFFSET["FM"]
+    return 0.0
+
+
+# Collector folder naming puts the source in parentheses: "… (SBD)", "(AUD)",
+# "(FM)", "(MTX)", often decorated — "(SBD A+)", "(MTX - Baker)", "(FM A-)".
+#
+# This lives in the ENGINE rather than in either caller because both need it and
+# they must not disagree: quality analysis runs at TRIAGE time, before any
+# Recording row exists, so the folder name is the only place source can come
+# from. Once ingested, `recording.source` is authoritative and should be passed
+# explicitly instead.
+#
+# Anchored to a word boundary so a venue like "Audimax" is not read as an
+# audience tape, and alternation is longest-first so "MTX" cannot lose to a
+# stray substring.
+_SOURCE_IN_NAME = re.compile(r"\((?:[^)]*\b)?(MTX|SBD|AUD|FM)\b[^)]*\)", re.I)
+
+
+def guess_source_from_name(name):
+    """Best-effort source from a folder name. None when it cannot be read."""
+    m = _SOURCE_IN_NAME.search(name or "")
+    return m.group(1).upper() if m else None
+
+
+# ── Calibration onto the grade scale ─────────────────────────────────────────
+# The composite is criterion-referenced: its curves are anchored to audibility,
+# not to library position, which is what makes a score stable and portable to a
+# peer node. That is worth keeping, but it also means the composite does not
+# live on the same scale as a letter grade — removing presence/scoop in v3 moved
+# the whole distribution down, and fixed band thresholds became far too harsh.
+#
+# So the two concerns are kept separate:
+#     listening_quality  raw composite, criterion-referenced, meaning unchanged
+#     predicted_grade    the composite mapped onto grade points, for banding
+#
+# The map is a plain 2-parameter least-squares fit over 113 graded recordings
+# (2026-07-31): grade = 0.5956 * composite + 40.592, giving MAE 6.95 against
+# 8.21 for the v2 engine. Two parameters over 113 points is not something that
+# can meaningfully overfit — unlike the per-metric curve shapes, which is where
+# the earlier overfitting actually happened.
+#
+# REFIT THIS when the labelled corpus grows materially (Ryan is adding grades).
+# tools/quality/labelled_corpus_2026-07-31.json + the standalone app are the
+# place to do it; rescoring needs no audio decode.
+CALIBRATION_SLOPE = 0.5956
+CALIBRATION_INTERCEPT = 40.592
+
+
+def predicted_grade(lq):
+    """Composite -> predicted grade points (A+ = 100, A- = 85, B = 70, C = 55)."""
+    if lq is None:
+        return None
+    return float(np.clip(CALIBRATION_SLOPE * lq + CALIBRATION_INTERCEPT, 0.0, 100.0))
+
+
+# Three-band triage verdict, thresholded on PREDICTED GRADE POINTS so the bands
+# mean exactly what they say:
+#     GREEN  -> would grade A- or better   (worth ingesting on sight)
+#     YELLOW -> would grade B+/B           (give it a listen first)
+#     RED    -> would grade below B        (probably not worth the time)
+#
+# WHY BANDS AND NOT A DECIMAL, in the app: against 113 graded recordings the
+# engine reaches r = 0.55 with a mean absolute error near 7 grade points. One
+# decimal place on a number routinely 7 points out is false precision — 75.7 vs
+# 75.0 is noise, not a B against a C. Three bands are what the evidence
+# supports, and triage (worth my time or not) was always the real decision at
+# ingest.
+#
+# The engine still RETURNS the number. The standalone tool at tools/quality/
+# remains the development surface where the quantitative score keeps being
+# worked on, per Ryan 2026-07-31 — this restriction is a presentation choice in
+# the app, not a capability removed from the engine.
+BAND_GREEN, BAND_YELLOW = 85.0, 70.0
+
+
+def verdict_band(lq):
+    """GREEN / YELLOW / RED. Takes the RAW composite; bands on predicted grade."""
+    pg = predicted_grade(lq)
+    if pg is None:
+        return None
+    if pg >= BAND_GREEN:
+        return "green"
+    return "yellow" if pg >= BAND_YELLOW else "red"
+
+
+BAND_LABEL = {"green": "Worth ingesting",
+              "yellow": "Give it a listen first",
+              "red": "Probably not worth the time"}
+
+
+def score_recording(f, preset="listener", source=None):
+    """
+    Score a raw-feature dict.
+
+    `preset` retained for API compatibility.
+    `source` is the recording's source string (SBD / AUD / FM / MTX). Optional:
+    omitted it simply contributes no adjustment, so existing callers keep
+    working unchanged.
+    """
     if "error" in f:
         return {"error": f["error"]}
 
@@ -330,10 +502,19 @@ def score_recording(f, preset="listener"):
     base = _geo([(groups[k], GROUP_WEIGHTS[k]) for k in groups])
 
     deduction, issues = technical_issues(f)
-    lq = None if base is None else float(np.clip(base - deduction, 0.0, 100.0))
+    offset = _source_offset(source if source is not None else f.get("source"))
+    lq = (None if base is None
+          else float(np.clip(base + offset - deduction, 0.0, 100.0)))
+    band = verdict_band(lq)
+
+    pg = predicted_grade(lq)
 
     return {
         "listening_quality": round(lq, 1) if lq is not None else None,
+        "predicted_grade": round(pg, 1) if pg is not None else None,
+        "verdict_band": band,
+        "verdict_label": BAND_LABEL.get(band),
+        "source_offset": offset,
         "score_tone": round(groups["tone"], 1) if groups["tone"] is not None else None,
         "score_noise": round(groups["noise"], 1) if groups["noise"] is not None else None,
         "score_dynamics": round(groups["dynamics"], 1) if groups["dynamics"] is not None else None,

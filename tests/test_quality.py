@@ -30,18 +30,27 @@ def _features(**over):
     are plausible rather than invented.
     """
     base = {
+        # presence_balance_db and midrange_scoop_db are still MEASURED and still
+        # shown under Advanced Metrics, but carry no weight as of v3 — they
+        # correlated +0.057 / -0.016 against 113 grades. Kept in the fixture so
+        # a regression that silently re-weights them is visible.
         "presence_balance_db":   2.79,
         "midrange_scoop_db":    -2.96,
         "spectral_tilt_db_oct": -4.24,
         "hf_energy_ratio_db":  -16.50,
         "mid_snr_db":           20.46,
-        "hum_ratio_db":         13.33,
+        "crowd_snr_db":         22.30,
+        "hum_ratio_db":         13.33,   # display only as of v3 (r = -0.038)
         "crest_factor_db":      18.22,
         "clipping_pct":          0.0,
         "channel_rms_min_db":  -20.07,
         "phase_correlation":     0.51,
         "dropout_count":         0.0,
-        "analysis_version":     "1",
+        # Must track QUALITY_ANALYSIS_VERSION — bumped to "2" on 2026-07-31 when
+        # the audience/room features were added. A fixture pinned to an older
+        # version reads as "extracted by a previous analyser" and gets skipped
+        # by rescore_stored(), which would make these tests quietly vacuous.
+        "analysis_version":     "2",
         "sampled": [{"track": "Track05.flac", "duration_s": 278.7,
                      "offsets": [91.2, 167.4]}],
     }
@@ -104,6 +113,84 @@ def test_scoring_is_pure_over_features():
     """Same input, same output — no hidden state, no filesystem, no clock."""
     f = _features()
     assert score_recording(f) == score_recording(f)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# v3 (2026-07-31) — dead metrics, source adjustment, band verdict
+# ═════════════════════════════════════════════════════════════════════════════
+def test_presence_and_scoop_do_not_affect_the_score():
+    """
+    The v3 headline finding.  Presence balance and midrange scoop held 60% of
+    the Tone group on correlations measured at n=13/n=20; against the full 113
+    graded recordings they measure +0.057 and -0.016, and cross-validate at
+    -0.223 together — worse than predicting the mean.  They are measurements,
+    not evidence of quality.
+
+    Swinging both across their entire observed range must not move the score by
+    even a decimal.  If this test fails, something has quietly re-weighted them
+    and the Danny Gatton inversion is back.
+    """
+    base = score_recording(_features())
+    swung = score_recording(_features(presence_balance_db=-11.4,
+                                      midrange_scoop_db=-8.0))
+    assert swung["listening_quality"] == base["listening_quality"]
+    assert swung["score_tone"] == base["score_tone"]
+
+
+def test_hum_is_display_only():
+    """Hum correlates -0.038 with grade; it must not move the Noise group."""
+    base = score_recording(_features())
+    loud = score_recording(_features(hum_ratio_db=38.0))
+    assert loud["score_noise"] == base["score_noise"]
+
+
+def test_source_shifts_the_score_in_the_right_direction():
+    """
+    Source is the strongest single predictor we have (CV r = +0.314 alone).
+    An audience tape should score below the identical measurement labelled as a
+    soundboard, and a matrix above it.
+    """
+    f = _features()
+    aud = score_recording(f, source="AUD")["listening_quality"]
+    sbd = score_recording(f, source="SBD")["listening_quality"]
+    mtx = score_recording(f, source="MTX")["listening_quality"]
+    assert aud < sbd < mtx
+
+
+def test_freetext_source_strings_normalise():
+    """The DB holds values like 'FM Peterw' and 'Radio', not a clean enum."""
+    f = _features()
+    assert (score_recording(f, source="FM Peterw")["listening_quality"]
+            == score_recording(f, source="FM")["listening_quality"])
+    assert (score_recording(f, source="Radio")["listening_quality"]
+            == score_recording(f, source="FM")["listening_quality"])
+
+
+def test_unknown_source_is_neutral_not_a_penalty():
+    """Missing metadata must not be read as a bad recording."""
+    f = _features()
+    assert (score_recording(f, source=None)["listening_quality"]
+            == score_recording(f, source="SBD")["listening_quality"])
+
+
+def test_verdict_band_is_ordered_and_covers_the_range():
+    from app.utils.quality.quality_scoring import verdict_band
+    assert verdict_band(100.0) == "green"
+    assert verdict_band(0.0) == "red"
+    assert verdict_band(None) is None
+    # Monotonic: a better composite can never earn a worse band.
+    order = {"red": 0, "yellow": 1, "green": 2}
+    seen = [order[verdict_band(v)] for v in range(0, 101, 5)]
+    assert seen == sorted(seen)
+
+
+def test_predicted_grade_tracks_the_composite():
+    """The band thresholds are grade points, so the map must be monotonic."""
+    from app.utils.quality.quality_scoring import predicted_grade
+    assert predicted_grade(None) is None
+    vals = [predicted_grade(v) for v in range(0, 101, 10)]
+    assert vals == sorted(vals)
+    assert all(0.0 <= v <= 100.0 for v in vals)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -253,6 +340,78 @@ def test_letter_grade_and_automated_score_coexist(app, recording):
     qs.promote_to_recording("/src/show-a", recording.id)
     assert recording.quality == "A-"                      # manual, untouched
     assert recording.quality_score.listening_quality is not None
+
+
+def test_rescore_stored_updates_from_cached_features(app):
+    """
+    A score_version bump must be applyable WITHOUT re-decoding audio. That claim
+    was documented in _is_current() long before anything implemented it, so a
+    weight change silently left old rows showing the previous engine's numbers.
+    """
+    _stage()
+    row = qs.get_staging("/src/show-a")
+    row.listening_quality = 1.0          # pretend an older engine wrote this
+    _db.session.commit()
+
+    out = qs.rescore_stored()
+    assert out["rescored"] >= 1
+    assert qs.get_staging("/src/show-a").listening_quality != 1.0
+
+
+def test_rescore_skips_rows_from_an_older_analyser(app):
+    """
+    Cached features from an older extractor lack whatever the new scoring reads.
+    Those must be reported and skipped, never silently scored against missing
+    inputs.
+    """
+    _stage()
+    row = qs.get_staging("/src/show-a")
+    row.analysis_version = "0"           # predates the current extractor
+    before = row.listening_quality
+    _db.session.commit()
+
+    out = qs.rescore_stored()
+    assert out["stale_features"] >= 1
+    assert qs.get_staging("/src/show-a").listening_quality == before
+
+
+def test_rescore_dry_run_writes_nothing(app):
+    _stage()
+    row = qs.get_staging("/src/show-a")
+    row.listening_quality = 1.0
+    _db.session.commit()
+
+    qs.rescore_stored(dry_run=True)
+    assert qs.get_staging("/src/show-a").listening_quality == 1.0
+
+
+def test_favorite_defaults_off_and_is_independent(app, recording):
+    """
+    is_favorite is the THIRD quality signal and must not be entangled with the
+    other two: analysis must never set it, and setting it must never disturb
+    the letter grade or the automated score.
+    """
+    assert recording.is_favorite is False
+
+    _stage()
+    qs.promote_to_recording("/src/show-a", recording.id)
+    assert recording.is_favorite is False        # analysis does not touch it
+
+    recording.is_favorite = True
+    _db.session.commit()
+    assert recording.quality == "A-"
+    assert recording.quality_score.listening_quality is not None
+
+
+def test_favorite_can_contradict_both_other_signals(app, recording):
+    """
+    The whole point of the star: a rough tape of an unrepeatable night is a
+    favourite AND a poor grade. Nothing may prevent that combination.
+    """
+    recording.quality = "C"
+    recording.is_favorite = True
+    _db.session.commit()
+    assert recording.quality == "C" and recording.is_favorite is True
 
 
 def test_deleting_recording_cascades_score_but_keeps_triage(app, recording):

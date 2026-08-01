@@ -23,6 +23,9 @@ def recording_summary(rec):
         "listening_quality": (rec.quality_score.listening_quality
                               if rec.quality_score else None),
         "rating":          rec.rating,
+        # One-click human highlight. Independent of both fields above — see the
+        # comment on Recording.is_favorite.
+        "is_favorite":     bool(rec.is_favorite),
         "is_complete":     rec.is_complete,
         "is_official":     rec.is_official,
         "track_count":     len(rec.tracks),
@@ -64,6 +67,9 @@ def recording_row(rec):
         "listening_quality": (rec.quality_score.listening_quality
                               if rec.quality_score else None),
         "rating":          rec.rating,
+        # One-click human highlight. Independent of both fields above — see the
+        # comment on Recording.is_favorite.
+        "is_favorite":     bool(rec.is_favorite),
         "is_complete":     rec.is_complete,
         "track_count":     len(rec.tracks),
         "duration_sec":    sum(t.duration or 0 for t in rec.tracks) or None,

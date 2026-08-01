@@ -2338,6 +2338,14 @@ const App = (() => {
           <div class="rec-name-row">
             <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
             ${perfNavLink}
+            <!-- Favourite star (2026-07-31). Sits in the header rather than the
+                 action bar because it is a reaction, not an admin action, and
+                 wants to be one click from anywhere on the page. Visible to
+                 everyone including listeners — a highlight is a personal mark,
+                 not a library edit. -->
+            <button class="rec-fav-star${rec.is_favorite ? ' is-fav' : ''}" id="btn-favorite"
+                    aria-pressed="${rec.is_favorite ? 'true' : 'false'}"
+                    title="${rec.is_favorite ? 'Remove from favourites' : 'Mark as a favourite'}">${rec.is_favorite ? '★' : '☆'}</button>
           </div>
           <div class="rec-date-line" id="rec-date-line">
             <span class="rec-f rec-f-date${canEdit ? ' pp-editable' : ''}" id="rec-f-date">${dateStr ? esc(dateStr) : (canEdit ? '<span class="pp-empty">Add date</span>' : '')}</span>
@@ -3052,6 +3060,31 @@ const App = (() => {
         markStaged()
       } catch (e) { alert('Failed: ' + e.message) }
       finally { btn.disabled = false }
+    })
+
+    // Favourite star. Optimistic: the star flips immediately and reverts if the
+    // request fails. A highlight is a low-stakes personal mark and should feel
+    // instant — unlike the official/delete actions above, nothing downstream
+    // depends on it, so there is no markStaged() and no change_note.
+    document.getElementById('btn-favorite')?.addEventListener('click', async () => {
+      const btn = document.getElementById('btn-favorite')
+      const next = !rec.is_favorite
+      const paint = (on) => {
+        btn.classList.toggle('is-fav', on)
+        btn.textContent = on ? '★' : '☆'
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false')
+        btn.title = on ? 'Remove from favourites' : 'Mark as a favourite'
+      }
+      rec.is_favorite = next
+      paint(next)
+      btn.disabled = true
+      try {
+        await API.recordings.update(recordingId, { is_favorite: next })
+      } catch (e) {
+        rec.is_favorite = !next
+        paint(!next)
+        alert('Could not save favourite: ' + e.message)
+      } finally { btn.disabled = false }
     })
 
     document.getElementById('btn-delete-rec')?.addEventListener('click', async () => {
@@ -3948,6 +3981,22 @@ const App = (() => {
 
   // Group weights, shown per meter as "35% of score". Mirrors GROUP_WEIGHTS in
   // app/utils/quality/quality_scoring.py — update both together.
+  // Three-band verdict replaces the 1-decimal 0-100 headline (2026-07-31).
+  //
+  // Validated against 113 graded recordings the engine reaches r = 0.55 with a
+  // mean absolute error near 7 grade points. A decimal on a number routinely 7
+  // points out is false precision — 75.7 vs 75.0 is noise, not a B against a C.
+  // The decision this card drives is triage, which was always a 3-way call.
+  //
+  // The engine still computes and returns the number; the standalone harness at
+  // tools/quality/ is where the quantitative score continues to be developed.
+  // This is a presentation restriction in the app, not a capability removed.
+  const _LQ_BAND_TEXT = {
+    green:  'Worth ingesting',
+    yellow: 'Give it a listen',
+    red:    'Probably skip',
+  }
+
   const _LQ_WEIGHTS = { tone: 35, noise: 15, dynamics: 50 }
   const _lqWeight = k => (_LQ_WEIGHTS[k] != null ? `${_LQ_WEIGHTS[k]}% of score` : '')
 
@@ -4078,7 +4127,8 @@ const App = (() => {
             <div class="lq-overall-txt">${esc(it.overall?.text || '')}</div></div>
           ${quick}
           <div class="lq-score">
-            <div class="n" style="color:${_lqColour(lqs)}">${_fmt1(lqs)}</div>
+            <div class="lq-verdict lq-verdict--${row.verdict_band || 'unknown'}">${
+              _LQ_BAND_TEXT[row.verdict_band] || '—'}</div>
             <div class="l">Listening Quality</div>
           </div>
           <div class="lq-score lq-score--meta">

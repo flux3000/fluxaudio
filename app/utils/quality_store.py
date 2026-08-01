@@ -112,6 +112,64 @@ def list_staging(source_dir):
     )
 
 
+def rescore_stored(dry_run=False):
+    """
+    Re-score every stored row from its CACHED features — no audio decode.
+
+    This is the payoff of keeping extraction and scoring in separate modules,
+    and until 2026-07-31 it was only a claim: `_is_current()` documented that a
+    `score_version` bump "is handled by re-scoring stored features", but nothing
+    actually did it, so a weight change left every existing row displaying a
+    number from the old engine forever.
+
+    Only rows whose `analysis_version` is current can be re-scored: an older
+    extraction predates some feature the new scoring reads, and inventing a
+    value for it would be worse than leaving the row alone. Those are reported
+    as `stale_features` and need a real re-analysis.
+
+    Returns a summary dict; `dry_run=True` reports without writing.
+    """
+    from app.utils.quality import (score_recording, guess_source_from_name,
+                                   QUALITY_ANALYSIS_VERSION)
+
+    out = {"rescored": 0, "stale_features": 0, "no_features": 0, "changed": []}
+
+    for model in (QualityAnalysis, RecordingQuality):
+        for row in db.session.query(model).all():
+            feats = _load(row.features_json, None)
+            if not feats:
+                out["no_features"] += 1
+                continue
+            if row.analysis_version != QUALITY_ANALYSIS_VERSION:
+                out["stale_features"] += 1
+                continue
+
+            # Staging rows know only a folder name; permanent rows can use the
+            # Recording's own `source`, which is authoritative once ingested.
+            source = None
+            if isinstance(row, RecordingQuality) and row.recording is not None:
+                source = row.recording.source
+            if not source:
+                source = guess_source_from_name(getattr(row, "name", None)
+                                                or getattr(row, "folder_path", ""))
+
+            before = row.listening_quality
+            scored = score_recording(feats, source=source)
+            if not dry_run:
+                _apply_scores(row, scored, feats)
+            after = scored.get("listening_quality")
+            out["rescored"] += 1
+            if before is not None and after is not None and abs(before - after) >= 0.05:
+                out["changed"].append({
+                    "id": row.id, "before": before, "after": after,
+                    "name": getattr(row, "name", None),
+                })
+
+    if not dry_run:
+        db.session.commit()
+    return out
+
+
 def upsert_staging(folder_path, *, source_dir=None, name=None,
                    scored=None, features=None, error=None):
     """
@@ -245,8 +303,18 @@ def serialize(row, *, include_features=False):
     if row is None:
         return None
 
+    # verdict_band / predicted_grade are DERIVED here rather than stored as
+    # columns. They are pure functions of the composite, so deriving them means
+    # retuning a band threshold or the calibration constants takes effect
+    # immediately across every existing row — no migration, no re-analysis, and
+    # no chance of a stored band disagreeing with the score beside it.
+    from app.utils.quality import verdict_band, predicted_grade
+
     out = {
         "listening_quality":   row.listening_quality,
+        "verdict_band":        verdict_band(row.listening_quality),
+        "predicted_grade":     (round(predicted_grade(row.listening_quality), 1)
+                                if row.listening_quality is not None else None),
         "score_tone":          row.score_tone,
         "score_noise":         row.score_noise,
         "score_dynamics":      row.score_dynamics,

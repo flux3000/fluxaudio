@@ -40,9 +40,14 @@ def test_recording_summary_shape(app, seeded_ids):
     # `quality` (the manual letter grade covering performance too). Two fields
     # on purpose — neither replaces the other. None until analysed.
     assert s["listening_quality"] is None
+    # `is_favorite` is the third independent signal (2026-07-31): a one-click
+    # human highlight, owing nothing to either the letter grade or the automated
+    # score. Defaults off and analysis never sets it.
+    assert s["is_favorite"] is False
     assert set(s.keys()) == {"id", "source", "quality", "listening_quality",
-                             "rating", "is_complete", "is_official",
-                             "track_count", "duration_sec", "created_at"}
+                             "rating", "is_favorite", "is_complete",
+                             "is_official", "track_count", "duration_sec",
+                             "created_at"}
 
 
 def test_build_recording_tags(app, seeded_ids):

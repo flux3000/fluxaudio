@@ -20,7 +20,11 @@ import numpy as np
 from scipy import signal
 import soundfile as sf
 
-QUALITY_ANALYSIS_VERSION = "1"
+# Bumped to "2" on 2026-07-31: crowd_snr_db, noise_nonstationarity_db and
+# modulation_index were added to analyse_window(). Rows extracted at version 1
+# do not contain them, so they must be re-decoded rather than merely re-scored —
+# this is the one kind of change that a score-only rescore cannot fix.
+QUALITY_ANALYSIS_VERSION = "2"
 
 # ── Sampling parameters (spec §Sampling strategy) ────────────────────────────
 # Sampling spreads across TRACKS, not just within one.
@@ -133,10 +137,17 @@ def select_tracks(folder):
     # Preferring the root resolves both: an un-flattened recording has an empty
     # root and falls through to the recursive search; a folder with its own
     # audio ignores whatever is nested below it.
-    paths = sorted(glob.glob(os.path.join(folder, "*.flac")))
+    # glob.escape() on the FOLDER only (2026-07-31). Collector folder names
+    # routinely carry [FLAC], [SBD], [EAC-FLAC] — and glob reads [...] in the
+    # directory portion as a character class, so
+    # "Grant Green ... (1972) [FLAC]" was searched as ".../(1972) F/", ".../(1972) L/"
+    # etc. None exist, so the recording reported "no flac files" and silently
+    # scored nothing. The *pattern* half must stay unescaped to keep globbing.
+    safe = glob.escape(folder)
+    paths = sorted(glob.glob(os.path.join(safe, "*.flac")))
     if not paths:
         # Path-string sort keeps discs in order: CD1/* then CD2/*.
-        paths = sorted(glob.glob(os.path.join(folder, "**", "*.flac"), recursive=True))
+        paths = sorted(glob.glob(os.path.join(safe, "**", "*.flac"), recursive=True))
     if not paths:
         return None, "no flac files"
 
@@ -300,6 +311,72 @@ def analyse_window(x, sr):
         out["spectral_tilt_db_oct"] = float(np.polyfit(lf, ldb, 1)[0])
     else:
         out["spectral_tilt_db_oct"] = 0.0
+
+    # ── AUDIENCE / ROOM (added 2026-07-31) ───────────────────────────────────
+    # Why these exist: validation against 113 graded recordings showed the
+    # engine is BLIND within audience tapes (grade correlation -0.015 across
+    # n=42 AUD). Bandwidth, which discriminates soundboards strongly (HF edge
+    # 15186 Hz at A+ down to 7866 Hz at B+ and below), is flat and even
+    # non-monotonic across AUD grades: 13010 / 12248 / 13353. A bad audience
+    # tape has roughly the same bandwidth as a good one.
+    #
+    # What actually separates them is crowd noise and room reverberation, and
+    # nothing here measured either. These three features close that gap. They
+    # are extraction-only until validated against the corpus — the lesson of
+    # 2026-07-31 is that a metric earns its weight with evidence, not intent.
+
+    # Crowd noise lives in the voice band. Deliberately 250-2500 Hz rather than
+    # mid_snr's 1-8 kHz: chatter, shouting and applause concentrate below
+    # 2.5 kHz, while 1-8 kHz is chosen to span musical content and so dilutes
+    # exactly the band of interest.
+    cb = (freqs >= 250) & (freqs <= 2500)
+    if cb.any():
+        out["crowd_snr_db"] = float(10 * np.log10(
+            max(avg_p[cb].mean(), 1e-20) / max(noise_spec[cb].mean(), 1e-20)))
+    else:
+        out["crowd_snr_db"] = 0.0
+
+    # Crowd noise FLUCTUATES; tape hiss and mains hum do not. Two recordings can
+    # share a noise floor where one is hiss (benign, easy to ignore) and the
+    # other is an audience talking through the show (ruinous). Spread of the
+    # quietest quartile of frames separates them: stationary noise gives a
+    # narrow spread, a live room a wide one.
+    if cb.any():
+        fe = P[cb].sum(axis=0)
+        quiet = fe[fe <= np.percentile(fe, 25)]
+        if len(quiet) > 4:
+            out["noise_nonstationarity_db"] = float(10 * np.log10(
+                max(np.percentile(quiet, 90), 1e-20) /
+                max(np.percentile(quiet, 10), 1e-20)))
+        else:
+            out["noise_nonstationarity_db"] = 0.0
+
+    # Clarity / direct-to-reverberant, estimated without an impulse response.
+    #
+    # A true C50/C80 needs an IR we will never have. The standard substitute —
+    # the modulation transfer idea behind STI — works on ordinary programme
+    # audio: reverberation and microphone distance FILL THE GAPS between notes,
+    # so the amplitude envelope's fluctuation shrinks. A close, dry capture
+    # keeps deep valleys between transients; a distant one in a live room does
+    # not. Band-limited to 2-20 Hz because that is the rate at which notes and
+    # syllables arrive; below 2 Hz is musical phrasing (a slow ballad is not a
+    # reverberant recording) and above 20 Hz is pitch, not envelope.
+    hop = max(1, int(sr * 0.005))            # 5 ms  -> 200 Hz envelope rate
+    win = max(2, int(sr * 0.010))            # 10 ms analysis window
+    if n > win + hop * 128:
+        env = np.convolve(mono ** 2, np.ones(win) / win, mode="valid")[::hop]
+        env_mean = float(env.mean())
+        if env_mean > 1e-20 and len(env) > 64:
+            fs_env = sr / hop
+            lo_m, hi_m = 2.0, min(20.0, fs_env / 2 * 0.9)
+            if hi_m > lo_m:
+                b, a = signal.butter(2, [lo_m / (fs_env / 2), hi_m / (fs_env / 2)],
+                                     btype="band")
+                ac = signal.filtfilt(b, a, env - env_mean)
+                # Modulation index: RMS of the band-limited fluctuation over the
+                # mean intensity. ~1.0 = strongly articulated, near 0 = smeared.
+                out["modulation_index"] = float(
+                    np.sqrt(np.mean(ac ** 2)) / env_mean)
 
     # ── TONAL BALANCE ────────────────────────────────────────────────────────
     # Extension alone is monotonic — more treble always scores higher — and that
@@ -663,7 +740,9 @@ _MEDIAN_KEYS = ["noise_floor_468_db", "program_468_db", "snr_468_db", "hiss_db",
                 "hf_energy_ratio_db", "presence_balance_db", "midrange_scoop_db",
                 "spectral_tilt_db_oct", "crest_factor_db", "peak_db", "rms_db",
                 "channel_balance_db", "phase_correlation", "hum_ratio_db",
-                "dc_offset", "channel_rms_min_db"]
+                "dc_offset", "channel_rms_min_db",
+                # Audience/room measures added 2026-07-31 — see analyse_window.
+                "crowd_snr_db", "noise_nonstationarity_db", "modulation_index"]
 _MAX_KEYS    = ["clipping_pct", "clipping_pct_raw", "clip_longest_run",
                 "dropout_count", "true_peak_dbtp", "lossy_wall_drop_db"]
 # Click density is a RATE, so the robust estimator across windows is the median,

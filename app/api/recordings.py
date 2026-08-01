@@ -90,6 +90,7 @@ def get_recording(recording_id):
         "lineage":              rec.lineage,
         "quality":              rec.quality,
         "rating":               rec.rating,
+        "is_favorite":          bool(rec.is_favorite),
         "is_complete":          rec.is_complete,
         "is_official":          bool(rec.is_official),
         "info_file_content":    rec.info_file_content,
@@ -215,6 +216,12 @@ def update_recording(recording_id):
         if rec.is_official:
             for t in rec.tracks:
                 t.is_official = True
+
+    # is_favorite — coerced rather than assigned straight through, because the
+    # column is NOT NULL and the star toggle is the one field likely to be sent
+    # from a checkbox as "" or null.
+    if "is_favorite" in data:
+        rec.is_favorite = bool(data["is_favorite"])
 
     # Log the change
     event = RecordingEvent(

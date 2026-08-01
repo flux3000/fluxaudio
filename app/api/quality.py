@@ -58,7 +58,8 @@ def _analyse_one(folder_path, source_dir):
     """
     # Imported lazily — numpy/scipy/soundfile are heavyweight and only the
     # analysis path needs them, so app boot stays fast.
-    from app.utils.quality import extract_recording_features, score_recording
+    from app.utils.quality import (extract_recording_features, score_recording,
+                                   guess_source_from_name)
 
     name = os.path.basename(folder_path.rstrip("/"))
     try:
@@ -67,7 +68,13 @@ def _analyse_one(folder_path, source_dir):
             qs.upsert_staging(folder_path, source_dir=source_dir, name=name,
                               error=str(features["error"]))
             return
-        scored = score_recording(features)
+        # Source is read off the folder name because this runs at TRIAGE time —
+        # there is no Recording row yet. It matters: source is the strongest
+        # single predictor of grade in the whole model (CV r = +0.314 on its
+        # own), so skipping it here would throw away the largest accuracy gain
+        # of the 2026-07-31 rework. Unreadable source is neutral, not a penalty.
+        scored = score_recording(features,
+                                 source=guess_source_from_name(name))
         qs.upsert_staging(folder_path, source_dir=source_dir, name=name,
                           scored=scored, features=features, error=None)
     except Exception as e:  # noqa: BLE001

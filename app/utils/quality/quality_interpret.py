@@ -170,11 +170,54 @@ def cutoff_verdict(f):
 # (upper_bound, state, description). The first rung whose bound the value is
 # below wins. State drives the colour; description is shown on hover.
 METRICS = [
+    ("crowd_snr_db", {
+        "label": "Crowd / room noise", "unit": " dB",
+        "about": "How far the music sits above the noise floor in 250–2500 Hz, "
+                 "the band an audience occupies — chatter, shouting, applause. "
+                 "Added 2026-07-31 because the engine was blind within audience "
+                 "tapes; this is the best AUD predictor found (r = +0.32).",
+        "scale": [(15, "bad",  "Audience competing with the band"),
+                  (18, "poor", "Audience clearly present"),
+                  (22, "ok",   "Some room noise"),
+                  (27, "good", "Quiet room"),
+                  (99, "good", "Audience essentially absent")],
+    }),
+    ("noise_nonstationarity_db", {
+        "label": "Noise steadiness", "unit": " dB",
+        "about": "How much the noise floor fluctuates. Tape hiss and mains hum "
+                 "are steady and easy to ignore; a room full of people talking "
+                 "is not. Two recordings can share a noise floor where one is "
+                 "benign and the other ruins the show.",
+        "scale": [(4,  "good", "Steady — hiss-like, easy to ignore"),
+                  (6,  "ok",   "Mildly variable"),
+                  (8,  "poor", "Fluctuating — live room audible"),
+                  (99, "bad",  "Very unsteady — intrusive audience")],
+    }),
+    ("modulation_index", {
+        "label": "Clarity (articulation)", "unit": "",
+        "about": "How deep the envelope valleys are between notes, measured at "
+                 "2–20 Hz. Reverberation and microphone distance fill those "
+                 "gaps in, so a low value means a distant or washy capture. A "
+                 "stand-in for direct-to-reverberant ratio, which needs an "
+                 "impulse response we will never have.",
+        "dp": 2,
+        "scale": [(0.35, "bad",  "Very washy / distant"),
+                  (0.50, "poor", "Reverberant"),
+                  (0.70, "ok",   "Moderately articulate"),
+                  (1.00, "good", "Clear, well-articulated"),
+                  (99,   "good", "Very dry and close")],
+    }),
     ("presence_balance_db", {
+        # DEMOTED 2026-07-31 — display only, zero weight. r = +0.057 against
+        # 113 grades. Retained because it is a true measurement and useful to
+        # eyeball; it is simply not evidence of quality.
         "label": "Presence balance", "unit": " dB",
         "about": "How loud the 2–6 kHz presence region is versus the low mids. "
                  "Human hearing peaks around 2–5 kHz, so an excess here reads "
-                 "as tinny and fatiguing.",
+                 "as tinny and fatiguing. NOTE: measured but NOT scored — "
+                 "against 113 graded recordings this correlates +0.06 with "
+                 "listening quality, and its old curve caused the 2026-07-30 "
+                 "Danny Gatton inversion.",
         "scale": [(-26, "ok",   "Very dark"),
                   (-20, "good", "Dark"),
                   (-8,  "good", "Natural"),

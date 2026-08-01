@@ -987,6 +987,24 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 
 /* Inline-editable recording header bits */
 .rec-name-row { display: flex; align-items: baseline; gap: 4px; }
+
+/* Favourite star (2026-07-31). Deliberately quiet until set: an unset star is
+   an invitation, not a control demanding attention. Uses --warn rather than
+   --accent so a favourite never reads as the same kind of signal as the
+   automated quality colours in the Fidelity panel — a highlight is a human
+   mark and should not be confusable with a measurement. --amber is also the
+   only warm token in the palette, which is what a star wants to be. */
+.rec-fav-star {
+  background: none; border: 0; cursor: pointer;
+  font-size: 19px; line-height: 1;
+  padding: 0 4px; margin-left: 2px;
+  color: var(--t3);
+  transition: color 120ms ease, transform 120ms ease;
+}
+.rec-fav-star:hover        { color: var(--amber); transform: scale(1.12); }
+.rec-fav-star.is-fav       { color: var(--amber); }
+.rec-fav-star:disabled     { opacity: 0.5; cursor: default; transform: none; }
+.rec-fav-star:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .rec-perf-name.pp-editable { display: inline-block; padding: 1px 6px; margin-left: -6px; border-radius: var(--r-sm); cursor: text; }
 .rec-perf-name.pp-editable:hover { background: var(--bg-1); }
 .rec-date-line .rec-f { border-radius: 3px; }
@@ -4473,6 +4491,33 @@ input[type="range"].progress-bar {
 .lq-score .n { font-size: 23px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
 .lq-score .l { font-size: 8.5px; color: var(--t3); text-transform: uppercase; letter-spacing: .07em; margin-top: 4px; }
 .lq-score--meta { border-left: 1px solid var(--bd-0); padding-left: 12px; }
+
+/* Three-band verdict, replacing the numeric headline (2026-07-31).
+   Wider min-width than .lq-score because a phrase needs more room than two
+   digits did, and set as a pill so it reads as a categorical call rather than
+   a value on a scale — which is the entire point of dropping the decimal. */
+.lq-score:has(.lq-verdict) { min-width: 108px; }
+.lq-verdict {
+  display: inline-block; padding: 5px 10px; border-radius: var(--r-sm);
+  font-size: 11.5px; font-weight: 600; line-height: 1.2;
+  border: 1px solid transparent;
+}
+.lq-verdict--green {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 38%, transparent);
+}
+.lq-verdict--yellow {
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 38%, transparent);
+}
+.lq-verdict--red {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 38%, transparent);
+}
+.lq-verdict--unknown { background: var(--bg-2); color: var(--t3); }
 
 /* ── Expand / detail ─────────────────────────────────────────────────────── */
 .lq-expand {
