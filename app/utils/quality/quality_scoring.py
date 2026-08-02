@@ -480,9 +480,13 @@ def verdict_band(lq):
     return "yellow" if pg >= BAND_YELLOW else "red"
 
 
-BAND_LABEL = {"green": "Worth ingesting",
-              "yellow": "Give it a listen first",
-              "red": "Probably not worth the time"}
+# Deliberately neutral, non-prescriptive labels (Ryan, 2026-08-02). The earlier
+# set ("Worth ingesting" / "Probably not worth the time") made a judgement the
+# engine is not entitled to make: every recording here is worth ingesting to
+# somebody, and the band is a DETECTION of measured audio character, not a
+# recommendation. High/Medium/Low describes what was measured and leaves the
+# decision where it belongs — with the archivist.
+BAND_LABEL = {"green": "High", "yellow": "Medium", "red": "Low"}
 
 
 def score_recording(f, preset="listener", source=None):

@@ -91,6 +91,36 @@ def test_health_no_audio_is_zero():
     assert h["score"] == 0 and h["band"] == "red"
 
 
+def test_health_exposes_track_and_date_detail_for_the_metadata_panel():
+    """
+    The Metadata Quality panel (2026-08-02) reads these fields directly rather
+    than parsing the human-readable factor strings. If they stop matching the
+    factors, the panel and the score start telling different stories on the
+    same card — so pin them against the message they duplicate.
+    """
+    titles = [f"Song {i}" if i <= 5 else f"Track {i:02d}" for i in range(1, 11)]
+    tags = _full_core(concert_date="1980-05",
+                      tracks=[{"track_number": i, "title": titles[i - 1]} for i in range(1, 11)])
+    info = dict(tags); info.pop("concert_date"); info.update(year=1980, month=5)
+    h = compute_health(_scan(tags, info, _flac(10)))
+
+    assert h["tracks_named"] == 5 and h["tracks_total"] == 10
+    assert any("5 of 10 tracks lack a real title" in f["msg"] for f in h["factors"])
+    # Y-M, no day → precision 2, matching the "Date missing day" factor.
+    assert h["date_precision"] == 2
+    assert any(f["msg"] == "Date missing day" for f in h["factors"])
+
+
+def test_band_labels_are_neutral():
+    """
+    Ryan, 2026-08-02: the band describes measured audio character, it does not
+    recommend an action. "Worth ingesting" presumed a decision that is the
+    archivist's to make — every recording here is worth ingesting to someone.
+    """
+    from app.utils.quality import BAND_LABEL
+    assert set(BAND_LABEL.values()) == {"High", "Medium", "Low"}
+
+
 def test_parse_location_multiword_city_not_truncated():
     # Regression: "New York" must not become "York".
     assert _parse_location("New York, NY") == ("New York", "NY", "US")

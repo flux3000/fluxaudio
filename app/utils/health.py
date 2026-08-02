@@ -154,4 +154,11 @@ def compute_health(scan):
 
     factors.sort(key=lambda x: x["delta"])
     return {"score": score, "band": band, "factors": factors,
-            "populated": round(populated, 2), "total": total}
+            "populated": round(populated, 2), "total": total,
+            # Exposed so the Metadata Quality panel can state the track-title
+            # position directly ("18 of 20 named") instead of re-deriving it by
+            # parsing the factor message string (2026-08-02).
+            "tracks_named": named, "tracks_total": n_audio,
+            # 3=Y-M-D, 2=Y-M, 1=Y, 0=none. Same reason: the panel grades the
+            # Date row by precision exactly as the score does.
+            "date_precision": prec}

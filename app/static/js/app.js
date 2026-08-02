@@ -3755,7 +3755,10 @@ const App = (() => {
     rows:      [],          // serialized staging rows (+ health/extracted)
     jobId:     null,
     progress:  null,        // { done, total, current } while analysing
-    expanded:  new Set(),   // folder_paths whose detail panel is open
+    // folder_path → 'lq' | 'meta'. A Map rather than a Set since 2026-08-02:
+    // the card now has two tabs, so "open" is no longer a boolean but a
+    // question of WHICH panel. Absent = collapsed. One panel at a time.
+    expanded:  new Map(),
     features:  new Map(),   // folder_path → features+interpretation, lazily fetched
     // Queue-ingest state. `cancel` is checked between shows; `activeJob` is the
     // in-flight confirm job so Cancel can also stop the current copy.
@@ -3919,7 +3922,7 @@ const App = (() => {
       const res = await API.quality.analyze(sourceDir, reanalyze)
       lq.sourceDir = res.source_dir
       lq.jobId     = res.job_id
-      lq.expanded  = new Set()
+      lq.expanded  = new Map()
       lq.features  = new Map()
       lq.log       = []
       // Placeholder rows so every show is on screen immediately — analysis
@@ -3991,11 +3994,13 @@ const App = (() => {
   // The engine still computes and returns the number; the standalone harness at
   // tools/quality/ is where the quantitative score continues to be developed.
   // This is a presentation restriction in the app, not a capability removed.
-  const _LQ_BAND_TEXT = {
-    green:  'Worth ingesting',
-    yellow: 'Give it a listen',
-    red:    'Probably skip',
-  }
+  //
+  // Labels are deliberately NEUTRAL (Ryan, 2026-08-02). "Worth ingesting" /
+  // "Probably skip" asserted a decision the engine has no standing to make —
+  // every recording in this queue is worth ingesting to the right person, and
+  // the band is a DETECTION of measured audio character, not a recommendation.
+  // Mirrors BAND_LABEL in app/utils/quality/quality_scoring.py.
+  const _LQ_BAND_TEXT = { green: 'High', yellow: 'Medium', red: 'Low' }
 
   const _LQ_WEIGHTS = { tone: 35, noise: 15, dynamics: 50 }
   const _lqWeight = k => (_LQ_WEIGHTS[k] != null ? `${_LQ_WEIGHTS[k]}% of score` : '')
@@ -4011,13 +4016,90 @@ const App = (() => {
             e.day ? String(e.day).padStart(2, '0') : null].filter(Boolean).join('-')
   }
 
+  // ── Metadata Quality panel ────────────────────────────────────────────────
+  // The Metadata Quality tab's body: the values the scan CONFIDENTLY proposed,
+  // one row per field the completeness score actually counts. Showing all nine
+  // scored fields (Ryan, 2026-08-02) rather than a curated subset — a panel
+  // that omitted a scored field could not explain its own number, and City /
+  // State / Country stay separate rows because that is how they are scored.
+  //
+  // The question this panel answers at a glance is "will I have to type?", so
+  // every row is either a value or an explicit "Missing", never a blank.
+  // Performer and Date lead but are rendered separately below — Performer
+  // because it heads the list, Date because it is graded by precision rather
+  // than presence. Everything after them is a plain presence check.
+  const _META_FIELDS = [
+    ['venue',   'Venue'],
+    ['city',    'City'],
+    ['state',   'State'],
+    ['country', 'Country'],
+    ['source',  'Source'],
+    ['lineage', 'Lineage'],
+  ]
+
+  function _metaRow(label, value, state, note) {
+    // state: 'ok' | 'part' | 'missing' — drives the dot and the value colour.
+    const cls = state === 'ok' ? 'ok' : state === 'part' ? 'part' : 'missing'
+    return `<div class="lq-meta-row lq-meta-row--${cls}">
+      <span class="lq-meta-dot"></span>
+      <span class="lq-meta-k">${esc(label)}</span>
+      <span class="lq-meta-v">${value ? esc(value) : 'Missing'}</span>
+      <span class="lq-meta-n">${esc(note || '')}</span>
+    </div>`
+  }
+
+  function _lqMetaPanel(row) {
+    const x = row.extracted, h = row.health
+    if (!x) {
+      return `<div class="lq-meta">
+        <div class="lq-meta-note">No metadata could be read from this folder.</div>
+      </div>`
+    }
+
+    // Date is graded by PRECISION, not mere presence — same as the score. A
+    // year-only date is real information but still costs a field, and the panel
+    // has to say so or the number looks wrong.
+    const prec = h?.date_precision
+    const dateStr = _lqDateStr(x) || ''
+    const dateState = prec === 3 ? 'ok' : prec > 0 ? 'part' : 'missing'
+    const dateNote  = prec === 3 ? '' : prec === 2 ? 'no day' : prec === 1 ? 'year only' : ''
+
+    const fields = _META_FIELDS.map(([k, label]) =>
+      _metaRow(label, x[k], x[k] ? 'ok' : 'missing')).join('')
+
+    // Track titles: N fields, one per audio file. "Real" excludes placeholders
+    // ("Track 01", "d1t02", bare numbers) — see app/utils/health.py.
+    const named = h?.tracks_named, tot = h?.tracks_total
+    const trkState = !tot ? 'missing' : named === tot ? 'ok' : named ? 'part' : 'missing'
+    const trkVal = tot ? `${named} of ${tot} named` : 'No audio tracks'
+    const trkNote = tot && named < tot
+      ? `${tot - named} placeholder${tot - named === 1 ? '' : 's'}` : ''
+
+    const factors = (h?.factors || []).length
+      ? `<div class="lq-meta-gaps">${h.factors.map(f =>
+          `<span>${esc(f.msg)}</span>`).join('')}</div>` : ''
+
+    return `<div class="lq-meta">
+      <div class="lq-meta-note">Values the scan proposes from the FLAC tags and the
+        info file. Anything marked Missing is metadata you will need to supply.</div>
+      <div class="lq-meta-grid">
+        ${_metaRow('Performer', x.artist, x.artist ? 'ok' : 'missing')}
+        ${_metaRow('Date', dateStr, dateState, dateNote)}
+        ${fields}
+        ${_metaRow('Track Titles', trkVal, trkState, trkNote)}
+      </div>
+      ${factors}
+    </div>`
+  }
+
   // One triage row = the CARD (a faithful port of the standalone app's card)
   // plus an ACTION COLUMN sitting outside it. Keeping the actions outside the
   // card boundary is deliberate: the card is a report on the recording, the
   // column is what you do about it, and blurring the two is what made the
   // first attempt read as a list row instead of a report.
   function _lqCard(row) {
-    const open = lq.expanded.has(row.folder_path)
+    // 'lq' | 'meta' | undefined — which panel this card has open, if any.
+    const open = lq.expanded.get(row.folder_path)
     const done = lq.log.find(l => l.folder_path === row.folder_path)
 
     if (row.error) {
@@ -4051,8 +4133,18 @@ const App = (() => {
       </div>`).join('')
 
     const q = it.quick || {}, cut = it.cutoff || {}
+    // Track count leads the strip (2026-08-02). It is the plainest fact about
+    // the recording and the one most likely to be checked against the source
+    // info file, so it sits before the technical readings rather than after.
+    // Counts AUDIO files only — `extracted.track_count` is len(audio_files)
+    // from the same scan payload the completeness score is computed from, so
+    // art and text files never inflate it.
+    const nTracks = row.extracted?.track_count
     const quick = `
       <div class="lq-qbar">
+        <div class="lq-qc"><div class="k">Tracks</div>
+          <div class="v">${nTracks ?? '—'}</div>
+          <div class="d">${nTracks ? (nTracks === 1 ? 'file' : 'files') : ''}</div></div>
         <div class="lq-qc"><div class="k">Format</div>
           <div class="v">${esc(q.format || '—')}</div>
           <div class="d">${q.bit_depth ? q.bit_depth + '-bit' : ''}${
@@ -4121,26 +4213,14 @@ const App = (() => {
       ? `<div class="lq-flags">${row.flags.map(x => `<span>${esc(x)}</span>`).join('')}</div>` : ''
 
     return `<div class="lq-row">
-      <div class="lq-card ${open ? 'open' : ''}" data-path="${esc(row.folder_path)}">
+      <div class="lq-card ${open ? 'open open-' + open : ''}" data-path="${esc(row.folder_path)}">
         <div class="lq-card-head">
           <div class="lq-card-title"><h2>${esc(row.name)}</h2>
             <div class="lq-overall-txt">${esc(it.overall?.text || '')}</div></div>
           ${quick}
-          <div class="lq-score">
-            <div class="lq-verdict lq-verdict--${row.verdict_band || 'unknown'}">${
-              _LQ_BAND_TEXT[row.verdict_band] || '—'}</div>
-            <div class="l">Listening Quality</div>
-          </div>
-          <div class="lq-score lq-score--meta">
-            <div class="n batch-score--${health?.band || 'red'}">${health ? health.score : '—'}</div>
-            <div class="l">Metadata Quality</div>
-          </div>
         </div>
-        <div class="lq-expand" data-path="${esc(row.folder_path)}">
-          <span class="chev">${open ? '▴' : '▾'}</span>
-          <span class="lbl">${open ? 'Hide details' : 'Details'}</span>
-        </div>
-        <div class="lq-detail">
+        ${_lqTabs(row, open, health)}
+        <div class="lq-detail lq-detail--lq">
           ${groups}
           ${issues}
           <div class="lq-samp">
@@ -4154,8 +4234,43 @@ const App = (() => {
             <div class="lq-adv">${metrics}</div>${flags}
           </details>
         </div>
+        <div class="lq-detail lq-detail--meta">${_lqMetaPanel(row)}</div>
       </div>
       ${_lqActions(row, done)}
+    </div>`
+  }
+
+  // Two half-width tabs replacing the old full-width "Show details" bar
+  // (Ryan, 2026-08-02). The previous head parked both readings top-right as
+  // bare numbers beside one anonymous expander — nothing said what either
+  // number was, or that either could be drilled into. Now each reading IS its
+  // own control: the tab carries the label and the value, and clicking it opens
+  // that reading's evidence below. The quick-glance bar takes the freed slot.
+  //
+  // Sound Quality is framed as a DETECTION, not a verdict. It is an estimate
+  // from 3 tracks x 2 windows, validated at r = 0.55 / MAE ~7 grade points
+  // against 113 graded recordings — informative, not definitive. The subtitle
+  // says so on the face of the control rather than hiding it in a tooltip.
+  function _lqTabs(row, open, health) {
+    const tab = (key, label, sub, valueHtml) => `
+      <button class="lq-tab ${open === key ? 'on' : ''}" type="button"
+              data-path="${esc(row.folder_path)}" data-tab="${key}"
+              aria-expanded="${open === key}">
+        <span class="lq-tab-txt">
+          <span class="lq-tab-k">${label}</span>
+          <span class="lq-tab-sub">${sub}</span>
+        </span>
+        ${valueHtml}
+        <span class="chev">${open === key ? '▴' : '▾'}</span>
+      </button>`
+
+    return `<div class="lq-tabs">
+      ${tab('lq', 'Sound Quality', 'estimated from audio analysis',
+        `<span class="lq-verdict lq-verdict--${row.verdict_band || 'unknown'}">${
+          _LQ_BAND_TEXT[row.verdict_band] || '—'}</span>`)}
+      ${tab('meta', 'Metadata Quality', 'how complete the tags are',
+        `<span class="lq-tab-score batch-score--${health?.band || 'red'}">${
+          health ? health.score : '—'}</span>`)}
     </div>`
   }
 
@@ -4277,17 +4392,32 @@ const App = (() => {
       batch.behavior = e.target.value
     })
 
-    // Expand/collapse. The detail panel is already in the DOM (rendered up
+    // Expand/collapse. BOTH detail panels are already in the DOM (rendered up
     // front, hidden by CSS — same as the standalone app), so this is a class
     // toggle, not a fetch.
-    mainContent.querySelectorAll('.lq-expand').forEach(btn => {
+    //
+    // One panel at a time (Ryan, 2026-08-02): opening Metadata Quality closes
+    // Sound Quality, and clicking the open tab collapses the card. Cards get
+    // tall fast in a multi-show queue, and the queue has to stay scannable.
+    mainContent.querySelectorAll('.lq-tab').forEach(btn => {
       btn.addEventListener('click', () => {
-        const p = btn.dataset.path
-        if (lq.expanded.has(p)) lq.expanded.delete(p); else lq.expanded.add(p)
+        const p = btn.dataset.path, want = btn.dataset.tab
+        const now = lq.expanded.get(p) === want ? undefined : want
+        if (now) lq.expanded.set(p, now); else lq.expanded.delete(p)
+
         const card = btn.closest('.lq-card')
-        card.classList.toggle('open', lq.expanded.has(p))
-        btn.querySelector('.chev').textContent = lq.expanded.has(p) ? '▴' : '▾'
-        btn.querySelector('.lbl').textContent  = lq.expanded.has(p) ? 'Hide details' : 'Details'
+        card.classList.toggle('open', !!now)
+        card.classList.toggle('open-lq',   now === 'lq')
+        card.classList.toggle('open-meta', now === 'meta')
+        // Repaint BOTH tabs — the sibling may have just been closed by this
+        // click, and a stale ▴ on it is exactly the kind of small lie that
+        // makes a toggle feel broken.
+        card.querySelectorAll('.lq-tab').forEach(t => {
+          const on = now === t.dataset.tab
+          t.classList.toggle('on', on)
+          t.setAttribute('aria-expanded', String(on))
+          t.querySelector('.chev').textContent = on ? '▴' : '▾'
+        })
       })
     })
 

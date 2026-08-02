@@ -4485,18 +4485,15 @@ input[type="range"].progress-bar {
 .lq-qc .v { font-family: var(--font-mono); font-size: 13px; font-weight: 500; line-height: 1.2; white-space: nowrap; }
 .lq-qc .d { font-size: 9.5px; color: var(--t2); margin-top: 1px; white-space: nowrap; }
 
-/* The two scores. Smaller than the standalone app's 32px — there are two of
-   them now and they share the row with the quick bar. */
-.lq-score { text-align: center; flex: none; min-width: 74px; }
-.lq-score .n { font-size: 23px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
-.lq-score .l { font-size: 8.5px; color: var(--t3); text-transform: uppercase; letter-spacing: .07em; margin-top: 4px; }
-.lq-score--meta { border-left: 1px solid var(--bd-0); padding-left: 12px; }
+/* The quick bar now owns the top-right corner outright (2026-08-02) — the two
+   score blocks that used to sit beside it moved down into .lq-tabs, where each
+   reading is attached to the control that opens its evidence. */
+.lq-qbar { margin-left: auto; }
 
 /* Three-band verdict, replacing the numeric headline (2026-07-31).
-   Wider min-width than .lq-score because a phrase needs more room than two
-   digits did, and set as a pill so it reads as a categorical call rather than
-   a value on a scale — which is the entire point of dropping the decimal. */
-.lq-score:has(.lq-verdict) { min-width: 108px; }
+   Set as a pill so it reads as a categorical call rather than a value on a
+   scale — which is the entire point of dropping the decimal. Labels are
+   High/Medium/Low as of 2026-08-02. */
 .lq-verdict {
   display: inline-block; padding: 5px 10px; border-radius: var(--r-sm);
   font-size: 11.5px; font-weight: 600; line-height: 1.2;
@@ -4519,16 +4516,61 @@ input[type="range"].progress-bar {
 }
 .lq-verdict--unknown { background: var(--bg-2); color: var(--t3); }
 
-/* ── Expand / detail ─────────────────────────────────────────────────────── */
-.lq-expand {
-  display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%;
-  margin-top: 12px; padding: 6px; background: var(--bg-2); border: 1px solid transparent;
-  border-radius: var(--r-sm); color: var(--t2); font-size: 11.5px; cursor: pointer;
+/* ── Tabs / detail ───────────────────────────────────────────────────────────
+   Two half-width tabs replace the old full-width "Show details" bar
+   (2026-08-02). Each carries its own reading and opens its own panel, so the
+   two quality signals are visibly separate things with separate evidence —
+   which they are. Equal widths on purpose: neither reading outranks the other. */
+.lq-tabs { display: flex; gap: 8px; margin-top: 12px; }
+.lq-tab {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 8px 11px; background: var(--bg-2); border: 1px solid var(--bd-0);
+  border-radius: var(--r-sm); color: var(--t1); font: inherit; cursor: pointer;
 }
-.lq-expand:hover { background: var(--bg-4); color: var(--t0); border-color: var(--bd-1); }
+.lq-tab:hover { background: var(--bg-4); border-color: var(--bd-1); }
+.lq-tab.on { background: var(--bg-4); border-color: var(--bd-2); color: var(--t0); }
+.lq-tab-txt { flex: 1; min-width: 0; }
+.lq-tab-k { display: block; font-size: 12px; font-weight: 600; }
+/* The honesty line. Sound Quality is a detection at r = 0.55 against 113 graded
+   recordings, not a definitive judgement — that belongs on the face of the
+   control, not buried in a tooltip. */
+.lq-tab-sub { display: block; font-size: 9.5px; color: var(--t3); margin-top: 2px; }
+.lq-tab-score {
+  font-family: var(--font-mono); font-size: 19px; font-weight: 600;
+  line-height: 1; font-variant-numeric: tabular-nums; flex: none;
+}
+.lq-tab .chev { color: var(--t3); font-size: 10px; flex: none; }
+
 .lq-detail { display: none; }
-.lq-card.open .lq-detail { display: block; }
-.lq-card.open .lq-expand { margin-bottom: 2px; }
+.lq-card.open-lq   .lq-detail--lq   { display: block; }
+.lq-card.open-meta .lq-detail--meta { display: block; }
+.lq-card.open .lq-tabs { margin-bottom: 2px; }
+
+/* ── Metadata Quality panel ─────────────────────────────────────────────────
+   One row per field the completeness score counts, all nine of them. The
+   question is "will I have to type?", so every row shows either a proposed
+   value or an explicit Missing — never a blank, which reads as "not checked". */
+.lq-meta { padding-top: 12px; }
+.lq-meta-note { color: var(--t2); font-size: 11.5px; margin-bottom: 10px; }
+.lq-meta-grid { display: flex; flex-direction: column; }
+.lq-meta-row {
+  display: flex; align-items: baseline; gap: 9px;
+  padding: 5px 0; border-top: 1px solid var(--bd-0); font-size: 12.5px;
+}
+.lq-meta-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.lq-meta-k { width: 92px; flex: none; color: var(--t2); font-size: 11.5px; }
+.lq-meta-v { flex: 1; min-width: 0; color: var(--t0); word-break: break-word; }
+.lq-meta-n { color: var(--t3); font-size: 10.5px; flex: none; }
+.lq-meta-row--ok      .lq-meta-dot { background: var(--green); }
+.lq-meta-row--part    .lq-meta-dot { background: var(--amber); }
+.lq-meta-row--missing .lq-meta-dot { background: var(--red); }
+.lq-meta-row--missing .lq-meta-v { color: var(--t3); font-style: italic; }
+.lq-meta-gaps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.lq-meta-gaps span {
+  padding: 3px 8px; background: var(--bg-2); border: 1px solid var(--bd-0);
+  border-radius: var(--r-sm); color: var(--t2); font-size: 10.5px;
+}
 
 /* Group meters */
 .lq-grp { padding: 8px 0; border-top: 1px solid var(--bd-0); }
