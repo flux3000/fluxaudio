@@ -54,6 +54,14 @@ class Performer(db.Model):
     # after it silently overwrote a recording with a wrong date).
     dossier_json = db.Column(db.Text, nullable=True)
 
+    # Genre (2026-08-02) — a proper dimension, its own table, one FK per
+    # Performer (never M2M — see the Genre design spec in Context Library).
+    # Nullable: all existing performers start unassigned, and a non-null
+    # constraint would be wrong anyway — plenty of acts resist a single
+    # label. Nothing may create a Genre implicitly; pickers only ever select
+    # from the existing table.
+    genre_id = db.Column(db.Integer, db.ForeignKey("genre.id"), nullable=True)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
                            onupdate=lambda: datetime.now(timezone.utc))
@@ -67,6 +75,7 @@ class Performer(db.Model):
     resources    = db.relationship("PerformerResource", back_populates="performer",
                                    cascade="all, delete-orphan",
                                    order_by="PerformerResource.order")
+    genre        = db.relationship("Genre", back_populates="performers")
 
     @property
     def artists(self):

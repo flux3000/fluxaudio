@@ -6,6 +6,8 @@ Single source of truth for the recording "summary" shape used by the catalog
 between endpoints.
 """
 
+import json
+
 
 def recording_summary(rec):
     """
@@ -37,15 +39,22 @@ def recording_summary(rec):
     }
 
 
-def recording_row(rec):
+def recording_row(rec, waveform=False):
     """
     Self-contained recording row for flat catalog/collection displays — includes
     the performer, date, and venue so a single row fully describes the show.
+
+    `waveform` (default False, opt-in) adds a downsampled card waveform strip.
+    Left off by default: this same serializer backs the flat List views
+    (recent, collection, venue) — decoding TrackAnalysis JSON for every one of
+    those rows would tax List to benefit the Browse card modules. Only the
+    card-bearing endpoints pass waveform=True. See the Library Browse View
+    design spec, 2026-08-02.
     """
     from app.utils.format import format_partial_date
     p = rec.performance
     v = p.venue if p else None
-    return {
+    row = {
         "id":              rec.id,
         "performer":       p.performer.name if (p and p.performer) else None,
         "performer_id":    p.performer_id if p else None,
@@ -77,3 +86,28 @@ def recording_row(rec):
         # the sortable "Date Added" catalog column.
         "created_at":      rec.created_at.isoformat() if rec.created_at else None,
     }
+    if waveform:
+        row["waveform"] = _card_waveform(rec)
+    return row
+
+
+def _card_waveform(rec, n=100):
+    """
+    Downsampled peaks for a recording's card waveform strip, sourced from its
+    longest ANALYSED track — not necessarily track 1, which is often a short
+    intro or tuning segment and makes a poor face for the show. None when no
+    track on the recording has usable waveform_json (covers the small share of
+    recordings with no analysis at all, and analysis rows saved without peaks).
+    """
+    from app.utils.waveform import downsample_peaks
+    analysed = [t for t in rec.tracks if t.analysis and t.analysis.waveform_json]
+    if not analysed:
+        return None
+    longest = max(analysed, key=lambda t: t.duration or 0)
+    try:
+        peaks = json.loads(longest.analysis.waveform_json)
+    except (TypeError, ValueError):
+        return None
+    if not peaks:
+        return None
+    return downsample_peaks(peaks, n)

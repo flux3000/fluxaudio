@@ -465,6 +465,9 @@ const App = (() => {
 
   // Generic autocomplete over {id,name} results with an optional "create" row.
   // onPick receives {id|null, name}. Used for the Performer and Member pickers.
+  // Omitting createLabel suppresses the create row entirely — for a picker
+  // over a fixed vocabulary (e.g. Genre) where nothing may be created as a
+  // side effect of typing.
   function wirePickerDropdown(inputEl, dropEl, searchFn, onPick, createLabel) {
     if (!inputEl || !dropEl) return
     let debounce = null
@@ -477,7 +480,7 @@ const App = (() => {
       const rows = results.map(r =>
         `<div class="artist-result" data-id="${r.id}" data-name="${esc(r.name)}">${esc(r.name)}</div>`).join('')
       const exact = results.some(r => r.name.toLowerCase() === q.toLowerCase())
-      const createRow = (!exact && q)
+      const createRow = (!exact && q && createLabel)
         ? `<div class="artist-result artist-result-new" data-id="" data-name="${esc(q)}">+ ${esc(createLabel)}: "${esc(q)}"</div>` : ''
       dropEl.innerHTML = rows + createRow
       dropEl.style.display = (rows || createRow) ? 'block' : 'none'
@@ -492,6 +495,15 @@ const App = (() => {
     inputEl.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(run, 220) })
     inputEl.addEventListener('blur',  () => setTimeout(close, 200))
     inputEl.addEventListener('focus', () => { if (inputEl.value.trim().length >= 2) run() })
+  }
+
+  // The first non-"create" result currently showing in a wirePickerDropdown
+  // dropdown, if any — lets a fixed-vocabulary picker (Genre: existing values
+  // only, never a free-text create) treat Enter as "commit the top visible
+  // match" instead of the venue/event pickers' "create whatever was typed".
+  function firstPickerResult(dropEl) {
+    const el = dropEl?.querySelector('.artist-result:not(.artist-result-new)')
+    return el ? { id: parseInt(el.dataset.id), name: el.dataset.name } : null
   }
 
   // ── Reusable Performer + Members/Guests widget ───────────────────────────────
@@ -757,6 +769,7 @@ const App = (() => {
       else if (dim === 'performers')   rows = await API.performers.list()
       else if (dim === 'artists')      rows = await API.artists.list()
       else if (dim === 'collections')  rows = await API.collections.list()
+      else if (dim === 'genres')       rows = await API.genres.list()
     } catch (_) {}
     _dimCache[dim] = rows
     return rows
@@ -766,7 +779,7 @@ const App = (() => {
     const box = document.getElementById(`nav-records-${dim}`)
     if (!box) return
     const rows = await _loadDim(dim)
-    const target = { venues: 'venue', performers: 'artist', artists: 'person', collections: 'collection' }[dim]
+    const target = { venues: 'venue', performers: 'artist', artists: 'person', collections: 'collection', genres: 'genre' }[dim]
     if (!rows.length) { box.innerHTML = `<div class="nav-record nav-record--empty">None yet</div>`; return }
     box.innerHTML = rows.map(r => `
       <div class="nav-record" data-dim="${dim}" data-id="${r.id}">
@@ -808,6 +821,7 @@ const App = (() => {
   function createInDim(dim) {
     if (dim === 'collections')     window.location.hash = '#/collection/new'
     else if (dim === 'venues')     window.location.hash = '#/venues'
+    else if (dim === 'genres')     window.location.hash = '#/genres'
     else if (dim === 'performers') _promptCreate('performer')
     else if (dim === 'artists')    _promptCreate('artist')
   }
@@ -830,7 +844,7 @@ const App = (() => {
   async function renderSidebar() {
     const nav = document.getElementById('sidebar-nav')
     if (!nav) return
-    _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = null
+    _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = _dimCache.genres = null
     nav.innerHTML = `
       <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recordings</a>
       <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
@@ -838,7 +852,8 @@ const App = (() => {
       ${_dimSection('collections', null, 'Collections', true)}
       ${_dimSection('venues', '◎', 'Venues')}
       ${_dimSection('performers', '✦', 'Performers')}
-      ${_dimSection('artists', '♪', 'Artists')}`
+      ${_dimSection('artists', '♪', 'Artists')}
+      ${_dimSection('genres', '♫', 'Genres')}`
     nav.querySelectorAll('.nav-expand').forEach(el => {
       el.addEventListener('click', e => {
         if (e.target.closest('.nav-action')) return
@@ -1072,23 +1087,39 @@ const App = (() => {
     catch (e) { setMainHTML(`<div class="empty-state"><div class="empty-title">Collection not found</div></div>`); return }
     setNavCurrent(c.name)
     const colRows = c.recordings || []
-    const rows = colRows.map(r => flatRowHtml(r, true)).join('')
     const descText = c.description && c.description.trim()
+    // Browse is a fixed, global dashboard (Recommended/Recently Added/
+    // Performers/Collections/On This Day) — NOT this collection's own
+    // recordings. Only List shows the collection-scoped table. Same
+    // fluxLibraryView preference as Library/Recently Added (deliberate,
+    // Ryan's call — see the design spec).
+    const mode = getLibraryViewMode()
+    const bodyHtml = mode === 'browse'
+      ? `<div class="lib-modules" id="lib-modules-mount"></div>`
+      : `${colRows.length ? recTableHeadHtml(true) : ''}
+         <div class="rec-table" id="rec-table-collection">${colRows.map(r => flatRowHtml(r, true)).join('') || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>`
+
     setMainHTML(`
       <div class="performer-page">
         <div class="performer-head">
           <div class="pp-name-row">
             <h1 class="pp-name pp-editable" id="col-name" title="Click to edit">${esc(c.name)}</h1>
+            ${libToggleHtml()}
             <button class="btn btn-ghost btn-sm pp-delete" id="col-delete" title="Delete collection">Delete</button>
           </div>
           <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="col-desc" title="Click to edit">${descText ? esc(c.description) : 'Add a description…'}</div>
           <div class="subtitle">${c.recordings.length} recording${c.recordings.length !== 1 ? 's' : ''}</div>
         </div>
-        ${colRows.length ? recTableHeadHtml(true) : ''}
-        <div class="rec-table" id="rec-table-collection">${rows || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>
+        ${bodyHtml}
       </div>`)
-    wireRecordingRows(mainContent)
-    if (colRows.length) wireDateAddedSort(document.getElementById('rec-table-collection'), colRows, true)
+
+    wireLibToggle(mainContent, () => renderCollectionView(id))
+    if (mode === 'browse') {
+      await renderBrowseModules(document.getElementById('lib-modules-mount'))
+    } else {
+      wireRecordingRows(mainContent)
+      if (colRows.length) wireDateAddedSort(document.getElementById('rec-table-collection'), colRows, true)
+    }
 
     const refreshSidebar = () => { _dimCache.collections = null; if (state.expandedDims.has('collections')) _renderDimRecords('collections') }
     async function saveField(patch) {
@@ -1276,6 +1307,208 @@ const App = (() => {
     })
   }
 
+  // ── Library Browse view (2026-08-02 design spec) ────────────────────────────
+  // A second presentation for Library / Recently Added / Collection, alongside
+  // the existing flat table ("List"). One global localStorage preference reused
+  // by all three routes — switching in one switches the others too, per Ryan's
+  // explicit call. Browse itself is a FIXED set of 5 modules (Recommended,
+  // Recently Added, Performers, Collections, On This Day) — identical no
+  // matter which of the three routes triggered it; only the page's own header
+  // (h1 + subtitle) differs.
+
+  function getLibraryViewMode() {
+    return localStorage.getItem('fluxLibraryView') === 'list' ? 'list' : 'browse'   // default browse
+  }
+  function setLibraryViewMode(mode) {
+    localStorage.setItem('fluxLibraryView', mode === 'list' ? 'list' : 'browse')
+  }
+
+  // Sits at the right of the page's header row (artist-header for Library/
+  // Recently Added; the collection name row for Collection — see each view).
+  function libToggleHtml() {
+    const mode = getLibraryViewMode()
+    return `
+      <div class="lib-toggle" role="group" aria-label="Library view">
+        <button type="button" class="lib-toggle-btn ${mode === 'browse' ? 'active' : ''}" data-view="browse">Browse</button>
+        <button type="button" class="lib-toggle-btn ${mode === 'list' ? 'active' : ''}" data-view="list">List</button>
+      </div>`
+  }
+  // `onSwitch` re-renders the CALLING view in the new mode (each of the three
+  // views passes its own re-render call) — the toggle doesn't navigate away.
+  function wireLibToggle(root, onSwitch) {
+    root.querySelectorAll('.lib-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.view === getLibraryViewMode()) return
+        setLibraryViewMode(btn.dataset.view)
+        onSwitch()
+      })
+    })
+  }
+
+  // Source → CSS color token, shared by the waveform strip and (indirectly)
+  // the existing sourceBadge(). Kept separate rather than parsing sourceBadge's
+  // HTML back apart.
+  function _sourceColorVar(source) {
+    return { SBD: '--sbd-fg', AUD: '--aud-fg', MTX: '--mtx-fg', FM: '--fm-fg' }[source] || '--other-fg'
+  }
+
+  // Card waveform strip. `peaks` is the serializer's downsampled magnitude
+  // array (app/utils/waveform.py::downsample_peaks, 0.0-1.0) or null/empty
+  // when the recording has no usable analysis — degrades to a flat colored
+  // line rather than leaving a hole (the design spec's stated failure mode).
+  function waveformStripHtml(peaks, source) {
+    const colorVar = _sourceColorVar(source)
+    if (!peaks || !peaks.length) {
+      return `<div class="rec-card-waveform rec-card-waveform--flat" style="--wf-color:var(${colorVar})"></div>`
+    }
+    const n = peaks.length
+    const barW = 100 / n
+    const bars = peaks.map((v, i) => {
+      const h = Math.max(3, Math.round(Math.min(1, Math.max(0, v)) * 100))
+      const x = (i * barW).toFixed(3)
+      return `<rect x="${x}%" y="${((100 - h) / 2).toFixed(3)}%" width="${(barW * 0.7).toFixed(3)}%" height="${h}%" />`
+    }).join('')
+    return `
+      <svg class="rec-card-waveform" viewBox="0 0 100 100" preserveAspectRatio="none" style="--wf-color:var(${colorVar})">
+        ${bars}
+      </svg>`
+  }
+
+  // Shared card component — Recommended and Recently Added both use this.
+  // Meta line composes from whatever exists (grade is present on only ~22% of
+  // recordings — it must not read as "missing something" without one).
+  function recCardHtml(r) {
+    const date = fmtDate(r.start_year, r.start_month, r.start_day)
+    const loc  = fmtLocation(r.city, r.state, r.country)
+    const meta = []
+    if (r.quality) meta.push(`<span class="${qualityClass(r.quality)}">${esc(r.quality)}</span>`)
+    if (r.track_count) meta.push(`${r.track_count} track${r.track_count === 1 ? '' : 's'}`)
+    const runtime = fmtRuntime(r.duration_sec)
+    if (runtime) meta.push(runtime)
+    const badge = sourceBadge(r.source)
+    return `
+      <a class="rec-card" href="#/recording/${r.id}" data-rec-id="${r.id}">
+        <div class="rec-card-strip">
+          ${waveformStripHtml(r.waveform, r.source)}
+          ${badge ? `<div class="rec-card-badge">${badge}</div>` : ''}
+        </div>
+        <div class="rec-card-body">
+          <div class="rec-card-performer truncate">${esc(r.performer || '')}</div>
+          <div class="rec-card-date truncate">${esc(date)}</div>
+          <div class="rec-card-venue truncate">${esc(r.venue || '(unknown venue)')}${loc ? ', ' + esc(loc) : ''}</div>
+          <div class="rec-card-meta truncate">${meta.join(' · ')}</div>
+        </div>
+      </a>`
+  }
+
+  function perfTileHtml(p) {
+    const count = p.recording_count || 0
+    return `
+      <a class="perf-tile" href="#/performer/${p.id}">
+        <div class="perf-tile-name truncate">${esc(p.name)}</div>
+        <div class="perf-tile-count">${count} recording${count === 1 ? '' : 's'}</div>
+      </a>`
+  }
+
+  function colTileHtml(c) {
+    const count = c.recording_count || 0
+    return `
+      <a class="col-tile" href="#/collection/${c.id}">
+        <div class="col-tile-name truncate">${esc(c.name)}</div>
+        ${c.description ? `<div class="col-tile-desc truncate">${esc(c.description)}</div>` : ''}
+        <div class="col-tile-count">${count} recording${count === 1 ? '' : 's'}</div>
+      </a>`
+  }
+
+  function onThisDayRowHtml(r) {
+    const loc = fmtLocation(r.city, r.state, r.country)
+    return `
+      <a class="otd-row" href="#/recording/${r.id}">
+        <span class="otd-year">${r.start_year ? esc(String(r.start_year)) : '—'}</span>
+        <span class="otd-performer truncate">${esc(r.performer || '')}</span>
+        <span class="otd-venue truncate">${esc(r.venue || '(unknown venue)')}${loc ? ', ' + esc(loc) : ''}</span>
+        ${sourceBadge(r.source)}
+      </a>`
+  }
+
+  function libModuleHtml(id, title, headExtraHtml, bodyHtml) {
+    return `
+      <section class="lib-module" id="${id}">
+        <div class="lib-module-head">
+          <h2>${esc(title)}</h2>
+          ${headExtraHtml || ''}
+        </div>
+        ${bodyHtml}
+      </section>`
+  }
+
+  // Reroll counter for Recommended's "Show me three more" — deliberately kept
+  // in memory only (module scope), not persisted: the default draw is stable
+  // for the day (server-seeded by date), and a page reload should return to
+  // that same stable default, not wherever the reroll was left.
+  let _libRecommendedReroll = 0
+
+  async function _refreshRecommendedModule() {
+    const el = document.getElementById('lib-mod-recommended')
+    if (!el) return
+    _libRecommendedReroll++
+    let recs = []
+    try { recs = await API.recordings.recommended(3, _libRecommendedReroll) } catch (_) {}
+    if (!recs.length) { el.remove(); return }   // module hides entirely if now empty
+    const html = libModuleHtml('lib-mod-recommended', 'Recommended',
+      `<button type="button" class="lib-reroll-btn">Show me three more</button>`,
+      `<div class="lib-module-grid">${recs.map(recCardHtml).join('')}</div>`)
+    el.outerHTML = html
+    document.getElementById('lib-mod-recommended')
+      .querySelector('.lib-reroll-btn').addEventListener('click', _refreshRecommendedModule)
+  }
+
+  // Builds and mounts all five Browse modules into `mountEl`. Each module is
+  // fetched independently and simply omitted if empty or its request fails —
+  // "every module hides entirely when it has nothing to show" is what makes a
+  // fixed, un-configurable module set work on a sparse library (design spec).
+  async function renderBrowseModules(mountEl) {
+    _libRecommendedReroll = 0
+    const [recommended, recentCards, performers, collections, onThisDay] = await Promise.all([
+      API.recordings.recommended(3, 0).catch(() => []),
+      API.recordings.recent(12, true).catch(() => []),
+      API.performers.list().catch(() => []),
+      API.collections.list().catch(() => []),
+      API.recordings.onThisDay().catch(() => []),
+    ])
+
+    const sections = []
+    if (recommended.length) {
+      sections.push(libModuleHtml('lib-mod-recommended', 'Recommended',
+        `<button type="button" class="lib-reroll-btn">Show me three more</button>`,
+        `<div class="lib-module-grid">${recommended.map(recCardHtml).join('')}</div>`))
+    }
+    if (recentCards.length) {
+      sections.push(libModuleHtml('lib-mod-recent', 'Recently Added', '',
+        `<div class="lib-module-grid">${recentCards.map(recCardHtml).join('')}</div>`))
+    }
+    if (performers.length) {
+      const LEAD = 12
+      const lead = performers.slice(0, LEAD)
+      const seeAll = performers.length > LEAD
+        ? `<a class="perf-tile perf-tile--see-all" href="#/artists">See all ${performers.length} →</a>` : ''
+      sections.push(libModuleHtml('lib-mod-performers', 'Performers', '',
+        `<div class="lib-module-grid lib-module-grid--tiles">${lead.map(perfTileHtml).join('')}${seeAll}</div>`))
+    }
+    if (collections.length) {
+      sections.push(libModuleHtml('lib-mod-collections', 'Collections', '',
+        `<div class="lib-module-grid lib-module-grid--tiles">${collections.map(colTileHtml).join('')}</div>`))
+    }
+    if (onThisDay.length) {
+      sections.push(libModuleHtml('lib-mod-otd', 'On This Day', '',
+        `<div class="otd-list">${onThisDay.map(onThisDayRowHtml).join('')}</div>`))
+    }
+
+    mountEl.innerHTML = sections.join('')
+    mountEl.querySelector('#lib-mod-recommended .lib-reroll-btn')
+      ?.addEventListener('click', _refreshRecommendedModule)
+  }
+
   // ── Views ──────────────────────────────────────────────────────────────────
 
   /** Default library view — all artists, all shows, alpha → oldest first */
@@ -1305,6 +1538,21 @@ const App = (() => {
     }
 
     const totalRecordings = allArtists.reduce((n, a) => n + a.recording_count, 0)
+    const headerHtml = `
+      <div class="artist-header">
+        <div class="artist-header-row">
+          <h1>Library</h1>
+          ${libToggleHtml()}
+        </div>
+        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${allArtists.length} performer${allArtists.length !== 1 ? 's' : ''}</div>
+      </div>`
+
+    if (getLibraryViewMode() === 'browse') {
+      setMainHTML(`${headerHtml}<div class="lib-modules" id="lib-modules-mount"></div>`)
+      wireLibToggle(mainContent, renderLibraryView)
+      await renderBrowseModules(document.getElementById('lib-modules-mount'))
+      return
+    }
 
     // Flatten to one row per recording — performer + date + venue on every line,
     // already ordered by performer (backend) then chronologically old→new.
@@ -1323,13 +1571,11 @@ const App = (() => {
     const rowsHtml = rows.map(r => flatRowHtml(r, true)).join('')
 
     setMainHTML(`
-      <div class="artist-header">
-        <h1>Library</h1>
-        <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${allArtists.length} performer${allArtists.length !== 1 ? 's' : ''}</div>
-      </div>
+      ${headerHtml}
       ${rows.length ? recTableHeadHtml(true) : ''}
       <div class="rec-table" id="rec-table-library">${rowsHtml}</div>`)
 
+    wireLibToggle(mainContent, renderLibraryView)
     wireRecordingRows(mainContent)
     if (rows.length) wireDateAddedSort(document.getElementById('rec-table-library'), rows, true)
   }
@@ -1350,16 +1596,31 @@ const App = (() => {
       setMainHTML(`<div class="empty-state"><div class="empty-title">Failed to load recent recordings</div></div>`)
       return
     }
+
+    const headerHtml = `
+      <div class="artist-header">
+        <div class="artist-header-row">
+          <h1>Recently Added</h1>
+          ${libToggleHtml()}
+        </div>
+        <div class="subtitle">${rows.length} most recently added recording${rows.length !== 1 ? 's' : ''}</div>
+      </div>`
+
+    if (getLibraryViewMode() === 'browse') {
+      setMainHTML(`${headerHtml}<div class="lib-modules" id="lib-modules-mount"></div>`)
+      wireLibToggle(mainContent, renderRecentView)
+      await renderBrowseModules(document.getElementById('lib-modules-mount'))
+      return
+    }
+
     const rowsHtml = rows.map(r => flatRowHtml(r, true)).join('')
 
     setMainHTML(`
-      <div class="artist-header">
-        <h1>Recently Added</h1>
-        <div class="subtitle">${rows.length} most recently added recording${rows.length !== 1 ? 's' : ''}</div>
-      </div>
+      ${headerHtml}
       ${rows.length ? recTableHeadHtml(true) : ''}
       <div class="rec-table" id="rec-table-recent">${rowsHtml || '<div class="empty-state" style="min-height:120px"><div class="empty-title">No recordings yet</div></div>'}</div>`)
 
+    wireLibToggle(mainContent, renderRecentView)
     wireRecordingRows(mainContent)
     if (rows.length) wireDateAddedSort(document.getElementById('rec-table-recent'), rows, true)
   }
@@ -1438,6 +1699,11 @@ const App = (() => {
                 <div class="pp-artists mg-row" id="pp-artists"></div>
                 <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
               </div>
+
+              <div class="pp-artists-block">
+                <div class="pp-artists-label">Genre</div>
+                <span class="pp-editable pp-genre-field" id="pp-genre" title="Click to edit"></span>
+              </div>
             </div>
             <div class="pp-head-image" id="pp-head-image"></div>
           </div>
@@ -1491,6 +1757,46 @@ const App = (() => {
         v = v.trim(); performer.bio = v
         await saveField({ bio: v || null })
       },
+    })
+
+    // ── Genre → picker (existing genres only) ─────────────────────────────────
+    // Click-to-edit inline, exactly like the venue picker on the Recording
+    // page (a custom click handler + wirePickerDropdown, not makeInlineEditable
+    // — the field needs a dropdown, not a plain text input). Unlike venue/event,
+    // there is no "+ Create" row: creating a genre is an explicit admin action
+    // on #/genres, never a side effect of typing here (Genre design spec,
+    // 2026-08-02 — the FK is the whole point, nothing may write to it implicitly).
+    const genreEl = document.getElementById('pp-genre')
+    function showGenre() {
+      const hasGenre = !!performer.genre
+      genreEl.innerHTML = hasGenre
+        ? `<span class="genre-pill">${esc(performer.genre.name)}</span>`
+        : `<span class="pp-empty">Add genre…</span>`
+    }
+    showGenre()
+    genreEl?.addEventListener('click', () => {
+      if (genreEl.querySelector('input')) return
+      genreEl.innerHTML = `<span class="artist-picker-wrap" style="display:inline-block; min-width:160px">
+        <input type="text" class="pp-inline-input" id="pp-genre-input" value="${esc(performer.genre?.name || '')}" autocomplete="off" />
+        <div class="artist-dropdown" id="pp-genre-dd" style="display:none"></div></span>`
+      const input = document.getElementById('pp-genre-input')
+      const dd    = document.getElementById('pp-genre-dd')
+      input.focus(); input.select()
+      let committed = false
+      const commitGenre = async ({ id, name }) => {
+        if (committed) return; committed = true
+        try {
+          await API.performers.update(performerId, { genre_id: id || null })
+          performer.genre = id ? { id, name } : null
+        } catch (e) { alert('Failed: ' + e.message) }
+        showGenre()
+      }
+      wirePickerDropdown(input, dd, API.genres.list, commitGenre)   // no createLabel → no create row
+      input.addEventListener('keydown', e => {
+        e.stopPropagation()
+        if (e.key === 'Enter') { e.preventDefault(); const m = firstPickerResult(dd); if (m) commitGenre(m) }
+        else if (e.key === 'Escape') { committed = true; showGenre() }
+      })
     })
 
     // ── Editable Artists (members) + per-person stint dates ──────────────────
@@ -3818,101 +4124,165 @@ const App = (() => {
   }
 
   // ── Stage 1: Source ────────────────────────────────────────────────────────
-  // Deliberately ONE box. Point it at a single show or at a folder of shows —
-  // the server figures out which, so there is no mode to choose.
-
-  // Ported from tools/quality/quality_app.html rather than reinvented: the
-  // breadcrumb picker with "audio" tags tells you which folders are analysable
-  // before you click into them, which the native folder dialog cannot.
+  // Rebuilt 2026-08-02. The navigator IS the page (Ryan's call). What was here
+  // before showed the same path twice — once in a text input, once in the
+  // breadcrumbs — behind three buttons with overlapping jobs: Browse (toggle a
+  // panel that was already open), Analyze (top right), and Use this folder
+  // (which also analysed). Now there is one location, shown in the breadcrumbs,
+  // and one primary action in the footer.
+  //
+  // The picker is a port of tools/quality/quality_app.html rather than a
+  // reinvention: its "audio" tags tell you which folders are analysable BEFORE
+  // you click into them, which the native folder dialog cannot.
+  //
+  // Header and hint copy also fixed — the page said "Listening Quality" and
+  // described the sampling internals of the standalone analysis tool, neither
+  // of which is what this page is for.
   async function renderIngestSource() {
-    setNavCurrent('Add Recording')
+    // Title now matches the sidebar button that gets you here. It previously
+    // said "Listening Quality" — the name of the engine, not the task.
+    setActiveNav('ingest')
+    setNavCurrent('Add Recordings')
     const defaultDir = (await getPrefs()).import_dir
                        || '/Volumes/music/Flux Workshop/Download'
 
     setMainHTML(`
       <div class="lq-wrap">
-        <h1 class="lq-h1">Listening Quality</h1>
-        <div class="lq-sub-head">Point at a folder — a single show, or a whole artist.
-          Every recording inside gets analyzed.</div>
+        <h1 class="lq-h1">Add Recordings</h1>
+        <div class="lq-sub-head">Point at a folder — one recording, or a whole
+          collection. Everything inside will be triaged and analyzed for
+          ingestion.</div>
 
-        <div class="lq-bar">
-          <input type="text" id="lq-path" class="lq-path-input" spellcheck="false"
-                 placeholder="Pick a folder below, or type a path"
-                 value="${esc(lq.sourceDir || defaultDir)}">
-          <button class="btn btn-ghost" id="lq-browse">Browse</button>
-          <button class="btn btn-primary" id="lq-go">Analyze</button>
-        </div>
-        <div class="lq-hint">From each recording we pick 3 tracks, take two 20-second clips
-          from each, and measure all six. Roughly 15 seconds per recording.</div>
-
-        <div id="lq-picker" class="lq-picker" hidden></div>
+        <div id="lq-picker" class="lq-picker"></div>
         <div id="lq-msg"></div>
       </div>`)
 
     const pickerEl = document.getElementById('lq-picker')
     const msgEl    = document.getElementById('lq-msg')
-    const pathEl   = document.getElementById('lq-path')
     const say = t => { msgEl.innerHTML = t ? `<div class="lq-err">${esc(t)}</div>` : '' }
 
+    // Where the navigator currently is. Was previously read back out of the
+    // text input on every action, which is why the two could drift apart.
+    let here = lq.sourceDir || defaultDir
+    let busy = false
+
+    // Browsing a NAS folder is not instant even after the scandir rework, and
+    // the old page gave no sign anything was happening — hence "I click Browse
+    // and nothing happens". Paint the destination and a spinner immediately, so
+    // the click is always acknowledged before the network is.
+    function paintLoading(path) {
+      pickerEl.innerHTML = `
+        <div class="lq-nav-loading">
+          <span class="lq-spin"></span>
+          <span>Reading <code>${esc(path)}</code>…</span>
+        </div>`
+    }
+
     async function openPicker(path) {
+      if (busy) return
+      const target = path || here
+      busy = true
+      paintLoading(target)
       let j
-      try { j = await API.quality.browse(path || pathEl.value.trim()) }
-      catch (e) { say('Could not browse: ' + e.message); return }
-      if (j.error) { say(j.error); return }
+      try { j = await API.quality.browse(target) }
+      catch (e) { busy = false; say('Could not browse: ' + e.message); paint(null); return }
+      finally { busy = false }
+      if (j.error) { say(j.error); paint(null); return }
+      here = j.path
+      say('')
+      paint(j)
+    }
+
+    // `j === null` repaints the shell after a failure so the user is not left
+    // staring at a spinner that will never resolve.
+    function paint(j) {
+      if (!j) {
+        pickerEl.innerHTML = `<div class="lq-nav-loading">
+          <span>Could not read that folder. Pick another below, or type a path.</span>
+          <button class="btn btn-ghost btn-sm" data-go="${esc(here)}">Retry</button></div>`
+        return
+      }
 
       const parts = j.path.split('/').filter(Boolean)
       let acc = ''
       const crumbs = ['<a data-go="/">/</a>'].concat(parts.map(p => {
         acc += '/' + p
         return `<a data-go="${esc(acc)}">${esc(p)}</a>`
-      })).join('<span style="color:var(--t3)">/</span>')
+      })).join('<span class="sep">/</span>')
 
+      // The shortcut row had no label, so it read as decoration rather than the
+      // fastest way to get anywhere. It is now announced.
       const LABEL = { '/Volumes': 'All volumes' }
       const shortcuts = (j.shortcuts || []).map((s, i) => {
-        const label = LABEL[s] || (i === 0 ? 'Downloads' : s.split('/').filter(Boolean).pop())
-        return `<span class="lq-shortcut" data-go="${esc(s)}">${esc(label)}</span>`
+        const label = LABEL[s] || (i === 0 ? 'Import folder'
+                                           : s.split('/').filter(Boolean).pop())
+        return `<button class="lq-shortcut" data-go="${esc(s)}">${esc(label)}</button>`
       }).join('')
 
+      // "audio" means analysable NOW; a folder with only subfolders is a
+      // container to walk into. Saying which is which is the whole point of
+      // this picker over the native dialog.
       const dirs = j.dirs.length ? j.dirs.map(d => `
-        <div class="lq-dir" data-go="${esc(d.path)}">
+        <div class="lq-dir" data-go="${esc(d.path)}" role="button" tabindex="0">
           <span class="ic">${d.subdirs || !d.audio ? '▸' : '·'}</span>
           <span class="nm">${esc(d.name)}</span>
           ${d.audio ? '<span class="tag">audio</span>' : ''}
-        </div>`).join('') : '<div class="lq-dir" style="color:var(--t3)">No sub-folders here</div>'
+        </div>`).join('')
+        : '<div class="lq-dir lq-dir--empty">No sub-folders here</div>'
 
       pickerEl.innerHTML = `
-        <div class="lq-crumbs">${j.parent
-          ? `<span class="lq-shortcut" data-go="${esc(j.parent)}">↑ up</span>` : ''}
-          ${shortcuts}<span style="flex:1"></span></div>
-        <div class="lq-crumbs">${crumbs}</div>
+        <div class="lq-nav-head">
+          <span class="lq-nav-lbl">Jump to</span>
+          ${j.parent ? `<button class="lq-shortcut" data-go="${esc(j.parent)}">↑ Up one</button>` : ''}
+          ${shortcuts}
+        </div>
+        <div class="lq-nav-addr">
+          <div class="lq-crumbs">${crumbs}</div>
+          <button class="lq-typepath" id="lq-typepath">Type a path</button>
+        </div>
         <div class="lq-dirs">${dirs}</div>
         <div class="lq-pick-foot">
-          <button class="btn btn-primary btn-sm" data-use="${esc(j.path)}">Use this folder</button>
-          <span>${j.here_has_audio ? 'This folder contains audio.'
-            : 'Pick a folder holding shows, or one show itself.'}</span>
+          <button class="btn btn-primary" data-use="${esc(j.path)}">
+            Triage This Folder →</button>
+          ${j.here_has_audio
+            ? '<span>This folder holds audio — it will be treated as one recording.</span>'
+            : ''}
         </div>`
-      pickerEl.hidden = false
-      pathEl.value = j.path
-      say('')
+    }
+
+    // Type-a-path swaps the breadcrumbs for an input IN PLACE rather than
+    // living permanently at the top of the page. It is the rare case, and
+    // showing it always is what produced two copies of the same path.
+    function openTypePath() {
+      const addr = pickerEl.querySelector('.lq-nav-addr')
+      if (!addr) return
+      addr.innerHTML = `<input type="text" id="lq-path" class="lq-path-input"
+             spellcheck="false" value="${esc(here)}">
+        <button class="btn btn-ghost btn-sm" id="lq-path-go">Go</button>`
+      const inp = addr.querySelector('#lq-path')
+      inp.focus(); inp.select()
+      const go = () => { const v = inp.value.trim(); if (v) openPicker(v) }
+      addr.querySelector('#lq-path-go').addEventListener('click', go)
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') go()
+        else if (e.key === 'Escape') openPicker(here)
+      })
     }
 
     pickerEl.addEventListener('click', e => {
+      if (e.target.closest('#lq-typepath')) { openTypePath(); return }
       const go  = e.target.closest('[data-go]')
       const use = e.target.closest('[data-use]')
       if (go) openPicker(go.dataset.go)
-      else if (use) { pathEl.value = use.dataset.use; pickerEl.hidden = true; startAnalysis(use.dataset.use, false) }
+      else if (use) startAnalysis(use.dataset.use, false)
+    })
+    // Folder rows are real controls, so they answer the keyboard too.
+    pickerEl.addEventListener('keydown', e => {
+      const row = e.target.closest('.lq-dir[data-go]')
+      if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openPicker(row.dataset.go) }
     })
 
-    document.getElementById('lq-browse').addEventListener('click', () => {
-      if (pickerEl.hidden) openPicker(); else pickerEl.hidden = true
-    })
-    document.getElementById('lq-go').addEventListener('click', () => {
-      const dir = pathEl.value.trim()
-      if (dir) startAnalysis(dir, false)
-    })
-
-    // Open at the import folder so the page starts somewhere useful.
-    openPicker(lq.sourceDir || defaultDir)
+    openPicker(here)
   }
 
   async function startAnalysis(sourceDir, reanalyze) {
@@ -4016,8 +4386,8 @@ const App = (() => {
             e.day ? String(e.day).padStart(2, '0') : null].filter(Boolean).join('-')
   }
 
-  // ── Metadata Quality panel ────────────────────────────────────────────────
-  // The Metadata Quality tab's body: the values the scan CONFIDENTLY proposed,
+  // ── Metadata Completeness panel ───────────────────────────────────────────
+  // The Metadata Completeness tab body: the values the scan CONFIDENTLY infers,
   // one row per field the completeness score actually counts. Showing all nine
   // scored fields (Ryan, 2026-08-02) rather than a curated subset — a panel
   // that omitted a scored field could not explain its own number, and City /
@@ -4075,6 +4445,21 @@ const App = (() => {
     const trkNote = tot && named < tot
       ? `${tot - named} placeholder${tot - named === 1 ? '' : 's'}` : ''
 
+    // The actual titles, not just the count (Ryan, 2026-08-02). "16 of 16"
+    // says the fields are populated; it says nothing about whether they are
+    // populated WELL. "Jam >" and "Unknown > Truckin'" both count as real
+    // titles and both want a human look, which a ratio can never show.
+    // Placeholders are flagged individually so the eye goes straight to them.
+    const titles = (x.track_titles || [])
+    const titleList = titles.length ? `
+      <div class="lq-titles">
+        <div class="lq-titles-head">Inferred track titles</div>
+        <ol class="lq-titles-list">
+          ${titles.map(t => `<li class="${t.real ? '' : 'ph'}">${
+            esc(t.title || '—')}${t.real ? '' : '<span class="lq-ph-tag">placeholder</span>'}</li>`).join('')}
+        </ol>
+      </div>` : ''
+
     const factors = (h?.factors || []).length
       ? `<div class="lq-meta-gaps">${h.factors.map(f =>
           `<span>${esc(f.msg)}</span>`).join('')}</div>` : ''
@@ -4088,8 +4473,103 @@ const App = (() => {
         ${fields}
         ${_metaRow('Track Titles', trkVal, trkState, trkNote)}
       </div>
+      ${titleList}
       ${factors}
     </div>`
+  }
+
+  // ── Fingerprints panel ─────────────────────────────────────────────────────
+  // Third tab (Ryan, 2026-08-02). A checksum is the only hard evidence on this
+  // card — every other reading is an estimate, this one either matches or it
+  // does not. Worth knowing BEFORE ingest, which is when a damaged tape is
+  // cheapest to reject.
+  //
+  // FFP/ST5 verify against the FLAC's own STREAMINFO signature (a header read,
+  // free) and are done during triage. MD5 hashes whole files, so it waits for
+  // an explicit click — see CHEAP_FP_TYPES in app/utils/checksums.py.
+  const _FP_VERDICT = {
+    verified:   { text: 'Verified',    cls: 'green'  },
+    partial:    { text: 'Partial',     cls: 'yellow' },
+    unverified: { text: 'Unverified',  cls: 'yellow' },
+    mismatch:   { text: 'Failed',      cls: 'red'    },
+    none:       { text: 'None',        cls: 'unknown' },
+  }
+  const _FP_STATUS_CLS = { match: 'ok', mismatch: 'bad', pending: 'pend',
+                           unmatched: 'pend', unverified: 'pend' }
+  const _FP_STATUS_TXT = { match: 'verified', mismatch: 'MISMATCH',
+                           pending: 'awaiting deep check', unmatched: 'no checksum listed',
+                           unverified: 'could not verify' }
+
+  function _lqFpPanel(row) {
+    const fp = row.fingerprints
+    if (!fp) return `<div class="lq-fp"><div class="lq-meta-note">
+      Fingerprint files were not examined for this folder.</div></div>`
+    if (!fp.files.length) return `<div class="lq-fp"><div class="lq-meta-note">
+      No fingerprint files found. Nothing here can be verified against —
+      the audio may still be perfect, but there is no independent proof of it.
+    </div></div>`
+
+    const s = fp.summary
+    const needsDeep = s.pending_deep > 0
+
+    const files = fp.files.map(f => {
+      if (f.error) return `<div class="lq-fpfile">
+        <div class="lq-fpfile-head"><span class="nm">${esc(f.filename)}</span>
+          <span class="lq-fp-bad">${esc(f.error)}</span></div></div>`
+      const rows = f.tracks.map(t => `
+        <div class="lq-fptrk lq-fptrk--${_FP_STATUS_CLS[t.status] || 'pend'}">
+          <span class="nm">${esc(t.filename)}</span>
+          <span class="st">${esc(_FP_STATUS_TXT[t.status] || t.status)}</span>
+        </div>`).join('')
+      return `
+      <div class="lq-fpfile">
+        <div class="lq-fpfile-head">
+          <span class="nm">${esc(f.filename)}</span>
+          <span class="ty">${esc((f.type || '').toUpperCase())}</span>
+          <span class="ct">${f.matched_count} of ${f.entry_count} entries matched${
+            f.orphan_entries ? ` · ${f.orphan_entries} listed file${
+              f.orphan_entries === 1 ? '' : 's'} not present` : ''}</span>
+        </div>
+        <div class="lq-fptrks">${rows}</div>
+      </div>`
+    }).join('')
+
+    return `<div class="lq-fp">
+      <div class="lq-fp-sum">
+        ${s.match ? `<span class="lq-fp-ok">${s.match} verified</span>` : ''}
+        ${s.mismatch ? `<span class="lq-fp-bad">${s.mismatch} FAILED</span>` : ''}
+        ${s.unmatched ? `<span class="lq-fp-pend">${s.unmatched} without a listed checksum</span>` : ''}
+        ${s.pending_deep ? `<span class="lq-fp-pend">${s.pending_deep} awaiting deep check</span>` : ''}
+      </div>
+      ${needsDeep ? `<div class="lq-fp-deep">
+        <button class="btn btn-ghost btn-sm lq-fp-verify" data-path="${esc(row.folder_path)}">
+          Verify MD5 now</button>
+        <span>MD5 hashes the whole file, so this reads every track off disk —
+          seconds to minutes depending on the show. FFP and ST5 are already done.</span>
+      </div>` : ''}
+      ${files}
+    </div>`
+  }
+
+  // ── Concerns — the major-issue line under the card title ───────────────────
+  // Replaces the prose sound description (Ryan, 2026-08-02), which restated
+  // the Sound Quality band in more words and so used the most prominent line
+  // on the card to say something the pill already said. This space now carries
+  // ONLY things that should stop you: a possible duplicate, a failed checksum,
+  // no audio at all, a phase or clipping fault. Empty when there are none, so
+  // its presence is the signal.
+  const _CONCERN_ICON = { duplicate: '⧉', checksum: '⚠', no_audio: '∅',
+                          technical: '⚠', missing: '✕' }
+
+  function _lqConcerns(row) {
+    const cs = row.concerns || []
+    if (!cs.length) return ''
+    return `<div class="lq-concerns">${cs.map(c => `
+      <div class="lq-concern lq-concern--${c.level || 'warn'}">
+        <span class="ic">${_CONCERN_ICON[c.kind] || '⚠'}</span>
+        <span class="tx">${esc(c.text)}</span>
+        ${c.recording_id ? `<a class="lk" href="#/recording/${c.recording_id}">View</a>` : ''}
+      </div>`).join('')}</div>`
   }
 
   // One triage row = the CARD (a faithful port of the standalone app's card)
@@ -4104,33 +4584,45 @@ const App = (() => {
 
     if (row.error) {
       return `<div class="lq-row"><div class="lq-card">
-        <div class="lq-card-title"><h2>${esc(row.name)}</h2></div>
+        <div class="lq-card-head">
+          <div class="lq-card-title"><h2>${esc(row.name)}</h2></div>
+          ${_lqActions(row, done)}
+        </div>
         <div class="lq-err" style="margin:12px 0 0">${esc(row.error)}</div>
-      </div>${_lqActions(row, done)}</div>`
+      </div></div>`
     }
     if (row._pending) {
       return `<div class="lq-row"><div class="lq-card lq-card--pending">
         <div class="lq-card-head"><div class="lq-card-title"><h2>${esc(row.name)}</h2>
-          <div class="lq-overall-txt">Analyzing…</div></div></div>
-      </div><div class="lq-actions"></div></div>`
+          <div class="lq-qline"><span>Analyzing…</span></div></div></div>
+      </div></div>`
     }
 
     const it  = row.interp || {}
     const lqs = row.listening_quality
     const health = row.health
 
-    const groups = (it.groups || []).map(g => `
-      <div class="lq-grp">
-        <div class="lq-grp-head">
-          <span class="lq-grp-name lq-tip">${esc(g.label)}
-            <span class="lq-tipbox">${esc(g.blurb || '')}</span></span>
-          <span class="lq-grp-score" style="color:${_lqColour(g.score)}">${_fmt1(g.score)}</span>
-          <span class="lq-grp-weight">${_lqWeight(g.key)}</span>
-        </div>
-        <div class="lq-meter"><div class="lq-meter-fill"
-             style="width:${g.score || 0}%;background:${_lqColour(g.score)}"></div></div>
-        <div class="lq-grp-txt">${esc(g.text || '')}</div>
-      </div>`).join('')
+    // Metrics now sit UNDER the group they belong to (Ryan, 2026-08-02) rather
+    // than in one flat "Advanced Metrics" list of eleven readings with no
+    // stated relationship to the three meters above them. Grouping comes from
+    // METRIC_GROUP in quality_interpret.py, which is derived from what
+    // score_tone/score_noise/score_dynamics actually consume — so the panel
+    // cannot drift from the scoring.
+    //
+    // Each row is also marked scored vs measured-only. Five of the eleven carry
+    // ZERO weight (presence balance, midrange scoop, hum, nonstationarity,
+    // clarity) — showing them at equal visual standing implied they all move
+    // the number, which is how the 07-30 Gatton confusion started.
+    // Scored metrics first within each group, then the measured-only ones
+    // (Ryan, 2026-08-02). METRICS order is authoring order, which interleaved
+    // them — so the first thing under a meter could be a reading that does not
+    // move it. Stable sort keeps the authored order inside each half.
+    const byGroup = {}
+    for (const m of (it.metrics || [])) (byGroup[m.group] ||= []).push(m)
+    for (const k of Object.keys(byGroup)) {
+      byGroup[k] = [...byGroup[k].filter(m => m.scored),
+                    ...byGroup[k].filter(m => !m.scored)]
+    }
 
     const q = it.quick || {}, cut = it.cutoff || {}
     // Track count leads the strip (2026-08-02). It is the plainest fact about
@@ -4140,27 +4632,30 @@ const App = (() => {
     // from the same scan payload the completeness score is computed from, so
     // art and text files never inflate it.
     const nTracks = row.extracted?.track_count
-    const quick = `
-      <div class="lq-qbar">
-        <div class="lq-qc"><div class="k">Tracks</div>
-          <div class="v">${nTracks ?? '—'}</div>
-          <div class="d">${nTracks ? (nTracks === 1 ? 'file' : 'files') : ''}</div></div>
-        <div class="lq-qc"><div class="k">Format</div>
-          <div class="v">${esc(q.format || '—')}</div>
-          <div class="d">${q.bit_depth ? q.bit_depth + '-bit' : ''}${
-            q.sample_rate_hz ? ' / ' + (q.sample_rate_hz / 1000).toFixed(1) : ''}</div></div>
-        <div class="lq-qc"><div class="k">Bitrate</div>
-          <div class="v">${q.bitrate_kbps ?? '—'}</div>
-          <div class="d">${q.bitrate_kbps ? 'kbps' : ''}</div></div>
-        <div class="lq-qc lq-tip"><div class="k">Cutoff</div>
-          <div class="v" style="color:${_stateColour(cut.state)}">${
-            cut.khz != null ? cut.khz + ' kHz' : '—'}</div>
-          <div class="d">${esc(cut.short || '')}</div>
-          <span class="lq-tipbox"><div class="tt">Frequency cutoff — ${esc(cut.verdict || '')}</div>
-            <div class="ab">${esc(cut.detail || '')}</div></span></div>
-      </div>`
+    // Collapsed from a four-cell boxed strip to ONE pipe-separated line on the
+    // card's own background, sitting directly under the title (Ryan,
+    // 2026-08-02). These are plain facts about the file, not readings that
+    // need a meter — the box gave them more visual weight than they earn, and
+    // it was occupying the top-right corner where the actions belong.
+    const bits = [
+      nTracks != null ? `${nTracks} track${nTracks === 1 ? '' : 's'}` : null,
+      [q.format, q.bit_depth ? `${q.bit_depth}-bit` : null,
+       q.sample_rate_hz ? `${(q.sample_rate_hz / 1000).toFixed(1)} kHz` : null]
+        .filter(Boolean).join(' ') || null,
+      q.bitrate_kbps ? `${q.bitrate_kbps} kbps` : null,
+    ].filter(Boolean).map(esc)
 
-    const metrics = (it.metrics || []).map(m => {
+    const cutSeg = cut.khz != null
+      ? `<span class="lq-tip lq-qcut" style="color:${_stateColour(cut.state)}">${
+          cut.khz} kHz cutoff
+          <span class="lq-tipbox"><div class="tt">Frequency cutoff — ${esc(cut.verdict || '')}</div>
+            <div class="ab">${esc(cut.detail || '')}</div></span></span>` : ''
+
+    const quick = `<div class="lq-qline">${
+      [...bits.map(b => `<span>${b}</span>`), cutSeg].filter(Boolean)
+        .join('<span class="sep">|</span>')}</div>`
+
+    const metricRow = m => {
       // No ladder (e.g. mains frequency) → no colour and no range: a range is
       // meaningless for a categorical value.
       const hasScale = m.scale && m.scale.length
@@ -4175,20 +4670,53 @@ const App = (() => {
         return `<div class="rg${s.text === m.verdict ? ' on' : ''}">
           <span>${esc(s.text)}</span><span class="b">${esc(range)}</span></div>`
       }).join('') : ''
+      // The (i) leads the row and carries the state colour the dot used to
+      // (Ryan, 2026-08-02) — one glyph doing both jobs rather than a dot that
+      // only coloured and a button that only informed, at opposite ends.
       return `
-      <div class="lq-mrow lq-tip">
-        <span class="lq-mdot" style="background:${hasScale ? col : 'transparent'}"></span>
-        <span class="lq-mlabel">${esc(m.label)}</span>
+      <div class="lq-mrow lq-tip${m.scored ? '' : ' lq-mrow--unscored'}">
+        <span class="lq-minfo" style="${hasScale
+          ? `color:${col};border-color:${col}` : ''}">i</span>
+        <span class="lq-mlabel">${esc(m.label)}${
+          m.scored ? '' : '<span class="lq-star">*</span>'}</span>
         <span class="lq-mval" style="color:${col}">${_fmtN(shown, m.unit, dp)}</span>
         <span class="lq-mverdict">${esc(m.verdict || '')}</span>
-        <span class="lq-minfo">i</span>
         <span class="lq-tipbox">
           <div class="tt">${esc(m.label)} — ${esc(m.verdict || '')}</div>
           <div class="ab">${esc(m.about || '')}</div>
+          ${m.scored ? '' : `<div class="ab" style="margin-top:6px;color:var(--t2)">
+            Measured and shown, but carries no weight in the score.</div>`}
           ${hasScale ? `<div class="th">Ranges</div>${ladder}` : ''}
         </span>
       </div>`
-    }).join('')
+    }
+
+    // One block per group: meter, verdict sentence, then that group's readings.
+    const groups = (it.groups || []).map(g => `
+      <div class="lq-grp">
+        <div class="lq-grp-head">
+          <span class="lq-grp-name lq-tip">${esc(g.label)}
+            <span class="lq-tipbox">${esc(g.blurb || '')}</span></span>
+          <span class="lq-grp-score" style="color:${_lqColour(g.score)}">${_fmt1(g.score)}</span>
+          <span class="lq-grp-weight">${_lqWeight(g.key)}</span>
+        </div>
+        <div class="lq-meter"><div class="lq-meter-fill"
+             style="width:${g.score || 0}%;background:${_lqColour(g.score)}"></div></div>
+        <div class="lq-grp-txt">${esc(g.text || '')}</div>
+        ${(byGroup[g.key] || []).length
+          ? `<div class="lq-adv">${byGroup[g.key].map(metricRow).join('')}</div>` : ''}
+      </div>`).join('')
+
+    // Every metric now belongs to one of the three groups (Ryan, 2026-08-02),
+    // so "other" should be empty. Kept as a catch-all rather than dropped: a
+    // metric added to METRICS without a METRIC_GROUP entry would otherwise
+    // vanish from the UI silently. A test pins the mapping, but a silent
+    // disappearance is the worst failure mode for a panel like this.
+    const otherMetrics = (byGroup.other || []).length ? `
+      <div class="lq-grp lq-grp--other">
+        <div class="lq-grp-head"><span class="lq-grp-name">Ungrouped</span></div>
+        <div class="lq-adv">${byGroup.other.map(metricRow).join('')}</div>
+      </div>` : ''
 
     const issues = (it.issues || []).length ? `
       <div class="lq-issues"><h4>Technical Issues</h4>
@@ -4197,17 +4725,35 @@ const App = (() => {
       </div>` : `<div class="lq-clean"><span class="lq-dot"></span>No technical issues detected —
         no clipping, dead channel, phase problem or dropouts.</div>`
 
-    const tracks = (row.sampled || []).map(t => `
+    // Each sampled track gets its own row with an inline player slot directly
+    // beneath it (2026-08-02). Playback used to hand off to the global player
+    // bar at the bottom of the window — visually miles from the timestamp that
+    // was clicked, so it read as "nothing happened, and something unrelated
+    // started". The audio element now appears in place, under the track it
+    // belongs to.
+    // One player per CARD, living in the block header (Ryan, 2026-08-02) — not
+    // one slot per track. A slot under each track pushed the row it belonged to
+    // apart from its neighbours every time it opened, so the list jumped around
+    // as you sampled it. A fixed position in the header holds still; the
+    // playing row is highlighted instead.
+    const slot = row.folder_path
+    const tracks = (row.sampled || []).map(t => {
+      const file = t.rel || t.track
+      return `
       <div class="lq-trk">
-        <button class="lq-trk-play" title="Play"
-                data-folder="${esc(row.folder_path)}" data-file="${esc(t.rel || t.track)}"
-                data-seek="0">▶</button>
+        <button class="lq-trk-play" title="Play from the start"
+                data-folder="${esc(row.folder_path)}" data-file="${esc(file)}"
+                data-slot="${esc(slot)}" data-seek="0">▶</button>
         <span class="lq-trk-name">${esc(t.track)}</span>
-        <span class="lq-trk-win">${(t.offsets || []).map(o =>
-          `<span class="lq-win" data-folder="${esc(row.folder_path)}"
-                 data-file="${esc(t.rel || t.track)}" data-seek="${o}"
-                 title="Jump to the analyzed window">${_mmss(o)}</span>`).join('')}</span>
-      </div>`).join('')
+        <span class="lq-trk-win">
+          ${(t.offsets || []).map(o =>
+            `<button class="lq-win" data-folder="${esc(row.folder_path)}"
+                   data-file="${esc(file)}" data-slot="${esc(slot)}" data-seek="${o}"
+                   title="Jump to the analyzed window — ${_mmss(o)} into the track"
+                   >${_mmss(o)}</button>`).join('')}
+        </span>
+      </div>`
+    }).join('')
 
     const flags = (row.flags || []).length
       ? `<div class="lq-flags">${row.flags.map(x => `<span>${esc(x)}</span>`).join('')}</div>` : ''
@@ -4215,28 +4761,32 @@ const App = (() => {
     return `<div class="lq-row">
       <div class="lq-card ${open ? 'open open-' + open : ''}" data-path="${esc(row.folder_path)}">
         <div class="lq-card-head">
-          <div class="lq-card-title"><h2>${esc(row.name)}</h2>
-            <div class="lq-overall-txt">${esc(it.overall?.text || '')}</div></div>
-          ${quick}
+          <div class="lq-card-title">
+            <h2>${esc(row.name)}</h2>
+            ${quick}
+            ${_lqConcerns(row)}
+          </div>
+          ${_lqActions(row, done)}
         </div>
         ${_lqTabs(row, open, health)}
         <div class="lq-detail lq-detail--lq">
-          ${groups}
-          ${issues}
-          <div class="lq-samp">
+          <div class="lq-samp lq-samp--lead">
             <div class="lq-samp-head">
-              <h4>Track Analysis</h4>
-              <span class="lq-samp-note">Click a timestamp to hear the portion that was analyzed</span>
+              <h4>Track Preview</h4>
+              <div class="lq-trk-player" data-slot-for="${esc(row.folder_path)}"></div>
             </div>
             ${tracks}
           </div>
-          <details class="lq-adv-wrap"><summary>Advanced Metrics</summary>
-            <div class="lq-adv">${metrics}</div>${flags}
-          </details>
+          ${groups}
+          ${otherMetrics}
+          ${issues}
+          ${flags}
+          <div class="lq-footnote">* Measured and shown, but carries no weight in the
+            score — see each row's tooltip for why.</div>
         </div>
         <div class="lq-detail lq-detail--meta">${_lqMetaPanel(row)}</div>
+        <div class="lq-detail lq-detail--fp">${_lqFpPanel(row)}</div>
       </div>
-      ${_lqActions(row, done)}
     </div>`
   }
 
@@ -4268,15 +4818,33 @@ const App = (() => {
       ${tab('lq', 'Sound Quality', 'estimated from audio analysis',
         `<span class="lq-verdict lq-verdict--${row.verdict_band || 'unknown'}">${
           _LQ_BAND_TEXT[row.verdict_band] || '—'}</span>`)}
-      ${tab('meta', 'Metadata Quality', 'how complete the tags are',
+      ${tab('meta', 'Metadata Completeness', 'from file tags and the info file',
         `<span class="lq-tab-score batch-score--${health?.band || 'red'}">${
           health ? health.score : '—'}</span>`)}
+      ${tab('fp', 'Fingerprints', _fpSub(row),
+        (() => { const v = _FP_VERDICT[row.fingerprints?.verdict || 'none']
+          return `<span class="lq-verdict lq-verdict--${v.cls}">${v.text}</span>` })())}
     </div>`
   }
 
-  // The action column — outside the card. Ingest / Review / Move, with Move
-  // opening a small menu (Backlog | Working). Once a recording is in, its
-  // actions collapse to a single View link to the finished record.
+  // Subtitle states WHY a verdict is provisional, so "Unverified" never reads
+  // as "we looked and found nothing" when it actually means "we have not run
+  // the expensive check yet".
+  function _fpSub(row) {
+    const fp = row.fingerprints
+    if (!fp || !fp.files.length) return 'no checksum files found'
+    if (fp.summary.pending_deep) return 'MD5 needs a deep check'
+    const n = fp.files.length
+    return `${n} checksum file${n === 1 ? '' : 's'}`
+  }
+
+  // Actions, now INSIDE the card at top-right (Ryan, 2026-08-02), in the slot
+  // the Format/Bitrate/Cutoff box used to hold. They sat outside the card
+  // boundary on the theory that the card reports and the column acts — true,
+  // but it cost a fixed-width gutter down the whole queue and stopped the card
+  // ever being full width. Ingest / Review / Move, with Move opening a small
+  // menu (Backlog | Working). Once a recording is in, its actions collapse to
+  // a single View link to the finished record.
   function _lqActions(row, done) {
     // `done` is this session's log; `row.recording_id` is the DURABLE fact,
     // written onto the staging row when the ingest committed. Checking only
@@ -4396,7 +4964,7 @@ const App = (() => {
     // front, hidden by CSS — same as the standalone app), so this is a class
     // toggle, not a fetch.
     //
-    // One panel at a time (Ryan, 2026-08-02): opening Metadata Quality closes
+    // One panel at a time (Ryan, 2026-08-02): opening Metadata Completeness closes
     // Sound Quality, and clicking the open tab collapses the card. Cards get
     // tall fast in a multi-show queue, and the queue has to stay scannable.
     mainContent.querySelectorAll('.lq-tab').forEach(btn => {
@@ -4409,6 +4977,7 @@ const App = (() => {
         card.classList.toggle('open', !!now)
         card.classList.toggle('open-lq',   now === 'lq')
         card.classList.toggle('open-meta', now === 'meta')
+        card.classList.toggle('open-fp',   now === 'fp')
         // Repaint BOTH tabs — the sibling may have just been closed by this
         // click, and a stale ▴ on it is exactly the kind of small lie that
         // makes a toggle feel broken.
@@ -4491,15 +5060,41 @@ const App = (() => {
     // player bar: this is a pre-ingest file that has no track ID and no queue,
     // and hijacking the persistent player for it would blow away whatever the
     // user was actually listening to.
-    const playAt = (folder, file, seek) => {
+    //
+    // MOVED INLINE 2026-08-02. It used to be appended to document.body and
+    // parked bottom-right, so clicking a timestamp halfway up a long queue
+    // started audio in a corner of the window the user was not looking at —
+    // indistinguishable from "the click did nothing, and something else began
+    // playing". The element now relocates into the slot under the track that
+    // was clicked. Still ONE element, so a second click stops the first: two
+    // simultaneous previews is never what was wanted.
+    const playAt = (folder, file, seek, slot) => {
       let el = document.getElementById('lq-preview-audio')
       if (!el) {
         el = document.createElement('audio')
         el.id = 'lq-preview-audio'
         el.controls = true
         el.className = 'lq-preview-audio'
-        document.body.appendChild(el)
       }
+      const host = slot
+        ? mainContent.querySelector(`.lq-trk-player[data-slot-for="${CSS.escape(slot)}"]`)
+        : null
+      if (host && el.parentElement !== host) {
+        const prev = el.parentElement
+        el.remove()
+        if (prev && prev.classList.contains('lq-trk-player')) prev.classList.remove('on')
+        host.appendChild(el)
+      }
+      if (host) host.classList.add('on')
+      if (!el.isConnected) document.body.appendChild(el)
+
+      // The player no longer sits under the track, so the highlight is the
+      // only thing saying WHICH track is playing. It has to be reliable.
+      mainContent.querySelectorAll('.lq-trk.playing').forEach(r => r.classList.remove('playing'))
+      const btn = mainContent.querySelector(
+        `.lq-trk [data-file="${CSS.escape(file)}"][data-slot="${CSS.escape(slot || '')}"]`)
+      btn?.closest('.lq-trk')?.classList.add('playing')
+
       const url = `/api/stream/ingest-preview?folder=${encodeURIComponent(folder)}`
                 + `&file=${encodeURIComponent(file)}`
       if (el.dataset.src !== url) { el.src = url; el.dataset.src = url }
@@ -4511,7 +5106,26 @@ const App = (() => {
 
     mainContent.querySelectorAll('.lq-trk-play, .lq-win').forEach(btn => {
       btn.addEventListener('click', () => {
-        playAt(btn.dataset.folder, btn.dataset.file, parseFloat(btn.dataset.seek) || 0)
+        playAt(btn.dataset.folder, btn.dataset.file,
+               parseFloat(btn.dataset.seek) || 0, btn.dataset.slot)
+      })
+    })
+
+    // Deep fingerprint verification — the expensive MD5 pass, on demand.
+    mainContent.querySelectorAll('.lq-fp-verify').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const path = btn.dataset.path
+        btn.disabled = true
+        btn.textContent = 'Verifying…'
+        try {
+          const res = await API.quality.verifyFingerprints(path)
+          const row = lq.rows.find(r => r.folder_path === path)
+          if (row && !res.error) { row.fingerprints = res; renderTriageView({ preserveScroll: true }) }
+          else btn.textContent = res.error || 'Failed'
+        } catch (e) {
+          btn.disabled = false
+          btn.textContent = 'Retry verification'
+        }
       })
     })
 
@@ -6741,6 +7355,365 @@ const App = (() => {
     }
   }
 
+  // ── Genre (2026-08-02) ───────────────────────────────────────────────────────
+  // A proper dimension — its own table, one FK from Performer — see the Genre
+  // design spec in Context Library. Three surfaces: the #/genre/<id> page
+  // (mirrors the Venue page, but a genre's "recordings" are reached through
+  // its performers, one extra hop the Venue page doesn't need), the #/genres
+  // admin list (mirrors #/venues' split list/detail), and the bulk assignment
+  // screen (the actual population mechanism — see the design spec's coverage
+  // math on why sort-by-recording-count matters).
+
+  async function renderGenreView(id) {
+    setActiveNav('genres'); setActiveArtist(null); setLoading()
+    let g
+    try { g = await API.genres.get(id) }
+    catch (e) {
+      invalidateDims('genres')
+      setMainHTML(`<div class="empty-state"><div class="empty-title">This genre no longer exists</div></div>`)
+      return
+    }
+    setNavCurrent(g.name)
+    const navBack = state.navBack
+    const descText = g.description && g.description.trim()
+    const performers = g.performers || []
+
+    const perfSectionsHtml = performers.map(p => `
+      <div class="genre-performer-section">
+        <div class="genre-performer-head">
+          <a class="genre-performer-name" href="#/artist/${p.id}">${esc(p.name)}</a>
+          <span class="genre-performer-count">${p.recording_count} recording${p.recording_count !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="rec-table">${p.recordings.map(r => flatRowHtml(r, false)).join('')}</div>
+      </div>`).join('')
+
+    setMainHTML(`
+      <div class="performer-page">
+        ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="gn-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
+        <div class="performer-head">
+          <div class="pp-name-row">
+            <h1 class="pp-name pp-editable" id="gn-name" title="Click to edit">${esc(g.name)}</h1>
+            <button class="btn btn-ghost btn-sm pp-delete" id="gn-delete" title="Delete genre">Delete</button>
+          </div>
+          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="gn-desc" title="Click to edit">${descText ? esc(g.description) : 'Add a description…'}</div>
+        </div>
+        <div class="subtitle">${g.performer_count} performer${g.performer_count !== 1 ? 's' : ''} · ${g.recording_count} recording${g.recording_count !== 1 ? 's' : ''}</div>
+        ${performers.length ? perfSectionsHtml : '<div class="empty-state" style="min-height:140px"><div class="empty-title">No performers assigned to this genre yet</div><div class="empty-sub">Assign some from the <a href="#/genres/assign">bulk assignment screen</a>.</div></div>'}
+      </div>`)
+
+    wireRecordingRows(mainContent)
+
+    if (navBack) {
+      document.getElementById('gn-back-btn')?.addEventListener('click', () => {
+        window.location.hash = navBack.hash
+      })
+    }
+
+    const refreshSidebar = () => invalidateDims('genres')
+    async function saveField(patch) {
+      try { await API.genres.update(id, patch); refreshSidebar() }
+      catch (e) { alert('Save failed: ' + e.message) }
+    }
+    makeInlineEditable(document.getElementById('gn-name'), {
+      get: () => g.name,
+      onSave: async val => { val = val.trim(); if (!val || val === g.name) return; g.name = val; await saveField({ name: val }) },
+    })
+    makeInlineEditable(document.getElementById('gn-desc'), {
+      multiline: true, placeholder: 'Add a description…',
+      get: () => g.description || '',
+      onSave: async val => { val = val.trim(); g.description = val; await saveField({ description: val || null }) },
+    })
+
+    document.getElementById('gn-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete genre "${g.name}"? This can't be undone.`)) return
+      try { await API.genres.remove(id); refreshSidebar(); window.location.hash = '#/genres' }
+      catch (e) { alert(e.message) }
+    })
+  }
+
+  // ── Genres admin page (mirrors renderVenuesPage's split list/detail) ────────
+
+  async function renderGenresPage(preSelectId = null) {
+    setActiveNav('genres')
+    setActiveArtist(null)
+    setNavCurrent('Genres')
+    setLoading()
+
+    let genres = []
+    try { genres = await API.genres.list() } catch (_) {}
+
+    setMainHTML(`
+      <div class="action-bar">
+        <span style="font-size:13px; font-weight:500; color:var(--t0)">Genres</span>
+        <a class="btn btn-ghost btn-sm" href="#/genres/assign" style="margin-left:auto">Bulk assign →</a>
+        <button class="btn btn-ghost btn-sm" id="btn-new-genre">+ New genre</button>
+      </div>
+      <div class="venues-shell">
+        <div class="venues-list-panel">
+          <div class="venues-search-bar">
+            <input type="text" id="genre-search-input" style="font-size:12px" placeholder="Search…" />
+          </div>
+          <div class="venue-list-scroll" id="genre-list-scroll"></div>
+        </div>
+        <div class="venues-detail-panel" id="genres-detail-panel">
+          <div class="venue-detail-empty">Select a genre to view or edit</div>
+        </div>
+      </div>`)
+
+    let allGenres = genres
+    let activeId  = null
+
+    function renderList(list) {
+      const scroll = document.getElementById('genre-list-scroll')
+      if (!list.length) {
+        scroll.innerHTML = '<div style="padding:16px 14px; font-size:12px; color:var(--t2)">No genres found</div>'
+        return
+      }
+      scroll.innerHTML = list.map(g => `
+        <div class="venue-list-row ${g.id === activeId ? 'active' : ''}" data-id="${g.id}">
+          <div class="venue-row-name">${esc(g.name)}</div>
+          <div class="venue-row-count">${g.performer_count || 0}p</div>
+        </div>`).join('')
+
+      scroll.querySelectorAll('.venue-list-row').forEach(el => {
+        el.addEventListener('click', () => {
+          activeId = parseInt(el.dataset.id)
+          renderList(list)
+          loadGenreDetail(activeId)
+        })
+      })
+    }
+
+    async function loadGenreDetail(id) {
+      const panel = document.getElementById('genres-detail-panel')
+      panel.innerHTML = '<div class="venue-detail-empty" style="color:var(--t2)">Loading…</div>'
+      let g
+      try { g = await API.genres.get(id) } catch (_) {
+        panel.innerHTML = '<div class="venue-detail-empty">Failed to load</div>'
+        return
+      }
+
+      panel.innerHTML = `
+        <div style="max-width:580px">
+          <h2 style="font-size:18px; font-weight:500; color:var(--t0); margin:0 0 18px">${esc(g.name)}</h2>
+
+          <div class="rev-section-title" style="margin-bottom:12px">Genre info</div>
+
+          <div class="ingest-field" style="margin-bottom:10px">
+            <label>Name</label>
+            <input type="text" id="gd-name" value="${esc(g.name)}" />
+          </div>
+
+          <div class="ingest-field" style="margin-bottom:18px">
+            <label>Description</label>
+            <textarea id="gd-desc" style="min-height:80px">${esc(g.description||'')}</textarea>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:28px">
+            <button class="btn btn-primary btn-sm" id="gd-save">Save</button>
+            <span id="gd-msg" style="font-size:11px; color:var(--t2)"></span>
+            <button class="btn btn-ghost btn-sm" id="gd-delete" style="margin-left:auto; color:var(--red)">Delete</button>
+          </div>
+
+          ${g.performer_count > 0 ? `
+          <div class="rev-section-title" style="margin-bottom:10px">Performers (${g.performer_count})</div>
+          <div style="display:flex; flex-direction:column; gap:2px">
+            ${g.performers.map(p => `
+              <div style="display:flex; align-items:center; gap:12px; padding:5px 0; border-bottom:1px solid var(--bd-0); font-size:12px">
+                <a href="#/artist/${p.id}" style="color:var(--t0); text-decoration:none; flex:1">${esc(p.name)}</a>
+                <span style="color:var(--t2)">${p.recording_count} rec</span>
+              </div>`).join('')}
+          </div>` : `<div style="font-size:12px; color:var(--t2)">No performers assigned yet</div>`}
+        </div>`
+
+      document.getElementById('gd-save').addEventListener('click', async () => {
+        const saveBtn = document.getElementById('gd-save')
+        const msgEl   = document.getElementById('gd-msg')
+        saveBtn.disabled = true
+        saveBtn.textContent = 'Saving…'
+        try {
+          await API.genres.update(id, {
+            name:        document.getElementById('gd-name').value.trim(),
+            description: document.getElementById('gd-desc').value.trim() || null,
+          })
+          allGenres = await API.genres.list()
+          renderList(allGenres)
+          document.querySelector('#genres-detail-panel h2').textContent =
+            document.getElementById('gd-name').value.trim()
+          msgEl.textContent = 'Saved'
+          setTimeout(() => { if (msgEl) msgEl.textContent = '' }, 2000)
+          invalidateDims('genres')
+        } catch (e) {
+          msgEl.style.color = 'var(--red)'
+          msgEl.textContent = 'Save failed: ' + e.message
+        } finally {
+          saveBtn.disabled = false
+          saveBtn.textContent = 'Save'
+        }
+      })
+
+      document.getElementById('gd-delete').addEventListener('click', async () => {
+        if (!confirm(`Delete genre "${g.name}"? This can't be undone.`)) return
+        const msgEl = document.getElementById('gd-msg')
+        try {
+          await API.genres.remove(id)
+          allGenres = await API.genres.list()
+          activeId  = null
+          renderList(allGenres)
+          document.getElementById('genres-detail-panel').innerHTML =
+            '<div class="venue-detail-empty">Select a genre to view or edit</div>'
+          invalidateDims('genres')
+        } catch (e) {
+          msgEl.style.color = 'var(--red)'
+          msgEl.textContent = e.message
+        }
+      })
+    }
+
+    // Search filter
+    document.getElementById('genre-search-input').addEventListener('input', e => {
+      const q = e.target.value.trim().toLowerCase()
+      const filtered = q ? allGenres.filter(g => g.name.toLowerCase().includes(q)) : allGenres
+      renderList(filtered)
+    })
+
+    // New genre
+    document.getElementById('btn-new-genre').addEventListener('click', async () => {
+      const name = prompt('Genre name:')
+      if (!name?.trim()) return
+      try {
+        const created = await API.genres.create({ name: name.trim() })
+        allGenres = await API.genres.list()
+        activeId  = created.id
+        renderList(allGenres)
+        loadGenreDetail(created.id)
+        invalidateDims('genres')
+      } catch (e) { alert('Failed: ' + e.message) }
+    })
+
+    renderList(allGenres)
+
+    // Pre-select a genre when navigating from elsewhere
+    if (preSelectId) {
+      activeId = preSelectId
+      renderList(allGenres)
+      loadGenreDetail(preSelectId)
+    }
+  }
+
+  // ── Bulk genre assignment (the actual population mechanism) ─────────────────
+  // Ryan assigns all 164 performers' genres by hand — no AI suggestion (see
+  // design spec). One row per performer, sorted by recording count DESC: the
+  // library is a long tail (85 of 164 performers have exactly one recording),
+  // so the top ~30 acts by recording count cover ~62% of the library. Sorted
+  // this way, stopping early after ten minutes is a legitimate end state, not
+  // an unfinished migration. Each pick is its own PUT — no bulk save button,
+  // nothing lost by closing the tab mid-way.
+  async function renderGenreAssignView() {
+    setActiveNav('genres'); setActiveArtist(null)
+    setNavCurrent('Assign Genres')
+    setLoading()
+
+    let performers = []
+    try { performers = await API.performers.list() } catch (_) {}
+    const sorted = performers.slice().sort((a, b) => (b.recording_count || 0) - (a.recording_count || 0))
+
+    let showAll = false
+    const rowsToShow = () => showAll ? sorted : sorted.filter(p => !p.genre_id)
+
+    const navBack = state.navBack
+    setMainHTML(`
+      <div class="action-bar">
+        ${navBack ? `<div class="breadcrumb" id="ga-back-btn">← ${esc(navBack.label)}</div>` : `<span style="font-size:13px; font-weight:500; color:var(--t0)">Assign Genres</span>`}
+        <label class="genre-assign-toggle" style="margin-left:auto">
+          <input type="checkbox" id="ga-show-all" /> Show all <span class="genre-assign-toggle-hint">(default: unassigned only)</span>
+        </label>
+      </div>
+      <div class="genre-assign-hint">Sorted by recording count, descending — the top acts cover most of the library fastest. Each pick saves immediately.</div>
+      <div class="genre-assign-list" id="genre-assign-list"></div>`)
+
+    if (navBack) {
+      document.getElementById('ga-back-btn')?.addEventListener('click', () => { window.location.hash = navBack.hash })
+    }
+
+    function rowHtml(p) {
+      return `
+        <div class="genre-assign-row" data-id="${p.id}">
+          <span class="genre-assign-name truncate">${esc(p.name)}</span>
+          <span class="genre-assign-count">${p.recording_count || 0} rec</span>
+          <span class="artist-picker-wrap genre-assign-picker-wrap">
+            <input type="text" class="genre-assign-input" id="ga-input-${p.id}" autocomplete="off"
+                   value="${esc(p.genre_name || '')}" placeholder="Pick a genre…" />
+            <div class="artist-dropdown" id="ga-dd-${p.id}" style="display:none"></div>
+          </span>
+          <span class="genre-assign-status" id="ga-status-${p.id}"></span>
+        </div>`
+    }
+
+    function focusRowInput(list, idx) {
+      const next = list[idx]
+      if (next) document.getElementById(`ga-input-${next.id}`)?.focus()
+    }
+
+    function wireRows(list) {
+      list.forEach((p, idx) => {
+        const input    = document.getElementById(`ga-input-${p.id}`)
+        const dd       = document.getElementById(`ga-dd-${p.id}`)
+        const statusEl = document.getElementById(`ga-status-${p.id}`)
+        if (!input) return
+        // No one-shot "committed" guard here (unlike the venue/event/performer-
+        // page pickers): this input stays live in place rather than being
+        // swapped for a display element after a pick, specifically so a
+        // mis-click can be corrected by just picking again.
+        const commit = async ({ id, name }) => {
+          statusEl.textContent = 'Saving…'
+          try {
+            await API.performers.update(p.id, { genre_id: id })
+            p.genre_id = id; p.genre_name = name
+            statusEl.textContent = '✓'
+            invalidateDims('genres')
+            if (!showAll) {
+              // The row falls out of the unassigned-only view — re-render and
+              // focus advances to whatever now sits at the same index.
+              renderRows()
+              focusRowInput(rowsToShow(), idx)
+            } else {
+              input.value = name
+              statusEl.textContent = ''
+              focusRowInput(list, idx + 1)
+            }
+          } catch (e) {
+            statusEl.textContent = 'Failed: ' + e.message
+          }
+        }
+        wirePickerDropdown(input, dd, API.genres.list, commit)   // no createLabel → existing genres only
+        input.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            const m = firstPickerResult(dd)
+            if (m) commit(m)
+          }
+        })
+      })
+    }
+
+    function renderRows() {
+      const list = rowsToShow()
+      const box = document.getElementById('genre-assign-list')
+      box.innerHTML = list.length
+        ? list.map(rowHtml).join('')
+        : `<div class="empty-state" style="min-height:120px"><div class="empty-title">${showAll ? 'No performers yet' : 'Every performer has a genre — nothing left to assign'}</div></div>`
+      wireRows(list)
+    }
+
+    document.getElementById('ga-show-all').addEventListener('change', e => {
+      showAll = e.target.checked
+      renderRows()
+    })
+
+    renderRows()
+  }
+
   // ── Artists Index ──────────────────────────────────────────────────────────
 
   async function renderArtistsIndexPage() {
@@ -6839,6 +7812,17 @@ const App = (() => {
       const id = parseInt(hash.split('/')[2])
       if (id) renderVenueView(id)
       else    renderVenuesPage()
+
+    } else if (hash === '#/genres/assign') {
+      renderGenreAssignView()
+
+    } else if (hash === '#/genres') {
+      renderGenresPage()
+
+    } else if (hash.startsWith('#/genre/')) {
+      const id = parseInt(hash.split('/')[2])
+      if (id) renderGenreView(id)
+      else    renderGenresPage()
 
     } else if (hash === '#/artists') {
       renderArtistsIndexPage()

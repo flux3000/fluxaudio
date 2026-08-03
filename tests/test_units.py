@@ -5,6 +5,7 @@ tests/test_units.py — pure-function unit tests (no DB needed).
 from app.utils.format import format_partial_date
 from app.utils.ingest import detect_track_flags, _parse_location
 from app.utils.health import compute_health
+from app.utils.waveform import downsample_peaks
 
 
 # ── compute_health ────────────────────────────────────────────────────────────
@@ -173,3 +174,52 @@ def test_flags_no_false_positives_on_real_titles():
                   "Piano Intro >", "Dark Star Intro -> Fields of Gray",
                   "Cryptical Envelopment >"]:
         assert detect_track_flags(title) == [], title
+
+
+# ── downsample_peaks (Library Browse View card waveform strip, 2026-08-02) ─────
+
+def test_downsample_peaks_empty_input_is_flat_zero():
+    assert downsample_peaks([], 10) == [0.0] * 10
+    assert downsample_peaks(None, 10) == [0.0] * 10
+    assert downsample_peaks({}, 10) == [0.0] * 10
+    assert downsample_peaks({"min": [], "max": []}, 10) == [0.0] * 10
+
+
+def test_downsample_peaks_zero_n_is_empty():
+    assert downsample_peaks([0.1, 0.2, 0.3], 0) == []
+
+
+def test_downsample_peaks_short_input_upsamples_to_n():
+    # Fewer source points than requested buckets — every bucket must still be
+    # filled (a short input must not produce a short strip).
+    result = downsample_peaks([0.2, 0.8], 10)
+    assert len(result) == 10
+    assert set(result) <= {0.2, 0.8}
+    assert result[0] == 0.2 and result[-1] == 0.8
+
+
+def test_downsample_peaks_exact_length_is_passthrough_magnitude():
+    peaks = [-0.1, 0.4, -0.9, 0.05, -0.5]
+    result = downsample_peaks(peaks, 5)
+    assert result == [abs(v) for v in peaks]
+
+
+def test_downsample_peaks_long_input_buckets_by_max_not_average():
+    # 100 points → 10 buckets of 10. Each bucket keeps its loudest sample, not
+    # the average — a waveform strip's job is to show the peak, not smooth it
+    # away (the design spec calls this out explicitly).
+    peaks = [v / 100 for v in range(100)]   # monotonically increasing 0.00-0.99
+    result = downsample_peaks(peaks, 10)
+    assert len(result) == 10
+    expected = [round((i * 10 + 9) / 100, 10) for i in range(10)]
+    for got, exp in zip(result, expected):
+        assert abs(got - exp) < 1e-9
+
+
+def test_downsample_peaks_accepts_min_max_dict_shape():
+    # The real (v2) TrackAnalysis.waveform_json shape: {"min": [...], "max": [...]},
+    # signed -1..1. Magnitude per bucket is whichever extreme is larger.
+    peaks = {"min": [-0.9, -0.1, -0.5, -0.2],
+             "max": [0.3, 0.05, 0.6, 0.1]}
+    result = downsample_peaks(peaks, 4)
+    assert result == [0.9, 0.1, 0.6, 0.2]

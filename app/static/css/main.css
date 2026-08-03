@@ -291,19 +291,24 @@ body {
   flex-shrink: 0;
 }
 
-/* Expand/collapse caret for canonical artists with linked sub-artists */
+/* Expand/collapse caret for canonical artists with linked sub-artists.
+   Enlarged 9px → 13px with a 18px hit target (2026-08-02, Ryan): at 9px in
+   --t3 these did not read as controls at all. Same treatment applied to every
+   other caret in the app — see .nav-caret and .lq-dir .ic. */
 .artist-expand-caret {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 12px;
+  width: 18px;
+  height: 18px;
+  margin-left: -3px;
   flex-shrink: 0;
-  font-size: 9px;
-  color: var(--t3);
+  font-size: 13px;
+  color: var(--t2);
   transition: transform 0.12s, color 0.1s;
 }
 .artist-expand-caret.expanded { transform: rotate(90deg); }
-.artist-expand-caret:not(.artist-expand-caret--spacer):hover { color: var(--accent); }
+.artist-expand-caret:not(.artist-expand-caret--spacer):hover { color: var(--accent-lit); }
 
 /* Sub-artist rows nested under a canonical artist */
 .artist-subitem {
@@ -1655,6 +1660,89 @@ input[type="number"]::-webkit-outer-spin-button {
   font-size: 12px; color: var(--accent-lit); font-style: italic;
 }
 
+/* ── Genre picker + pill (2026-08-02) ─────────────────────────────────────────
+   The Performer page's Genre field reuses .artist-picker-wrap/.artist-dropdown/
+   .artist-result (same dropdown chrome as the Members picker) — only the pill
+   below and the empty-state hint are new. */
+
+.genre-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-lit);
+  background: var(--accent-dim);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.pp-genre-field { display: inline-flex; min-height: 22px; align-items: center; }
+.pp-genre-field .pp-empty { color: var(--t3); font-style: italic; }
+
+/* ── Bulk genre assignment screen (#/genres/assign) ───────────────────────────
+   The population mechanism, not a convenience — see the Genre design spec's
+   coverage math on why sort-by-recording-count matters. */
+
+.genre-assign-hint {
+  padding: 0 20px 14px;
+  font-size: 12px;
+  color: var(--t2);
+}
+
+.genre-assign-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--t1);
+  cursor: pointer;
+}
+.genre-assign-toggle input { margin: 0; cursor: pointer; }
+.genre-assign-toggle-hint { color: var(--t3); }
+
+.genre-assign-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0 20px 40px;
+}
+
+.genre-assign-row {
+  display: grid;
+  grid-template-columns: 1fr auto 220px 70px;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--bd-0);
+}
+
+.genre-assign-name { font-size: 13px; color: var(--t0); }
+.genre-assign-count { font-size: 11px; color: var(--t2); white-space: nowrap; }
+.genre-assign-picker-wrap input { width: 100%; box-sizing: border-box; font-size: 12px; }
+.genre-assign-status { font-size: 11px; color: var(--accent-lit); white-space: nowrap; }
+
+/* ── Genre page (#/genre/<id>) — grouped by performer ────────────────────────
+   A genre's recordings are reached through its performers (one extra hop the
+   Venue page doesn't need, since Performance links straight to Venue). */
+
+.genre-performer-section { margin-top: 20px; }
+.genre-performer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--bd-1);
+  margin-bottom: 2px;
+}
+.genre-performer-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--t0);
+  text-decoration: none;
+}
+.genre-performer-name:hover { color: var(--accent-lit); }
+.genre-performer-count { font-size: 11px; color: var(--t2); }
+
 /* ── Venues admin page ────────────────────────────────────────────────────── */
 
 .venues-shell {
@@ -2199,14 +2287,14 @@ input[type="range"].progress-bar {
   flex-shrink: 0;
   background: none;
   border: none;
-  color: var(--t3);
+  color: var(--t2);   /* was --t3: too faint to read as a control (2026-08-02) */
   cursor: pointer;
   font-size: 17px;
   width: 22px;
   padding: 0;
   line-height: 1;
 }
-.batch-expand-btn:hover { color: var(--t1); }
+.batch-expand-btn:hover { color: var(--accent-lit); }
 
 .batch-item-info {
   flex: 1;
@@ -2805,12 +2893,15 @@ input[type="range"].progress-bar {
 .nav-action { cursor: pointer; color: var(--t3); font-size: 13px; line-height: 1; }
 .nav-action:hover { color: var(--t0); }
 
+/* Sidebar dimension caret. 9px → 13px with a real hit target (2026-08-02). */
 .nav-caret {
-  display: inline-block; width: 12px; text-align: center; flex-shrink: 0;
-  font-size: 9px; color: var(--t3);
-  transition: transform 0.12s;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex-shrink: 0;
+  font-size: 13px; color: var(--t2);
+  transition: transform 0.12s, color 0.1s;
 }
 .nav-caret.open { transform: rotate(90deg); }
+.nav-dim:hover .nav-caret { color: var(--accent-lit); }
 
 .nav-record {
   display: flex; align-items: center; gap: 6px;
@@ -4389,22 +4480,27 @@ input[type="range"].progress-bar {
 
    Ported from tools/quality/quality_app.html, not reinvented. The standalone
    app's layout was worked out against real recordings; this keeps it and adds
-   two things: a second score (Metadata Quality) beside the first, and an
+   two things: a second score (Metadata Completeness) beside the first, and an
    action column that sits OUTSIDE the card — the card reports on a recording,
    the column is what you do about it.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-.lq-wrap { max-width: 1034px; }
+/* Padding matches .batch-shell (24px 28px) — this page had none, so the title
+   sat flush against the sidebar edge (2026-08-02). */
+.lq-wrap { max-width: 1034px; padding: 24px 28px; }
 .lq-h1 { font-size: 21px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.01em; }
 .lq-sub-head { color: var(--t2); font-size: 13px; margin-bottom: 24px; }
-.lq-hint { color: var(--t3); font-size: 12px; margin-bottom: 24px; }
 
-/* ── Source bar + folder picker ──────────────────────────────────────────── */
-.lq-bar { display: flex; gap: 8px; margin-bottom: 8px; }
+/* ── Folder navigator ────────────────────────────────────────────────────────
+   Rebuilt 2026-08-02: the navigator IS the page. The separate address input and
+   the Browse toggle are gone — they showed the same path a second time and hid
+   a panel that was already open. One location (the crumbs), one action (the
+   footer button), and a labelled shortcut row so the quick links read as the
+   fastest route rather than as decoration. */
 .lq-path-input {
   flex: 1; background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--t0);
-  border-radius: var(--r-md); padding: 10px 13px;
-  font-family: var(--font-mono); font-size: 13px;
+  border-radius: var(--r-md); padding: 7px 11px;
+  font-family: var(--font-mono); font-size: 12.5px;
 }
 .lq-path-input:focus { outline: none; border-color: var(--accent); }
 
@@ -4412,24 +4508,64 @@ input[type="range"].progress-bar {
   background: var(--bg-3); border: 1px solid var(--bd-1);
   border-radius: var(--r-md); padding: 13px 15px; margin-bottom: 20px;
 }
+
+/* Shortcut row. The label is the fix for "it does not state the importance of
+   the quick links" — without it the pills look like breadcrumb debris. */
+.lq-nav-head {
+  display: flex; flex-wrap: wrap; gap: 7px; align-items: center;
+  padding-bottom: 11px; border-bottom: 1px solid var(--bd-0);
+}
+.lq-nav-lbl {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--t3); margin-right: 2px;
+}
+.lq-shortcut {
+  background: var(--bg-5); border: 1px solid var(--bd-1); border-radius: var(--r-sm);
+  padding: 4px 10px; font-size: 11.5px; color: var(--t1); cursor: pointer;
+  font-family: inherit;
+}
+.lq-shortcut:hover { border-color: var(--accent); color: var(--accent-lit); }
+
+/* Address row: breadcrumbs, with the rare type-a-path case behind a link that
+   swaps them out in place. */
+.lq-nav-addr { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
 .lq-crumbs {
-  display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px;
+  display: flex; flex-wrap: wrap; gap: 5px; align-items: center; flex: 1; min-width: 0;
   font-family: var(--font-mono); font-size: 12px; color: var(--t2);
 }
 .lq-crumbs a { color: var(--t1); cursor: pointer; text-decoration: none; }
-.lq-crumbs a:hover { color: var(--accent-lit); }
-.lq-shortcut {
-  background: var(--bg-5); border: 1px solid var(--bd-1); border-radius: var(--r-sm);
-  padding: 3px 9px; font-size: 11.5px; color: var(--t2); cursor: pointer;
+.lq-crumbs a:hover { color: var(--accent-lit); text-decoration: underline; }
+.lq-crumbs .sep { color: var(--t3); }
+.lq-typepath {
+  background: none; border: none; color: var(--t3); font-size: 11.5px;
+  cursor: pointer; padding: 2px 4px; flex: none; text-decoration: underline;
+  text-underline-offset: 2px; font-family: inherit;
 }
-.lq-shortcut:hover { border-color: var(--accent); color: var(--accent-lit); }
-.lq-dirs { max-height: 290px; overflow-y: auto; border-top: 1px solid var(--bd-0); padding-top: 8px; }
+.lq-typepath:hover { color: var(--t0); }
+
+.lq-nav-loading {
+  display: flex; align-items: center; gap: 10px; padding: 26px 4px;
+  color: var(--t2); font-size: 13px;
+}
+.lq-nav-loading code { font-size: 12px; color: var(--t1); }
+.lq-spin {
+  width: 13px; height: 13px; flex: none; border-radius: 50%;
+  border: 2px solid var(--bd-2); border-top-color: var(--accent);
+  animation: lq-spin .7s linear infinite;
+}
+@keyframes lq-spin { to { transform: rotate(360deg); } }
+
+.lq-dirs { max-height: 340px; overflow-y: auto; border-top: 1px solid var(--bd-0); padding-top: 8px; }
 .lq-dir {
   display: flex; align-items: center; gap: 9px; padding: 6px 9px;
   border-radius: var(--r-sm); cursor: pointer; font-size: 13px;
 }
 .lq-dir:hover { background: var(--bg-4); }
-.lq-dir .ic { color: var(--t3); font-size: 12px; width: 14px; flex: none; }
+.lq-dir:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.lq-dir--empty { color: var(--t3); cursor: default; }
+.lq-dir--empty:hover { background: none; }
+.lq-dir .ic { color: var(--t2); font-size: 13px; width: 16px; flex: none; text-align: center; }
+.lq-dir:hover .ic { color: var(--accent-lit); }
 .lq-dir .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lq-dir .tag {
   font-size: 10px; color: var(--green); background: rgba(106,184,128,.13);
@@ -4459,36 +4595,40 @@ input[type="range"].progress-bar {
   border-radius: var(--r-sm); padding: 4px 8px; font-size: 12.5px;
 }
 
-/* ── Row = card + action column ──────────────────────────────────────────── */
-.lq-cards { display: flex; flex-direction: column; gap: 12px; }
-.lq-row { display: flex; align-items: stretch; gap: 12px; }
+/* ── Row = the card, full width ──────────────────────────────────────────── */
+/* The card is now the whole row (2026-08-02). Actions moved inside it, so the
+   fixed-width gutter that used to sit alongside is gone and the card runs
+   full width. Cards are also further apart — at 12px they read as one
+   continuous table rather than a stack of separate reports. */
+.lq-row { display: block; }
+.lq-cards { display: flex; flex-direction: column; gap: 22px; }
 
 .lq-card {
-  flex: 1; min-width: 0;
+  width: 100%; min-width: 0;
   background: var(--bg-3); border: 1px solid var(--bd-1);
-  border-radius: var(--r-lg); padding: 15px 17px;
+  border-radius: var(--r-lg); padding: 16px 18px;
 }
 .lq-card--pending { opacity: .6; }
-.lq-card-head { display: flex; align-items: center; gap: 14px; }
+/* flex-start, not center (2026-08-02): with actions on the right and a
+   two-or-three-line title block on the left, centring floated the title
+   against a taller neighbour. The title is the anchor — it pins to the top. */
+.lq-card-head { display: flex; align-items: flex-start; gap: 16px; }
 .lq-card-title { flex: 1; min-width: 0; }
-.lq-card-title h2 { font-size: 14px; font-weight: 600; margin: 0; word-break: break-word; line-height: 1.35; }
-.lq-overall-txt { color: var(--t1); font-size: 12.5px; margin: 7px 0 0; }
+.lq-card-title h2 { font-size: 15.5px; font-weight: 600; margin: 0; word-break: break-word; line-height: 1.3; }
 
-/* Quick-glance strip — Format · Bitrate · Cutoff */
-.lq-qbar {
-  display: flex; background: var(--bg-2); border: 1px solid var(--bd-0);
-  border-radius: var(--r-md); overflow: visible; flex: none;
+/* Quick-glance facts — Tracks | Format | Bitrate | Cutoff.
+   Was a bordered four-cell strip in the top-right corner; now one pipe-
+   separated line on the card's own background, under the title (2026-08-02).
+   These are plain facts about the file, not readings that need a meter, and
+   the box gave them more weight than they earn while occupying the corner the
+   actions needed. */
+.lq-qline {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px;
+  margin: 6px 0 0; font-size: 12px; color: var(--t2);
+  font-family: var(--font-mono);
 }
-.lq-qc { padding: 6px 13px; border-right: 1px solid var(--bd-0); text-align: center; position: relative; }
-.lq-qc:last-child { border-right: none; }
-.lq-qc .k { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--t3); margin-bottom: 2px; }
-.lq-qc .v { font-family: var(--font-mono); font-size: 13px; font-weight: 500; line-height: 1.2; white-space: nowrap; }
-.lq-qc .d { font-size: 9.5px; color: var(--t2); margin-top: 1px; white-space: nowrap; }
-
-/* The quick bar now owns the top-right corner outright (2026-08-02) — the two
-   score blocks that used to sit beside it moved down into .lq-tabs, where each
-   reading is attached to the control that opens its evidence. */
-.lq-qbar { margin-left: auto; }
+.lq-qline .sep { color: var(--bd-2); }
+.lq-qcut { border-bottom: 1px dotted var(--t3); cursor: help; }
 
 /* Three-band verdict, replacing the numeric headline (2026-07-31).
    Set as a pill so it reads as a categorical call rather than a value on a
@@ -4540,14 +4680,16 @@ input[type="range"].progress-bar {
   font-family: var(--font-mono); font-size: 19px; font-weight: 600;
   line-height: 1; font-variant-numeric: tabular-nums; flex: none;
 }
-.lq-tab .chev { color: var(--t3); font-size: 10px; flex: none; }
+.lq-tab .chev { color: var(--t2); font-size: 12px; flex: none; }
+.lq-tab:hover .chev { color: var(--accent-lit); }
 
 .lq-detail { display: none; }
 .lq-card.open-lq   .lq-detail--lq   { display: block; }
 .lq-card.open-meta .lq-detail--meta { display: block; }
+.lq-card.open-fp   .lq-detail--fp   { display: block; }
 .lq-card.open .lq-tabs { margin-bottom: 2px; }
 
-/* ── Metadata Quality panel ─────────────────────────────────────────────────
+/* ── Metadata Completeness panel ────────────────────────────────────────────
    One row per field the completeness score counts, all nine of them. The
    question is "will I have to type?", so every row shows either a proposed
    value or an explicit Missing — never a blank, which reads as "not checked". */
@@ -4595,7 +4737,9 @@ input[type="range"].progress-bar {
 .lq-tip:hover .lq-tipbox { visibility: visible; opacity: 1; }
 .lq-tipbox .tt { font-weight: 600; margin-bottom: 5px; }
 .lq-tipbox .ab { color: var(--t1); }
-.lq-qbar .lq-tipbox { left: auto; right: 0; }
+/* Cutoff tooltip in the quick line: anchor right so it never runs off the
+   card edge on a long recording title. */
+.lq-qcut .lq-tipbox { left: auto; right: 0; }
 .lq-tipbox .th {
   color: var(--t2); font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
   margin: 9px 0 4px; padding-top: 7px; border-top: 1px solid var(--bd-1);
@@ -4614,60 +4758,186 @@ input[type="range"].progress-bar {
 .lq-clean { margin-top: 12px; font-size: 12px; color: var(--t3); display: flex; align-items: center; gap: 7px; }
 .lq-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; }
 
-/* Track Analysis */
-.lq-samp { margin-top: 16px; border-top: 1px solid var(--bd-0); padding-top: 12px; }
-.lq-samp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 6px; }
-.lq-samp h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--t3); }
-.lq-samp-note { font-size: 11px; color: var(--t3); text-align: right; }
-.lq-trk { display: flex; align-items: center; gap: 10px; padding: 6px 9px; border-radius: var(--r-sm); }
+/* ── Track Preview ───────────────────────────────────────────────────────────
+   Given its own surface (2026-08-02, Ryan: "cramped… could use some spacing to
+   distinguish itself"). It leads the Sound Quality panel now, and as a bare
+   list of rows it read as a continuation of the header rather than a section.
+   Second pass same day: the header got the padding and the player; the ROWS
+   got tighter, since the per-track player slot that justified their height is
+   gone. Weight sits at the top edge, not spread through the list. */
+.lq-samp {
+  margin-top: 16px; padding: 12px 14px;
+  background: var(--bg-2); border: 1px solid var(--bd-0); border-radius: var(--r-md);
+}
+/* Header carries the title AND the player (2026-08-02). Roomier than the rows
+   below it, so the block has an obvious top edge. */
+.lq-samp-head {
+  display: flex; align-items: center; gap: 16px;
+  margin-bottom: 4px; padding: 4px 4px 13px;
+  border-bottom: 1px solid var(--bd-0); min-height: 34px;
+}
+.lq-samp h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--t2); flex: none; }
+
+/* One player per CARD, parked here. A slot under each track pushed its row
+   apart from its neighbours every time it opened, so the list jumped around as
+   you sampled it — and before that it was pinned bottom-right of the window,
+   nowhere near the click. Fixed spot in the header holds still. */
+.lq-trk-player { flex: 1; min-width: 0; }
+.lq-trk-player:not(.on)::before {
+  content: 'Play a track, or click a timestamp to hear the analyzed moment';
+  font-size: 11px; color: var(--t3);
+}
+.lq-preview-audio { width: 100%; height: 30px; display: block; }
+
+/* Rows are compact — the player left them, so there is nothing to make room
+   for and the height was pure padding. */
+.lq-trk {
+  display: flex; align-items: center; gap: 11px;
+  padding: 4px 8px; border-radius: var(--r-sm);
+}
 .lq-trk:hover { background: var(--bg-4); }
+.lq-trk.playing { background: var(--accent-dim); }
 .lq-trk-play {
   background: none; border: 1px solid var(--bd-2); color: var(--t1);
-  width: 25px; height: 25px; border-radius: 50%; cursor: pointer; flex: none;
-  font-size: 10px; line-height: 1;
+  width: 22px; height: 22px; border-radius: 50%; cursor: pointer; flex: none;
+  font-size: 9px; line-height: 1; padding: 0;
 }
 .lq-trk-play:hover { border-color: var(--accent); color: var(--accent-lit); background: var(--accent-dim); }
 .lq-trk-name { flex: 1; font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lq-trk-win { display: flex; gap: 5px; }
+.lq-trk-win { display: flex; gap: 5px; align-items: center; flex: none; }
 .lq-win {
   background: var(--bg-5); border: 1px solid var(--bd-1); color: var(--t2);
   font-size: 10.5px; font-family: var(--font-mono); border-radius: var(--r-sm);
-  padding: 2px 7px; cursor: pointer;
+  padding: 2px 8px; cursor: pointer;
 }
 .lq-win:hover { border-color: var(--accent); color: var(--accent-lit); }
 
-/* Advanced Metrics */
-.lq-adv-wrap { margin-top: 12px; }
-.lq-adv-wrap summary { font-size: 11.5px; color: var(--t3); cursor: pointer; padding: 4px 0; }
-.lq-adv-wrap summary:hover { color: var(--t1); }
-.lq-adv { margin-top: 6px; }
+/* ── Fingerprints panel ──────────────────────────────────────────────────── */
+.lq-fp { padding-top: 12px; }
+.lq-fp-sum { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.lq-fp-sum span {
+  font-size: 11.5px; padding: 3px 9px; border-radius: var(--r-sm);
+  border: 1px solid transparent;
+}
+.lq-fp-ok   { color: var(--green); background: color-mix(in srgb, var(--green) 13%, transparent); }
+.lq-fp-bad  { color: var(--red);   background: color-mix(in srgb, var(--red)   14%, transparent); }
+.lq-fp-pend { color: var(--t2);    background: var(--bg-5); }
+.lq-fp-deep {
+  display: flex; align-items: center; gap: 11px; margin-bottom: 14px;
+  padding: 9px 11px; background: var(--bg-2); border: 1px solid var(--bd-0);
+  border-radius: var(--r-md); font-size: 11.5px; color: var(--t3); line-height: 1.5;
+}
+.lq-fp-deep button { flex: none; }
+.lq-fpfile { margin-bottom: 13px; }
+.lq-fpfile-head {
+  display: flex; align-items: baseline; gap: 9px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--bd-0); margin-bottom: 4px;
+}
+.lq-fpfile-head .nm { font-size: 12.5px; color: var(--t0); font-family: var(--font-mono); }
+.lq-fpfile-head .ty {
+  font-size: 9.5px; letter-spacing: .07em; color: var(--t2);
+  background: var(--bg-5); border-radius: var(--r-sm); padding: 2px 7px; flex: none;
+}
+.lq-fpfile-head .ct { font-size: 11px; color: var(--t3); margin-left: auto; text-align: right; }
+.lq-fptrk {
+  display: flex; align-items: baseline; gap: 10px; padding: 3px 8px;
+  font-size: 12px; border-radius: var(--r-sm);
+}
+.lq-fptrk .nm { flex: 1; min-width: 0; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lq-fptrk .st { font-size: 10.5px; flex: none; }
+.lq-fptrk--ok   .st { color: var(--green); }
+.lq-fptrk--bad  .st { color: var(--red); font-weight: 600; }
+.lq-fptrk--bad       { background: color-mix(in srgb, var(--red) 9%, transparent); }
+.lq-fptrk--pend .st { color: var(--t3); }
+
+/* ── Concerns line ───────────────────────────────────────────────────────── */
+.lq-concerns { display: flex; flex-direction: column; gap: 5px; margin: 8px 0 0; }
+.lq-concern {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+  padding: 5px 10px; border-radius: var(--r-sm); border: 1px solid transparent;
+}
+.lq-concern .ic { flex: none; font-size: 11px; }
+.lq-concern .tx { flex: 1; min-width: 0; }
+.lq-concern .lk { flex: none; font-size: 11px; color: inherit; opacity: .8; }
+.lq-concern .lk:hover { opacity: 1; }
+.lq-concern--warn {
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: var(--amber); border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+}
+.lq-concern--error {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red); border-color: color-mix(in srgb, var(--red) 32%, transparent);
+}
+
+/* ── Proposed track titles ───────────────────────────────────────────────── */
+.lq-titles { margin-top: 14px; padding-top: 11px; border-top: 1px solid var(--bd-0); }
+.lq-titles-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--t3); margin-bottom: 7px;
+}
+.lq-titles-list {
+  margin: 0; padding-left: 26px; columns: 2; column-gap: 26px;
+  font-size: 12.5px; color: var(--t0);
+}
+.lq-titles-list li { padding: 2px 0; break-inside: avoid; }
+.lq-titles-list li.ph { color: var(--t3); }
+.lq-ph-tag {
+  font-size: 9.5px; color: var(--amber); margin-left: 7px;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.lq-footnote {
+  margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--bd-0);
+  font-size: 11px; color: var(--t3); line-height: 1.5;
+}
+.lq-star { color: var(--t3); margin-left: 2px; }
+
+/* Metrics — now nested under their group rather than in one flat Advanced
+   Metrics list (2026-08-02). Indented and hairlined off so they read as the
+   evidence FOR the meter above them, not as a peer section. */
+.lq-adv { margin: 8px 0 2px; padding-left: 11px; border-left: 1px solid var(--bd-0); }
 .lq-mrow {
   display: flex; align-items: center; gap: 10px; padding: 5px 8px;
   border-radius: var(--r-sm); border-bottom: 1px solid var(--bd-0); position: relative;
 }
 .lq-mrow:last-child { border-bottom: none; }
 .lq-mrow:hover { background: var(--bg-4); }
-.lq-mdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .lq-mlabel { flex: 0 0 132px; font-size: 12px; color: var(--t1); }
 .lq-mval { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 0 96px; }
 .lq-mverdict { flex: 1; font-size: 11.5px; color: var(--t2); min-width: 0; }
+/* Zero-weight readings carry an asterisk and a footnote at the bottom of the
+   panel (Ryan, 2026-08-02) rather than a "not scored" tag on every row — five
+   repetitions of the same phrase was louder than the metrics themselves. The
+   distinction still has to be visible: showing them at equal standing is the
+   misreading that made presence balance look like a scoring bug rather than a
+   dead input on 2026-07-30. */
+.lq-mrow--unscored .lq-mlabel { color: var(--t2); }
+.lq-grp--other { opacity: .85; }
+.lq-samp--lead { margin-top: 4px; border-top: none; padding-top: 4px; }
+/* Leads the row now, and carries the state colour the dot used to (2026-08-02)
+   — one glyph doing both jobs instead of a dot that only coloured and a button
+   that only informed, sitting at opposite ends of the row. Inline style sets
+   the colour per-row; these are the fallback for metrics with no ladder. */
 .lq-minfo {
-  flex: none; color: var(--t3); font-size: 11px; border: 1px solid var(--bd-1);
-  border-radius: 50%; width: 15px; height: 15px; line-height: 13px; text-align: center;
+  flex: none; color: var(--t3); font-size: 10px; border: 1px solid var(--bd-1);
+  border-radius: 50%; width: 15px; height: 15px; line-height: 13px;
+  text-align: center; font-style: italic; cursor: help;
 }
-.lq-mrow:hover .lq-minfo { color: var(--accent-lit); border-color: var(--accent); }
+.lq-mrow:hover .lq-minfo { filter: brightness(1.35); }
 .lq-flags { margin-top: 9px; font-size: 11.5px; color: var(--t2); }
 .lq-flags span { display: inline-block; background: var(--bg-5); border-radius: var(--r-sm); padding: 2px 8px; margin: 0 6px 4px 0; }
 
 /* ── Action column — outside the card ────────────────────────────────────── */
+/* Horizontal and compact, top-right INSIDE the card (2026-08-02) — the slot
+   the Format/Bitrate/Cutoff box used to hold. */
 .lq-actions {
-  flex: 0 0 116px; display: flex; flex-direction: column; gap: 6px;
-  align-items: stretch; justify-content: flex-start; padding-top: 15px;
+  flex: none; display: flex; flex-direction: row; gap: 6px;
+  align-items: center; justify-content: flex-end; flex-wrap: wrap;
+  max-width: 320px;
 }
 .lq-act {
-  display: block; width: 100%; text-align: center; cursor: pointer;
+  display: block; text-align: center; cursor: pointer; white-space: nowrap;
   background: transparent; border: 1px solid var(--bd-1); color: var(--t1);
-  border-radius: var(--r-sm); padding: 7px 10px; font-size: 12px;
+  border-radius: var(--r-sm); padding: 5px 12px; font-size: 12px;
   font-family: inherit; text-decoration: none;
 }
 .lq-act:hover { border-color: var(--accent); color: var(--accent-lit); }
@@ -4675,9 +4945,9 @@ input[type="range"].progress-bar {
 .lq-act--ingest { color: var(--green); border-color: rgba(106,184,128,.35); }
 .lq-act--ingest:hover { border-color: var(--green); color: var(--green); background: rgba(106,184,128,.08); }
 .lq-act--view { color: var(--accent-lit); border-color: var(--accent); }
-.lq-act-done     { font-size: 12px; color: var(--green); text-align: center; padding: 4px 0; }
-.lq-act-failed   { font-size: 12px; color: var(--red);   text-align: center; padding: 4px 0; }
-.lq-act-cancelled{ font-size: 12px; color: var(--t3);    text-align: center; padding: 4px 0; }
+.lq-act-done     { font-size: 12px; color: var(--green); padding: 4px 0; white-space: nowrap; }
+.lq-act-failed   { font-size: 12px; color: var(--red);   padding: 4px 0; }
+.lq-act-cancelled{ font-size: 12px; color: var(--t3);    padding: 4px 0; white-space: nowrap; }
 
 .lq-move-wrap { position: relative; }
 .lq-move-menu {
@@ -4692,20 +4962,109 @@ input[type="range"].progress-bar {
 }
 .lq-move-opt:hover { background: var(--bg-4); color: var(--accent-lit); }
 
-/* Floating preview player — pinned so it survives a re-render mid-listen */
-.lq-preview-audio {
-  position: fixed; bottom: 14px; right: 14px; z-index: 60;
-  width: 320px; height: 34px;
-  background: var(--bg-3); border: 1px solid var(--bd-1); border-radius: var(--r-md);
-}
+/* The floating bottom-right preview player was REMOVED 2026-08-02. Pinning it
+   made it survive a re-render, but it also put the audio in a corner of the
+   window nowhere near the timestamp that started it — indistinguishable from
+   "the click did nothing". It now lives in .lq-trk-player — one per card, in
+   the Track Preview header. Styling is up with that block. */
 
 /* Triage shell header + the two action buttons that inherit .lq-act's base
    styling and only need their own accent (Review/Move stay neutral so Ingest
    is visibly the primary action). */
-.lq-shell { max-width: 1180px; }
+/* Full width (Ryan, 2026-08-02) — the actions gutter is gone, so the cards
+   have no reason to stop short of the pane. */
+.lq-shell { max-width: none; }
 .lq-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .lq-act--review, .lq-act--move { color: var(--t2); }
 .lq-act--review:hover, .lq-act--move:hover { color: var(--accent-lit); }
 /* Failure text can now be a whole sentence, so let it wrap instead of
    overflowing the action column. */
 .lq-act-failed { white-space: normal; line-height: 1.35; font-size: 11px; }
+
+/* ── Library Browse view (2026-08-02 design spec) ─────────────────────────────
+   Browse/List toggle, the fixed 5-module dashboard, and its three shared
+   components (rec-card, perf-tile, col-tile). Browse is the default; List is
+   the unchanged flat table (.rec-table, styled above) reached via the toggle. */
+
+.lib-toggle {
+  display: inline-flex; align-items: center; flex-shrink: 0;
+  border: 1px solid var(--bd-1); border-radius: var(--r-md);
+  padding: 2px; gap: 2px; margin-left: auto;
+}
+.lib-toggle-btn {
+  background: none; border: none; font: inherit; cursor: pointer;
+  font-size: 12px; color: var(--t2); padding: 5px 12px; border-radius: var(--r-sm);
+}
+.lib-toggle-btn:hover { color: var(--t0); }
+.lib-toggle-btn.active { background: var(--bg-4); color: var(--t0); }
+
+.lib-modules { padding: 8px 28px 32px; display: flex; flex-direction: column; gap: 32px; }
+
+.lib-module-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.lib-module-head h2 { font-size: 14px; font-weight: 500; color: var(--t0); }
+
+.lib-reroll-btn {
+  background: none; border: 1px solid var(--bd-1); color: var(--t2);
+  font: inherit; font-size: 11.5px; cursor: pointer;
+  padding: 4px 10px; border-radius: var(--r-sm); margin-left: auto;
+}
+.lib-reroll-btn:hover { color: var(--accent-lit); border-color: var(--accent); }
+
+.lib-module-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px;
+}
+.lib-module-grid--tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* ── Recording card (Recommended / Recently Added) ────────────────────────── */
+.rec-card {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--bg-3); border: 1px solid var(--bd-0); border-radius: var(--r-md);
+  overflow: hidden; transition: border-color .12s;
+}
+.rec-card:hover { border-color: var(--bd-2); }
+
+.rec-card-strip { position: relative; height: 56px; background: var(--bg-2); }
+.rec-card-waveform { display: block; width: 100%; height: 100%; }
+.rec-card-waveform rect { fill: var(--wf-color); }
+.rec-card-waveform--flat {
+  background: var(--wf-color); opacity: .35;
+  height: 2px; margin-top: 27px;
+}
+.rec-card-badge { position: absolute; top: 8px; right: 8px; }
+
+.rec-card-body { padding: 10px 12px 12px; }
+.rec-card-performer { font-size: 13px; font-weight: 500; color: var(--t0); }
+.rec-card-date       { font-size: 11.5px; color: var(--t2); margin-top: 3px; }
+.rec-card-venue       { font-size: 11.5px; color: var(--t2); }
+.rec-card-meta {
+  font-size: 11px; color: var(--t3); margin-top: 6px;
+  display: flex; gap: 6px; align-items: center;
+}
+
+/* ── Performer / Collection tiles ─────────────────────────────────────────── */
+.perf-tile, .col-tile {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--bg-3); border: 1px solid var(--bd-0); border-radius: var(--r-md);
+  padding: 12px 14px; transition: border-color .12s;
+}
+.perf-tile:hover, .col-tile:hover { border-color: var(--bd-2); }
+.perf-tile-name, .col-tile-name { font-size: 13px; font-weight: 500; color: var(--t0); }
+.perf-tile-count, .col-tile-count { font-size: 11px; color: var(--t2); margin-top: 4px; }
+.col-tile-desc { font-size: 11.5px; color: var(--t2); margin-top: 4px; }
+.perf-tile--see-all {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--t1); font-size: 12px; border-style: dashed;
+}
+.perf-tile--see-all:hover { color: var(--accent-lit); }
+
+/* ── On This Day — compact list, not cards ────────────────────────────────── */
+.otd-list { display: flex; flex-direction: column; }
+.otd-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 4px; text-decoration: none; color: inherit;
+  border-bottom: 1px solid var(--bd-0);
+}
+.otd-row:hover { background: var(--bg-1); }
+.otd-year      { font-size: 11.5px; color: var(--t3); width: 40px; flex-shrink: 0; }
+.otd-performer { font-size: 13px; color: var(--t0); flex: 0 1 auto; min-width: 0; max-width: 40%; }
+.otd-venue     { font-size: 12px; color: var(--t2); flex: 1; min-width: 0; }

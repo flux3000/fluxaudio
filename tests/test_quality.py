@@ -446,3 +446,95 @@ def test_serialize_staging_carries_triage_fields(app):
 
 def test_serialize_none_is_none():
     assert qs.serialize(None) is None
+
+
+# ── Advanced Metrics grouping (2026-08-02) ────────────────────────────────────
+# Metrics are now displayed UNDER the group they belong to, marked scored vs
+# measured-only. That mapping lives in quality_interpret.METRIC_GROUP but the
+# AUTHORITY is score_tone/score_noise/score_dynamics — if the two drift, the
+# panel starts claiming a dead input moves the number, which is exactly the
+# misreading that made presence balance look like a scoring bug on 2026-07-30.
+
+def _features_consumed_by(func):
+    """Feature keys a scoring function reads, straight out of its source."""
+    import inspect, re
+    return set(re.findall(r'f\.get\("([a-z0-9_]+)"\)', inspect.getsource(func)))
+
+
+def test_every_displayed_metric_has_a_group():
+    from app.utils.quality.quality_interpret import METRICS, METRIC_GROUP
+    assert {k for k, _ in METRICS} == set(METRIC_GROUP), \
+        "every metric in METRICS needs a METRIC_GROUP entry, and vice versa"
+    assert all(g in ("tone", "noise", "dynamics", "other")
+               for g, _ in METRIC_GROUP.values())
+
+
+def test_scored_flag_matches_what_the_scoring_functions_actually_read():
+    from app.utils.quality.quality_interpret import METRIC_GROUP
+    from app.utils.quality.quality_scoring import (
+        score_tone, score_noise, score_dynamics)
+
+    consumed = {
+        "tone":     _features_consumed_by(score_tone),
+        "noise":    _features_consumed_by(score_noise),
+        "dynamics": _features_consumed_by(score_dynamics),
+    }
+    for key, (group, scored) in METRIC_GROUP.items():
+        if group == "other":
+            assert not scored
+            continue
+        actually = key in consumed[group]
+        assert actually == scored, (
+            f"{key} is marked scored={scored} under {group}, but "
+            f"score_{group}() {'does' if actually else 'does not'} read it")
+
+
+def test_zero_weight_metrics_are_still_displayed():
+    """Presence balance, midrange scoop and hum were demoted, not deleted.
+    They are true measurements worth eyeballing; the panel just has to be
+    honest that they carry no weight."""
+    from app.utils.quality.quality_interpret import METRIC_GROUP
+    for key in ("presence_balance_db", "midrange_scoop_db", "hum_ratio_db"):
+        group, scored = METRIC_GROUP[key]
+        assert group in ("tone", "noise") and scored is False
+
+
+def test_every_scored_feature_is_actually_displayed():
+    """
+    The gap this catches, found 2026-08-02: hf_energy_ratio_db had been 50% of
+    the Tone score since the 07-31 rework and appeared in no panel, so the Tone
+    meter showed one of its two real inputs. A feature that moves the number
+    must be visible, or the breakdown is not a breakdown.
+    """
+    from app.utils.quality.quality_interpret import METRIC_GROUP
+    from app.utils.quality.quality_scoring import (
+        score_tone, score_noise, score_dynamics)
+
+    scored = set()
+    for fn in (score_tone, score_noise, score_dynamics):
+        scored |= _features_consumed_by(fn)
+    assert scored <= set(METRIC_GROUP), (
+        f"scored but undisplayed: {sorted(scored - set(METRIC_GROUP))}")
+
+
+def test_hf_energy_ratio_bands_track_the_scoring_curve():
+    """
+    Display rungs were drawn from the 110-recording corpus AND aligned to the
+    HF_RATIO curve knees, so the words and the score cannot tell different
+    stories. Spot-check the two ends and the A/B boundary near -35 dB.
+    """
+    from app.utils.quality.quality_interpret import metric_rows
+    from app.utils.quality.quality_scoring import curve, HF_RATIO
+
+    def verdict(v):
+        r = [x for x in metric_rows({"hf_energy_ratio_db": v})
+             if x["key"] == "hf_energy_ratio_db"]
+        assert r, "hf_energy_ratio_db must produce a display row"
+        return r[0]["state"]
+
+    assert verdict(-55.0) == "bad"     # curve ~20  — the "cigar box" end
+    assert verdict(-45.0) == "poor"    # curve ~45
+    assert verdict(-35.0) == "ok"      # curve ~72  — A/A- separation
+    assert verdict(-20.0) == "good"    # curve  100
+    # A "good" verdict must never sit below a "bad" one on the actual curve.
+    assert curve(-20.0, HF_RATIO) > curve(-55.0, HF_RATIO)

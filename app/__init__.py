@@ -59,6 +59,7 @@ def create_app(config_class=Config):
     from app.api.stream       import bp as stream_bp
     from app.api.ingest       import bp as ingest_bp
     from app.api.venues       import bp as venues_bp
+    from app.api.genres       import bp as genres_bp
     from app.api.events       import bp as events_bp
     from app.api.debug        import bp as debug_bp
     from app.api.preferences  import bp as preferences_bp
@@ -76,6 +77,7 @@ def create_app(config_class=Config):
     app.register_blueprint(stream_bp,       url_prefix="/api/stream")
     app.register_blueprint(ingest_bp,       url_prefix="/api/ingest")
     app.register_blueprint(venues_bp,       url_prefix="/api/venues")
+    app.register_blueprint(genres_bp,       url_prefix="/api/genres")
     app.register_blueprint(events_bp,       url_prefix="/api/events")
     app.register_blueprint(debug_bp,        url_prefix="/api/debug")
     app.register_blueprint(preferences_bp,  url_prefix="/api/preferences")

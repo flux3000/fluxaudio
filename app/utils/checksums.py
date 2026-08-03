@@ -39,6 +39,8 @@ from mutagen.flac import FLAC
 
 _HEX32 = re.compile(r"\b[0-9a-fA-F]{32}\b")
 _AUDIO_EXT = re.compile(r"\.(?:flac|wav|shn|mp3)$", re.IGNORECASE)
+# One or more leading "[tool]" markers, as shntool emits in .st5 files.
+_LEADING_BRACKET = re.compile(r"^(?:\s*\[[^\]]*\]\s*)+")
 
 # Preference order when a folder has more than one fingerprint file covering
 # the same track — only one type can occupy a track's checksum_status slot,
@@ -106,6 +108,16 @@ def parse_checksum_file(content):
         # this can't be a single-token regex — it has to take "the rest of
         # the line" and just check whether it looks like an audio filename.
         rest = (line[:hex_match.start()] + " " + line[hex_match.end():]).strip(" \t*:")
+        # Strip LEADING bracketed tool markers (2026-08-02). shntool writes
+        #     <hash>  [shntool]  Track 01.flac
+        # and without this the filename came out as "[shntool]  Track 01.flac",
+        # which matched no track — every one of the 474 .st5 files in the
+        # library parsed its hashes correctly and then matched zero tracks.
+        #
+        # LEADING only, deliberately: a track legitimately named
+        # "Track 01 [live].flac" must keep its brackets. The marker's position
+        # is what identifies it, not the brackets themselves.
+        rest = _LEADING_BRACKET.sub("", rest).strip(" \t*:")
         filename = os.path.basename(rest) if rest and _AUDIO_EXT.search(rest) else None
         entries.append({"filename": filename, "checksum": checksum})
     return entries
@@ -191,7 +203,7 @@ def discover_fingerprint_files(folder_abs_path):
     """
     # Imported lazily to avoid a module-load-order dependency between the two
     # utils modules — app/api/ingest.py already imports both directly.
-    from app.utils.ingest import FINGERPRINT_MARKERS, AUDIO_EXTENSIONS, _detect_fp_type
+    from app.utils.ingest import AUDIO_EXTENSIONS, fingerprint_type_for_file
 
     found = []
     for dirpath, _dirnames, filenames in os.walk(folder_abs_path):
@@ -199,15 +211,146 @@ def discover_fingerprint_files(folder_abs_path):
             ext = os.path.splitext(fname)[1].lower()
             if ext in AUDIO_EXTENSIONS:
                 continue
-            low = fname.lower()
-            if any(m in low for m in FINGERPRINT_MARKERS):
-                full = os.path.join(dirpath, fname)
+            full = os.path.join(dirpath, fname)
+            # fingerprint_type_for_file also sniffs CONTENT for unmarked .txt
+            # files (2026-08-02), so a checksum list named after the show is
+            # discovered here too — previously it was invisible to both paths.
+            fp_type = fingerprint_type_for_file(full, fname.lower())
+            if fp_type:
                 found.append({
-                    "type":     _detect_fp_type(low),
+                    "type":     fp_type,
                     "filename": fname,
                     "rel_path": os.path.relpath(full, folder_abs_path),
                 })
     return found
+
+
+class _ScanTrackProxy:
+    """
+    Stand-in for a Track so match_entries_to_tracks() works BEFORE ingest.
+
+    That matcher reads `.file_path` / `.track_number` off whatever it is given
+    — it does not care that a real Track row exists. Presenting scanned files
+    through this proxy means triage and confirm run the identical matching
+    logic, rather than triage growing a second, subtly-different matcher that
+    could disagree with what ingest will actually do.
+    """
+    def __init__(self, audio_file):
+        self.file_path    = audio_file.get("rel_path") or audio_file["filename"]
+        self.track_number = audio_file.get("index") or 0
+        self.audio        = audio_file
+
+
+# FFP and ST5 compare against the FLAC's own STREAMINFO md5 signature, which
+# mutagen reads out of the header — microseconds, no decode, no full read.
+# MD5 hashes the WHOLE FILE, so verifying a 400 MB show means pulling 400 MB
+# off the NAS. At triage, across a queue, that is the difference between a
+# 2-second card and a multi-minute one.
+CHEAP_FP_TYPES = ("ffp", "st5")
+
+
+def audit_folder_fingerprints(folder_path, audio_files, deep=False):
+    """
+    Pre-ingest fingerprint audit for the triage card (2026-08-02).
+
+    Answers "do the checksums shipped with this show actually verify?" before
+    anything is copied into the library — the point at which a bad tape is
+    cheapest to reject.
+
+    `deep=False` verifies only CHEAP_FP_TYPES (header reads). MD5 files are
+    parsed, matched and reported, but their tracks come back "unverified"
+    pending an explicit deep pass — Ryan's call, so the queue stays fast and
+    the expensive check is spent on the shows worth spending it on.
+
+    audio_files: scan_folder()["audio_files"] shape.
+    Returns {"files": [...], "summary": {...}, "deep": bool}.
+    """
+    from app.utils.ingest import scan_folder  # noqa: F401  (import cycle guard)
+
+    proxies = [_ScanTrackProxy(a) for a in (audio_files or [])]
+    files, summary = [], {"match": 0, "mismatch": 0, "unverified": 0,
+                          "unmatched": 0, "files": 0, "pending_deep": 0}
+
+    for fp in discover_fingerprint_files(folder_path):
+        fp_type  = fp["type"]
+        rel_path = fp["rel_path"]
+        abs_path = os.path.join(folder_path, rel_path)
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError as e:
+            files.append({"filename": fp["filename"], "rel_path": rel_path,
+                          "type": fp_type, "error": str(e), "tracks": []})
+            continue
+
+        entries = parse_checksum_file(content)
+
+        # Same disc-scoping rule as _do_confirm: a fingerprint file nested in
+        # CD1/ lists names scoped to that disc, and bare names like "01.flac"
+        # collide across discs. Restrict candidates to that subdir, falling
+        # back to everything if the scoping finds nothing.
+        fp_dir = os.path.dirname(rel_path).replace(os.sep, "/")
+        candidates = proxies
+        if fp_dir:
+            scoped = [p for p in proxies
+                      if os.path.dirname(p.file_path).replace(os.sep, "/") == fp_dir]
+            if scoped:
+                candidates = scoped
+
+        matched   = match_entries_to_tracks(entries, candidates)
+        cheap     = fp_type in CHEAP_FP_TYPES
+        will_test = cheap or deep
+
+        tracks = []
+        for proxy in candidates:
+            expected = matched.get(proxy)
+            if expected is None:
+                status = "unmatched"
+            elif not will_test:
+                status = "pending"
+            else:
+                status = verify_track_checksum(
+                    proxy.audio.get("path") or os.path.join(folder_path, proxy.file_path),
+                    fp_type, expected)
+            tracks.append({
+                "filename": os.path.basename(proxy.file_path),
+                "expected": expected,
+                "status":   status,
+            })
+            key = {"unmatched": "unmatched", "pending": "pending_deep"}.get(status, status)
+            summary[key] = summary.get(key, 0) + 1
+
+        # Entries in the file that matched no audio file at all — a checksum
+        # list longer than the folder means tracks are missing, which is worth
+        # saying out loud rather than quietly ignoring.
+        orphan_entries = max(0, len(entries) - len(matched))
+
+        files.append({
+            "filename":       fp["filename"],
+            "rel_path":       rel_path,
+            "type":           fp_type,
+            "entry_count":    len(entries),
+            "matched_count":  len(matched),
+            "orphan_entries": orphan_entries,
+            "verified":       will_test,
+            "tracks":         tracks,
+        })
+        summary["files"] += 1
+
+    # One headline per folder. "mismatch" outranks everything — a failed
+    # checksum is the single fact this panel exists to surface.
+    if not files:
+        verdict = "none"
+    elif summary["mismatch"]:
+        verdict = "mismatch"
+    elif summary["match"] and not summary["unmatched"] and not summary["pending_deep"]:
+        verdict = "verified"
+    elif summary["match"]:
+        verdict = "partial"
+    else:
+        verdict = "unverified"
+
+    return {"files": files, "summary": summary, "verdict": verdict, "deep": bool(deep)}
 
 
 def verify_track_checksum(abs_path, fp_type, expected_checksum):

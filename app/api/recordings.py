@@ -12,16 +12,20 @@ Routes:
 
 import json as _json
 import os
-from datetime import datetime, timezone
+import random
+from datetime import datetime, timezone, date as _date
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
+from sqlalchemy.orm import selectinload
 
 from app.extensions import db
 from app.models.recording import Recording, RecordingFingerprint
 from app.models.collection import CollectionRecording
 from app.models.recording_event import RecordingEvent
 from app.models.track import Track
+from app.models.performance import Performance
 from app.models.performer import Performer
+from app.models.play_log import PlayLog
 from app.models.venue import Venue
 from app.utils.ingest import (build_scan_payload, write_flac_tags, read_recording_tags)
 from app.utils.analysis import analyse_recording
@@ -39,16 +43,168 @@ bp = Blueprint("recordings", __name__)
 # ── GET /api/recordings/recent ────────────────────────────────────────────────
 # Virtual "Recently Added" view — not a stored grouping, just the N newest
 # recordings by ingest timestamp. Always exactly correct, nothing to keep in sync.
+#
+# Shared by two callers: the List view's Recently Added table (no waveform —
+# default, unaffected) and the Browse view's Recently Added card module
+# (?waveform=1). Same endpoint, opt-in param, per the recording_row() design —
+# see app/utils/serialize.py.
 
 @bp.route("/recent")
 @login_required
 def recent_recordings():
     limit = request.args.get("limit", 50, type=int) or 50
     limit = max(1, min(limit, 200))
-    recs = (Recording.query
-            .order_by(Recording.created_at.desc())
-            .limit(limit)
-            .all())
+    waveform = request.args.get("waveform", "").lower() in ("1", "true", "yes")
+    query = Recording.query
+    if waveform:
+        query = query.options(selectinload(Recording.tracks).selectinload(Track.analysis))
+    recs = query.order_by(Recording.created_at.desc()).limit(limit).all()
+    return jsonify([recording_row(r, waveform=waveform) for r in recs])
+
+
+# ── GET /api/recordings/recommended ───────────────────────────────────────────
+# Browse view's "Recommended" module (Library Browse View design spec,
+# 2026-08-02). Randomly-selected high-quality (A/A+ only — not A-) recordings,
+# weighted toward ones absent from play_log, diverse by Performer (hard rule)
+# and Genre (soft preference, degrades silently while genre_id is
+# NULL/absent). Seeded by date so picks are stable within a day; the client's
+# "Show me three more" control advances `reroll` to get a fresh draw.
+
+def _recommended_pool_query():
+    return (
+        Recording.query
+        .filter(Recording.quality.in_(("A", "A+")))
+        .options(
+            selectinload(Recording.tracks).selectinload(Track.analysis),
+            selectinload(Recording.performance),
+        )
+    )
+
+
+def _genre_by_performer(performer_ids):
+    """
+    Best-effort {performer_id: genre_id} map for the diversity preference.
+    Returns {} (no genre preference applied) if the query fails for any
+    reason — in particular, `performer.genre_id` may not exist yet on the
+    live DB (the genre migration had not been run as of this feature's
+    build). Diversity-by-genre is a soft preference, never load-bearing, so
+    failing this open (no genre data) rather than raising is the right call.
+    """
+    if not performer_ids:
+        return {}
+    try:
+        return dict(
+            db.session.query(Performer.id, Performer.genre_id)
+            .filter(Performer.id.in_(performer_ids))
+            .all()
+        )
+    except Exception:
+        db.session.rollback()
+        return {}
+
+
+def _select_diverse(candidates, limit, perf_by_rec, genre_by_performer):
+    """
+    Greedily pick up to `limit` recordings from `candidates` (already ordered
+    by preference — unplayed first). Never two picks share a Performer — a
+    hard rule, no exception: if the pool doesn't have `limit` distinct
+    Performers to offer, the draw comes back short rather than repeating one.
+    Prefers distinct Genres too, but relaxes that if the pool can't support
+    it (soft preference, degrades silently while genre_id is NULL/absent).
+    """
+    picks = []
+    used_performers = set()
+    used_genres = set()
+    deferred = []   # distinct-performer, but genre already used this draw
+
+    for r in candidates:
+        if len(picks) >= limit:
+            break
+        pid = perf_by_rec.get(r.id)
+        if pid is not None and pid in used_performers:
+            continue
+        gid = genre_by_performer.get(pid) if pid is not None else None
+        if gid is not None and gid in used_genres:
+            deferred.append((r, pid, gid))
+            continue
+        picks.append(r)
+        if pid is not None:
+            used_performers.add(pid)
+        if gid is not None:
+            used_genres.add(gid)
+
+    if len(picks) < limit:
+        for r, pid, gid in deferred:
+            if len(picks) >= limit:
+                break
+            if pid is not None and pid in used_performers:
+                continue
+            picks.append(r)
+            if pid is not None:
+                used_performers.add(pid)
+
+    return picks[:limit]
+
+
+@bp.route("/recommended")
+@login_required
+def recommended_recordings():
+    limit = request.args.get("limit", 3, type=int) or 3
+    limit = max(1, min(limit, 12))
+    reroll = request.args.get("reroll", 0, type=int) or 0
+
+    pool = _recommended_pool_query().all()
+    if not pool:
+        return jsonify([])
+
+    pool_ids = [r.id for r in pool]
+    played_ids = {
+        rid for (rid,) in
+        db.session.query(Track.recording_id)
+        .join(PlayLog, PlayLog.track_id == Track.id)
+        .filter(Track.recording_id.in_(pool_ids))
+        .distinct()
+        .all()
+    }
+
+    perf_by_rec = {r.id: (r.performance.performer_id if r.performance else None) for r in pool}
+    genre_by_performer = _genre_by_performer(
+        {pid for pid in perf_by_rec.values() if pid is not None}
+    )
+
+    # Stable within a day; `reroll` (an incrementing counter kept client-side,
+    # not persisted) is the escape hatch for "Show me three more".
+    seed = f"{_date.today().isoformat()}:{reroll}"
+    rnd = random.Random(seed)
+    unplayed = [r for r in pool if r.id not in played_ids]
+    played   = [r for r in pool if r.id in played_ids]
+    rnd.shuffle(unplayed)
+    rnd.shuffle(played)
+    ordered = unplayed + played   # unplayed strongly preferred, never excluded
+
+    picks = _select_diverse(ordered, limit, perf_by_rec, genre_by_performer)
+    return jsonify([recording_row(r, waveform=True) for r in picks])
+
+
+# ── GET /api/recordings/on-this-day ───────────────────────────────────────────
+# Browse view's "On This Day" module. Recordings whose performance date
+# matches today's month/day, any year — no schema change, just a date-part
+# match. Compact list, not cards, so no waveform. Hidden client-side when
+# empty, which is most days (see the design spec's "every module hides
+# entirely when empty" rule).
+
+@bp.route("/on-this-day")
+@login_required
+def on_this_day():
+    today = datetime.now(timezone.utc).date()
+    recs = (
+        Recording.query
+        .join(Performance, Recording.performance_id == Performance.id)
+        .filter(Performance.start_month == today.month,
+                Performance.start_day == today.day)
+        .order_by(Performance.start_year.asc().nullslast())
+        .all()
+    )
     return jsonify([recording_row(r) for r in recs])
 
 

@@ -107,7 +107,20 @@ const API = (() => {
     // ── Recordings ───────────────────────────────────────────────────────────
     recordings: {
       get:        (id)       => get(`/api/recordings/${id}`),
-      recent:     (limit)    => get(`/api/recordings/recent?limit=${limit || 50}`),
+      // `waveform` opts into the downsampled card strip (Browse's Recently
+      // Added module) — omitted/false keeps the List view's request exactly
+      // as it was (no waveform decode tax). See app/utils/serialize.py.
+      recent:     (limit, waveform) =>
+        get(`/api/recordings/recent?limit=${limit || 50}${waveform ? '&waveform=1' : ''}`),
+      // Browse's Recommended module — 3 cards by default, seeded by date
+      // (stable within a day). `reroll` is an incrementing counter kept in
+      // memory client-side, not persisted — bumping it is the "Show me
+      // three more" control.
+      recommended: (limit, reroll) =>
+        get(`/api/recordings/recommended?limit=${limit || 3}&reroll=${reroll || 0}`),
+      // Browse's On This Day module — recordings whose date matches today's
+      // month/day, any year. Empty most days; the module hides itself then.
+      onThisDay:  ()          => get('/api/recordings/on-this-day'),
       scan:       (folder)   => post('/api/recordings/scan', { folder_path: folder }),
       update:     (id, data) => put(`/api/recordings/${id}`, data),
       delete:     (id)       => request('DELETE', `/api/recordings/${id}`),
@@ -130,6 +143,15 @@ const API = (() => {
       create: (data)     => post('/api/venues/', data),
       update: (id, data) => put(`/api/venues/${id}`, data),
       remove: (id)       => request('DELETE', `/api/venues/${id}`),
+    },
+
+    // ── Genres ───────────────────────────────────────────────────────────────
+    genres: {
+      list:   (q)        => get(`/api/genres/${q ? '?q=' + encodeURIComponent(q) : ''}`),
+      get:    (id)       => get(`/api/genres/${id}`),
+      create: (data)     => post('/api/genres/', data),
+      update: (id, data) => put(`/api/genres/${id}`, data),
+      remove: (id)       => request('DELETE', `/api/genres/${id}`),
     },
 
     // ── Events ───────────────────────────────────────────────────────────────
@@ -187,6 +209,10 @@ const API = (() => {
       // guards (allowlisted destinations, import-root check, never overwrites).
       move: (folder_path, destination) => post('/api/quality/move', { folder_path, destination }),
       browse: (path) => get(`/api/quality/browse?path=${encodeURIComponent(path || '')}`),
+      // The DEEP fingerprint pass — hashes whole files, so it is explicit and
+      // per-folder. Triage verifies FFP/ST5 for free; MD5 waits for this.
+      verifyFingerprints: (folder_path) =>
+        post('/api/quality/verify-fingerprints', { folder_path }),
     },
   }
 })()

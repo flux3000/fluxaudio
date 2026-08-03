@@ -205,6 +205,8 @@ def analyze_status(job_id):
     }
     _attach_interpretation(payload["results"])
     _attach_metadata(payload["results"])
+    _attach_fingerprints(payload["results"])
+    _attach_concerns(payload["results"])
     if job["status"] == "error":
         payload["error"] = job["error"]
     if job["status"] in ("done", "error"):
@@ -225,6 +227,34 @@ def analyze_status(job_id):
 # only ever touches the folders under one scanned directory.
 _META_CACHE = {}
 _META_CACHE_MAX = 500
+
+
+def _proposed_track_titles(scan, tags, info):
+    """
+    One entry per audio file: the title the ingest would propose, and whether
+    it counts as REAL.
+
+    Deliberately mirrors `_real_title_count()` in app/utils/health.py — tags
+    preferred, info file as fallback, same `_is_real_title` predicate — so the
+    list and the completeness score can never disagree about which titles are
+    placeholders. Importing the predicate rather than reimplementing it is the
+    point; two notions of "is this a real title" is how the panel would start
+    lying about its own number.
+    """
+    from app.utils.health import _is_real_title
+
+    tag_tracks  = tags.get("tracks") or []
+    info_tracks = info.get("tracks") or []
+    n = len(scan.get("audio_files") or [])
+
+    out = []
+    for i in range(n):
+        title = tag_tracks[i].get("title") if i < len(tag_tracks) else ""
+        if not _is_real_title(title) and i < len(info_tracks):
+            title = info_tracks[i].get("title") or title
+        out.append({"n": i + 1, "title": title or "",
+                    "real": bool(_is_real_title(title))})
+    return out
 
 
 def _scan_metadata(folder_path):
@@ -270,6 +300,10 @@ def _scan_metadata(folder_path):
                 "source":  tags.get("source") or sug.get("source"),
                 "lineage": tags.get("lineage") or sug.get("lineage"),
                 "track_count": len(scan.get("audio_files") or []),
+                # The titles themselves, not just how many are populated
+                # (2026-08-02). A ratio says the fields are filled; it cannot
+                # show that they are filled with "Jam >" and "Unknown".
+                "track_titles": _proposed_track_titles(scan, tags, sug),
             },
         }
 
@@ -339,9 +373,172 @@ def _attach_metadata(results):
             _tb.print_exc()
 
 
+# folder_path → (mtime, deep, audit). Same mtime keying as _META_CACHE. `deep`
+# is part of the key so a deep pass replaces a cheap one rather than being
+# served the stale cheap answer.
+_FP_CACHE = {}
+_FP_CACHE_MAX = 400
+
+
+def _fingerprint_audit(folder_path, deep=False):
+    """Cheap-by-default fingerprint audit for one folder, cached."""
+    from app.utils.checksums import audit_folder_fingerprints
+    from app.utils.ingest import scan_folder
+
+    try:
+        mtime = os.path.getmtime(folder_path)
+    except OSError:
+        mtime = None
+    hit = _FP_CACHE.get(folder_path)
+    # A cached DEEP result satisfies a cheap request; the reverse is not true.
+    if hit and hit[0] == mtime and (hit[1] or not deep):
+        return hit[2]
+
+    scan  = scan_folder(folder_path)
+    audit = audit_folder_fingerprints(folder_path, (scan or {}).get("audio_files") or [],
+                                      deep=deep)
+    if len(_FP_CACHE) >= _FP_CACHE_MAX:
+        _FP_CACHE.clear()
+    _FP_CACHE[folder_path] = (mtime, deep, audit)
+    return audit
+
+
+def _attach_fingerprints(results):
+    """
+    Add the fingerprint audit to each row — the third triage tab.
+
+    Cheap pass only (FFP/ST5, header reads). MD5 files are parsed and matched
+    but their tracks report "pending" until an explicit deep verify, because
+    hashing whole files across a queue is minutes, not seconds. See
+    CHEAP_FP_TYPES in app/utils/checksums.py.
+    """
+    for r in results:
+        r["fingerprints"] = None
+        if r.get("error") or not r.get("exists"):
+            continue
+        try:
+            r["fingerprints"] = _fingerprint_audit(r["folder_path"], deep=False)
+        except Exception:  # noqa: BLE001
+            _tb.print_exc()
+
+
+def _attach_concerns(results):
+    """
+    The MAJOR-ISSUE line under each card title (Ryan, 2026-08-02).
+
+    That space used to hold a prose description of how the recording sounds
+    ("A listenable recording with obvious character…"), which restated the
+    Sound Quality band in more words. It now carries only things that should
+    stop you before you ingest — and stays empty when there are none, so its
+    presence is itself the signal.
+
+    Must run AFTER _attach_interpretation / _attach_metadata / _attach_
+    fingerprints: it reads all three rather than recomputing anything.
+    """
+    from app.api.ingest import resolve_similar_performer_ids
+    from app.models.performance import Performance
+    from app.utils.format import format_partial_date
+
+    for r in results:
+        concerns = []
+        x = r.get("extracted") or {}
+        h = r.get("health") or {}
+        fp = r.get("fingerprints") or {}
+
+        if r.get("exists") is False:
+            concerns.append({"level": "error", "kind": "missing",
+                             "text": "Source folder no longer exists on disk"})
+
+        # Nothing to ingest at all. Worth saying loudly — the card would
+        # otherwise look merely low-scoring rather than empty.
+        if r.get("exists") and not x.get("track_count"):
+            concerns.append({"level": "error", "kind": "no_audio",
+                             "text": "No audio files detected in this folder"})
+
+        # A failed checksum is the strongest signal available that a file is
+        # damaged. It outranks every soft quality reading on the card.
+        if fp.get("summary", {}).get("mismatch"):
+            n = fp["summary"]["mismatch"]
+            concerns.append({"level": "error", "kind": "checksum",
+                             "text": f"{n} track{'' if n == 1 else 's'} failed checksum verification"})
+
+        # Technical issues are already computed by the engine; surfacing the
+        # phase/dead-channel class here means they are visible without opening
+        # a tab, which is the whole point of a concerns line.
+        for issue in ((r.get("interp") or {}).get("issues") or []):
+            concerns.append({"level": "warn", "kind": "technical",
+                             "text": f"{issue.get('issue')} — {issue.get('detail')}"})
+
+        # Possible duplicate. Needs performer + year; without both there is
+        # nothing meaningful to match on and we say nothing rather than guess.
+        if x.get("artist") and x.get("year"):
+            try:
+                pids = resolve_similar_performer_ids(x["artist"])
+                if pids:
+                    q = db.session.query(Performance).filter(
+                        Performance.performer_id.in_(pids),
+                        Performance.start_year == int(x["year"]))
+                    if x.get("month"):
+                        q = q.filter(Performance.start_month == int(x["month"]))
+                    if x.get("day"):
+                        q = q.filter(Performance.start_day == int(x["day"]))
+                    hits = [p for p in q.all() if p.recordings]
+                    if hits:
+                        p = hits[0]
+                        where = format_partial_date(p.start_year, p.start_month, p.start_day)
+                        act   = p.performer.name if p.performer else "this act"
+                        more  = f" (+{len(hits) - 1} more)" if len(hits) > 1 else ""
+                        concerns.append({
+                            "level": "warn", "kind": "duplicate",
+                            "text": f"Possible duplicate — library already has "
+                                    f"{act} on {where}{more}",
+                            "recording_id": p.recordings[0].id,
+                        })
+            except Exception:  # noqa: BLE001
+                _tb.print_exc()   # never let a duplicate check break a card
+
+        r["concerns"] = concerns
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Triage
 # ═════════════════════════════════════════════════════════════════════════════
+@bp.route("/verify-fingerprints", methods=["POST"])
+@login_required
+def verify_fingerprints():
+    """
+    POST /api/quality/verify-fingerprints  { "folder_path": "..." }
+
+    The DEEP pass — hashes whole files, so MD5 fingerprints finally get a real
+    verdict. Deliberately explicit and per-folder rather than part of triage:
+    a 400 MB show means reading 400 MB off the NAS, and doing that for every
+    card in a queue would turn a 2-second triage into minutes (Ryan's call,
+    2026-08-02). FFP/ST5 already verified for free during triage.
+
+    Synchronous. One folder's audio is a bounded read, and the UI disables the
+    button while it runs — a background job here would be more machinery than
+    the wait justifies.
+    """
+    data = request.get_json() or {}
+    folder = (data.get("folder_path") or "").strip()
+    if not folder or not os.path.isdir(folder):
+        return jsonify({"error": f"Folder not found: {folder!r}"}), 400
+    if not _within_import_roots(folder):
+        return jsonify({"error": "Outside the permitted import roots"}), 403
+    try:
+        return jsonify(_fingerprint_audit(folder, deep=True))
+    except Exception as e:  # noqa: BLE001
+        _tb.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+def _within_import_roots(path):
+    """Same containment rule browse() applies — this endpoint reads audio."""
+    roots = [os.path.realpath(r) for r in current_app.config.get("IMPORT_ROOTS", [])]
+    real  = os.path.realpath(path)
+    return any(real == r or real.startswith(r + os.sep) for r in roots)
+
+
 @bp.route("/triage", methods=["POST"])
 @login_required
 def triage():
@@ -433,28 +630,9 @@ def browse():
         full = os.path.join(path, name)
         if not os.path.isdir(full):
             continue
-        try:
-            kids = os.listdir(full)
-        except (PermissionError, OSError):
-            kids = []
-        has_audio = any(k.lower().endswith(AUDIO_EXT) for k in kids)
-        subdirs = [k for k in kids
-                   if not k.startswith(".") and os.path.isdir(os.path.join(full, k))]
-        # Look one level deeper before declaring a folder audio-free: a
-        # recording that still carries CD1/CD2 subdirs has no audio at its own
-        # root, and marking it empty would say a perfectly analysable show has
-        # nothing in it.
-        if not has_audio:
-            for sub in subdirs:
-                try:
-                    if any(k.lower().endswith(AUDIO_EXT)
-                           for k in os.listdir(os.path.join(full, sub))):
-                        has_audio = True
-                        break
-                except (PermissionError, OSError):
-                    continue
+        has_audio, subdirs = _probe_folder(full, AUDIO_EXT)
         dirs.append({"name": name, "path": full,
-                     "audio": has_audio, "subdirs": bool(subdirs)})
+                     "audio": has_audio, "subdirs": subdirs})
 
     parent = os.path.dirname(path.rstrip(os.sep)) or "/"
     return jsonify({
@@ -464,6 +642,70 @@ def browse():
         "here_has_audio": any(e.lower().endswith(AUDIO_EXT) for e in entries),
         "shortcuts": _shortcuts(),
     })
+
+
+# One entry per probed folder: path → (mtime, has_audio, has_subdirs). Browsing
+# is a walk — up, back down, up again — so the same artist folder gets probed
+# several times in one sitting, and the answer only changes when the folder
+# does. Bounded and cleared wholesale, same as _META_CACHE.
+_BROWSE_CACHE = {}
+_BROWSE_CACHE_MAX = 4000
+
+
+def _probe_folder(full, audio_ext):
+    """
+    (has_audio, has_subdirs) for one folder — the two facts the picker shows.
+
+    Uses os.scandir, NOT os.listdir + os.path.isdir (2026-08-02). scandir's
+    DirEntry carries the directory type from the readdir call itself, so
+    entry.is_dir() answers from cached d_type with no extra syscall; the old
+    code paid a separate stat() per child. On a NAS mount at a few ms per stat,
+    an artist folder holding twenty shows cost twenty round trips, and a
+    hundred-artist directory cost thousands — which is why Browse sat there
+    doing nothing for seconds.
+
+    Still looks ONE level deeper before declaring a folder audio-free: a
+    recording that keeps its CD1/CD2 subdirs has no audio at its own root, and
+    marking it empty would claim a perfectly analysable show has nothing in it.
+    That descent stops at the first subfolder containing audio.
+    """
+    try:
+        mtime = os.stat(full).st_mtime
+    except OSError:
+        mtime = None
+    hit = _BROWSE_CACHE.get(full)
+    if hit and hit[0] == mtime:
+        return hit[1], hit[2]
+
+    has_audio, subdir_paths = False, []
+    try:
+        with os.scandir(full) as it:
+            for e in it:
+                if not has_audio and e.name.lower().endswith(audio_ext):
+                    has_audio = True
+                elif not e.name.startswith("."):
+                    try:
+                        if e.is_dir():
+                            subdir_paths.append(e.path)
+                    except OSError:
+                        pass
+    except (PermissionError, OSError):
+        pass
+
+    if not has_audio:
+        for sub in subdir_paths:
+            try:
+                with os.scandir(sub) as it:
+                    if any(e.name.lower().endswith(audio_ext) for e in it):
+                        has_audio = True
+                        break
+            except (PermissionError, OSError):
+                continue
+
+    if len(_BROWSE_CACHE) >= _BROWSE_CACHE_MAX:
+        _BROWSE_CACHE.clear()
+    _BROWSE_CACHE[full] = (mtime, has_audio, bool(subdir_paths))
+    return has_audio, bool(subdir_paths)
 
 
 def _shortcuts():
@@ -564,6 +806,8 @@ def staging():
     results = [qs.serialize(r, include_features=True) for r in rows]
     _attach_interpretation(results)
     _attach_metadata(results)
+    _attach_fingerprints(results)
+    _attach_concerns(results)
     return jsonify({
         "source_dir": qs.norm_path(source_dir),
         "results": results,

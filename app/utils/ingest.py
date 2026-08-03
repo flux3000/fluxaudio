@@ -278,9 +278,12 @@ def scan_folder(folder_path):
                 "set_number": set_label,   # None for flat; "CD 1" etc. for multi-set
             })
         elif ext == TEXT_EXTENSION:
-            if any(m in low for m in FINGERPRINT_MARKERS):
+            # Content-aware since 2026-08-02 — a checksum list named after the
+            # show used to be scored as an info-file candidate and win.
+            fp_type = fingerprint_type_for_file(full, low)
+            if fp_type:
                 result["fingerprints"].append({
-                    "type":     _detect_fp_type(low),
+                    "type":     fp_type,
                     "filename": fname,
                     "path":     full,
                     "rel_path": os.path.relpath(full, folder_path),
@@ -364,6 +367,85 @@ def _detect_fp_type(filename_lower):
     if "md5" in filename_lower:
         return "md5"
     return "other"
+
+
+# A checksum file is not obliged to announce itself in its filename. Ryan hit
+# a show whose md5 list was named `AoifeODonovan2012-08-19_MCE400_16bit.txt`,
+# sitting beside the real info file `Aoife O'Donovan Band.txt` (2026-08-02).
+# Nothing in that name matches FINGERPRINT_MARKERS, so it was filed as a text
+# candidate — and then WON the info-file scoring, because _score_text_file
+# awards +5 for a date pattern in the name and the genuine info file scored 0.
+# The ingest form came up with a 32-hex hash in the Venue box.
+#
+# Two bugs in one: the wrong file was read for metadata, AND the checksums were
+# never registered, so that recording would have ingested unverified.
+#
+# The fix is to look INSIDE the file rather than trust its name. Content is the
+# authority; the filename is a hint.
+_FP_SNIFF_MAX_BYTES = 262144   # a checksum list is tiny; a big .txt is prose
+_FP_SNIFF_MIN_LINES = 2
+_FP_SNIFF_RATIO     = 0.6      # share of non-blank lines that must be checksums
+_HEX32_AT_END       = re.compile(r"[0-9a-fA-F]{32}\s*$")
+
+
+def _sniff_fingerprint_type(path):
+    """
+    Read a .txt and decide whether it is really a checksum list. Returns
+    "ffp" / "md5" / None.
+
+    Reuses checksums.parse_checksum_file() rather than inventing a second
+    line format — that parser already tolerates every delimiter the community
+    tools emit (colon, tab, double space, "*"-prefixed filename), and having
+    two disagreeing notions of "is this a checksum line" is exactly the kind of
+    split-brain that produces bugs like this one.
+
+    The RATIO test is what keeps an info file that happens to quote a few
+    hashes from being swallowed: a genuine checksum list is essentially nothing
+    but hashes, while a setlist with a lineage note is mostly prose.
+    """
+    try:
+        if os.path.getsize(path) > _FP_SNIFF_MAX_BYTES:
+            return None
+        content = _read_text_auto(path)
+    except OSError:
+        return None
+    if not content:
+        return None
+
+    lines = [ln for ln in (l.strip() for l in content.splitlines()) if ln]
+    if len(lines) < _FP_SNIFF_MIN_LINES:
+        return None
+
+    from app.utils.checksums import parse_checksum_file
+    entries = parse_checksum_file(content)
+    if len(entries) < _FP_SNIFF_MIN_LINES or len(entries) < _FP_SNIFF_RATIO * len(lines):
+        return None
+
+    # Shape tells the two apart. ffp puts the hash LAST ("track.flac:abc123…");
+    # md5sum puts it FIRST ("abc123… *track.flac"). Never guess st5 from
+    # content — st5 is byte-identical to ffp, and it is the lowest-priority
+    # type (see FINGERPRINT_TYPE_PRIORITY), so guessing it would demote a
+    # perfectly good ffp. Ryan's standing preference: trust ffp and md5.
+    trailing = sum(1 for ln in lines if _HEX32_AT_END.search(ln))
+    return "ffp" if trailing >= len(entries) * 0.5 else "md5"
+
+
+def fingerprint_type_for_file(path, filename_lower=None):
+    """
+    The single answer to "is this file a checksum list, and of what type?".
+
+    Filename markers first (explicit and cheap), then a content sniff for the
+    .txt files that carry no marker. Shared by scan_folder() and
+    discover_fingerprint_files() so a fresh ingest and a post-hoc backfill
+    classify the same file identically — which the latter's docstring has
+    always promised.
+    """
+    low = filename_lower if filename_lower is not None else os.path.basename(path).lower()
+    if any(m in low for m in FINGERPRINT_MARKERS):
+        return _detect_fp_type(low)
+    if low.endswith(TEXT_EXTENSION):
+        return _sniff_fingerprint_type(path)
+    return None
 
 
 # ── FLAC tag reading ───────────────────────────────────────────────────────────

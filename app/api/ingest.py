@@ -10,6 +10,7 @@ This avoids the frontend needing to pre-resolve IDs. The user just
 provides names and dates; this endpoint does the lookup/create work.
 """
 
+import re
 import os
 import json
 from datetime import datetime, timezone
@@ -112,6 +113,73 @@ def _run_ai_job(job_id, folder_path, current, api_key, model, *, recording_id=No
         _AI_JOBS[job_id] = {"status": "error", "error": "Unexpected error: %s" % e}
 
 
+# How close two act names must read before they count as the same act. 0.85 is
+# the threshold parse_info_file() already uses for fuzzy artist/venue matching
+# — deliberately the same number, so the ingest form and the duplicate check
+# never disagree about whether two names are "the same".
+_PERFORMER_SIMILARITY = 0.85
+
+# Words that decorate an act name without changing who it is. "Aoife O'Donovan"
+# and "Aoife O'Donovan Band" are one act to a collector and two rows in the DB,
+# which is exactly the variant Ryan asked this to catch (2026-08-02).
+_ACT_NOISE_WORDS = {"band", "trio", "quartet", "quintet", "group", "ensemble",
+                    "orchestra", "the", "and", "with", "featuring", "feat"}
+
+
+def _act_key(name):
+    """Normalise an act name down to the words that identify it."""
+    words = re.sub(r"[^\w\s]", " ", (name or "").lower()).split()
+    core  = [w for w in words if w not in _ACT_NOISE_WORDS]
+    return " ".join(core or words)
+
+
+def resolve_similar_performer_ids(artist_name):
+    """
+    Every Performer that plausibly IS the act named `artist_name`.
+
+    Three widening passes, because a duplicate that goes unnoticed costs an
+    accidental re-ingest and a duplicate flagged wrongly costs one glance:
+
+      1. exact, case-insensitive — what resolve_or_create_performer() does, so
+         this can never disagree with what Confirm would actually resolve to
+      2. same normalised core after stripping act-noise words, so
+         "Aoife O'Donovan" finds "Aoife O'Donovan Band"
+      3. difflib ratio >= 0.85 on the core, catching spelling and punctuation
+         drift ("Bela Fleck" / "Béla Fleck")
+
+    Then the ARTIST (person) side: if a person of that name exists, every
+    Performer they are a member of counts too — Ryan asked for "performer or
+    artist, or a similar variant of either", and the 07-11 remodel makes those
+    genuinely different tables.
+    """
+    from difflib import SequenceMatcher
+
+    name = (artist_name or "").strip()
+    if not name:
+        return []
+
+    ids  = set()
+    key  = _act_key(name)
+    rows = db.session.query(Performer.id, Performer.name).all()
+
+    for pid, pname in rows:
+        if pname and pname.lower() == name.lower():
+            ids.add(pid)
+            continue
+        pkey = _act_key(pname)
+        if not pkey or not key:
+            continue
+        if pkey == key or SequenceMatcher(None, pkey, key).ratio() >= _PERFORMER_SIMILARITY:
+            ids.add(pid)
+
+    person = db.session.query(Artist).filter(
+        func.lower(Artist.name) == name.lower()).first()
+    if person:
+        ids.update(m.performer_id for m in person.memberships)
+
+    return sorted(ids)
+
+
 @bp.route("/check-existing", methods=["GET"])
 @login_required
 def check_existing():
@@ -138,14 +206,12 @@ def check_existing():
     if not artist_name or not year:
         return jsonify({"performer_found": False, "performances": []})
 
-    performer = db.session.query(Performer).filter(
-        func.lower(Performer.name) == artist_name.lower()
-    ).first()
-    if not performer:
+    performer_ids = resolve_similar_performer_ids(artist_name)
+    if not performer_ids:
         return jsonify({"performer_found": False, "performances": []})
 
     q = db.session.query(Performance).filter(
-        Performance.performer_id == performer.id,
+        Performance.performer_id.in_(performer_ids),
         Performance.start_year == year,
     )
     if month:
@@ -162,6 +228,10 @@ def check_existing():
             "id":    p.id,
             "date":  format_partial_date(p.start_year, p.start_month, p.start_day),
             "venue": v.name if v else None,
+            # Which act it actually matched, so a fuzzy/variant hit is never
+            # mistaken for an exact one ("Aoife O'Donovan Band" vs "Aoife
+            # O'Donovan" are different rows and the user must see which).
+            "performer": p.performer.name if p.performer else None,
             "recordings": [
                 {
                     "id":          r.id,

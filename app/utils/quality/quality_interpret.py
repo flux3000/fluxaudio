@@ -248,6 +248,34 @@ METRICS = [
                   (-2,  "ok",   "Slightly thin"),
                   (99,  "poor", "Thin, no bass")],
     }),
+    ("hf_energy_ratio_db", {
+        # Added to the display 2026-08-02. It has been 50% of the Tone score
+        # since the 07-31 rework but appeared in no panel, so Tone showed one
+        # of its two real inputs — invisible until metrics were nested under
+        # their group and the hole became obvious.
+        #
+        # Rungs are drawn from the 110-recording labelled corpus
+        # (tools/quality/labelled_corpus.json) and aligned to the knees of the
+        # HF_RATIO curve in quality_scoring.py, so the words and the score
+        # cannot disagree. Corpus: min -59.7, p10 -44.4, p25 -39.2, median
+        # -31.3, p75 -25.9, p90 -22.3, max -11.2; r = +0.31 against grade,
+        # the strongest single tonal predictor measured.
+        #
+        # Grade means bear the rungs out: A+ -29.7, A -29.9, A- -36.1,
+        # B+ -34.3, B -39.3. The A/B separation sits right around -35.
+        "label": "HF energy ratio", "unit": " dB",
+        "about": "Energy above 8 kHz relative to the whole signal — whether "
+                 "there is any top end at all, as opposed to where it stops "
+                 "(that is Frequency cutoff). Half the Tone score. Restored to "
+                 "scoring 2026-07-28 after the engine proved unable to see "
+                 "'this recording has no treble': the 1992 Danny Gatton tape "
+                 "Ryan calls 'made inside a cigar box' reads -48.5 dB here.",
+        "scale": [(-50, "bad",  "Almost no top end"),
+                  (-40, "poor", "Little treble"),
+                  (-32, "ok",   "Modest treble"),
+                  (-24, "good", "Healthy top end"),
+                  (99,  "good", "Full, open treble")],
+    }),
     ("mid_snr_db", {
         "label": "Signal-to-noise", "unit": " dB",
         "about": "How far the music sits above the noise floor across 1–8 kHz "
@@ -322,6 +350,44 @@ METRICS = [
 # stored (it falls out of the hum measurement for free) but nothing reads it.
 
 
+# Which group each metric belongs under, and whether it actually MOVES that
+# group's score (2026-08-02, Ryan: "are these groupable into the three
+# categories?"). Mostly yes — with two honest exceptions kept in "other",
+# because filing them under a group would imply they contribute to it.
+#
+#   scored=True   this feature is an input to score_<group>() — see
+#                 quality_scoring.py, which is the authority here
+#   scored=False  measured and displayed, weight 0
+#
+# The zero-weight ones are not filler. Presence balance and midrange scoop were
+# 60% of Tone until 2026-07-31, when 113 graded recordings showed they carry no
+# signal (r = +0.057 / −0.016) and that presence was the cause of the Gatton
+# inversion. Hum was 35% of Noise on the same evidence (r = −0.038). They stay
+# visible because they are true measurements — they are simply not evidence of
+# quality, and the panel now says which is which rather than showing eleven
+# numbers of apparently equal standing.
+METRIC_GROUP = {
+    "spectral_tilt_db_oct":     ("tone", True),
+    "hf_energy_ratio_db":       ("tone", True),
+    "presence_balance_db":      ("tone", False),
+    "midrange_scoop_db":        ("tone", False),
+    "hf_edge_hz":               ("tone", False),
+    "mid_snr_db":               ("noise", True),
+    "crowd_snr_db":             ("noise", True),
+    "noise_nonstationarity_db": ("noise", False),
+    "modulation_index":         ("noise", False),
+    "hum_ratio_db":             ("noise", False),
+    "crest_factor_db":          ("dynamics", True),
+    "lufs_integrated":          ("dynamics", False),
+    # Filed under Dynamics rather than left ungrouped (Ryan, 2026-08-02: group
+    # them all). It is the honest closest fit — DC offset is a level-domain
+    # fault that eats headroom, which is Dynamics' territory — but it is a
+    # converter/preamp defect rather than a musical reading, and it never
+    # affects the score. The "not scored" marker on the row carries that.
+    "dc_offset":                ("dynamics", False),
+}
+
+
 def metric_rows(f):
     """Build display rows for the Advanced Metrics panel."""
     rows = []
@@ -335,10 +401,12 @@ def metric_rows(f):
             if cmpv < bound:
                 state, desc = st, d
                 break
+        group, scored = METRIC_GROUP.get(key, ("other", False))
         rows.append({
             "key": key, "label": m["label"], "value": v, "unit": m["unit"],
             "dp": m.get("dp"), "abs": bool(m.get("abs")),
             "state": state, "verdict": desc, "about": m["about"],
+            "group": group, "scored": scored,
             "scale": [{"upto": b, "state": s2, "text": d} for b, s2, d in m["scale"]],
         })
     return rows

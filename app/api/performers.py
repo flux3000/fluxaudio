@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models.performer import Performer, PerformerResource
+from app.models.genre import Genre
 from app.models.artist import Artist, Membership
 from app.models.performance import Performance
 from app.models.recording import Recording
@@ -110,6 +111,10 @@ def list_performers():
             "sort_name":       p.sort_name,
             "recording_count": rc,
             "members":         [a.name for a in p.artists],
+            # Genre (2026-08-02) — id + name only, powers the bulk assignment
+            # screen's "unassigned only" filter and pre-fill.
+            "genre_id":        p.genre_id,
+            "genre_name":      p.genre.name if p.genre else None,
         }
         for p, rc in rows
     ])
@@ -182,6 +187,9 @@ def get_performer(performer_id):
         "resources": [{"id": r.id, "label": r.label, "url": r.url} for r in p.resources],
         "has_image": bool(p.image_ext),
         "dossier":   json.loads(p.dossier_json) if p.dossier_json else None,
+        # Genre (2026-08-02) — a proper dimension, one FK, nullable. null
+        # until Ryan assigns one by hand (no AI suggestion for this field).
+        "genre":     {"id": p.genre.id, "name": p.genre.name} if p.genre else None,
     })
 
 
@@ -251,6 +259,11 @@ def update_performer(performer_id):
     data = request.get_json()
     if "default_personnel_mode" in data and data["default_personnel_mode"] not in ("inherit", "explicit"):
         return jsonify({"error": "default_personnel_mode must be 'inherit' or 'explicit'"}), 400
+    if "genre_id" in data:
+        gid = data["genre_id"]
+        if gid is not None and not db.session.get(Genre, gid):
+            return jsonify({"error": "genre not found"}), 400
+        p.genre_id = gid
     for f in ["name", "sort_name", "bio", "default_personnel_mode"]:
         if f in data:
             setattr(p, f, data[f])
