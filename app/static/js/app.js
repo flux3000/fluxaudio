@@ -5985,9 +5985,20 @@ const App = (() => {
             </select>
           </label>
         </div>
+        ${_lqDoneStripHtml()}
         <div class="lq-cards" id="lq-cards">
-          ${lq.rows.length ? lq.rows.map(_lqCard).join('')
-                           : `<div class="empty-state">Nothing to show.</div>`}
+          ${lq.rows.length ? lq.rows.map(_lqCard).join('') : (
+            // Draining to empty is now the NORMAL end state, since finished
+            // shows leave the queue. "Nothing to show" read like a failure.
+            lq.log.some(l => l.status === 'done')
+              ? `<div class="empty-state">
+                   <div class="empty-title">All done</div>
+                   <div class="empty-sub">Everything in this folder has been added to your library.</div>
+                 </div>`
+              : `<div class="empty-state">
+                   <div class="empty-title">Nothing to ingest here</div>
+                   <div class="empty-sub">No audio folders were found under this directory.</div>
+                 </div>`)}
         </div>
       </div>`)
 
@@ -6189,6 +6200,43 @@ const App = (() => {
   // What "Ingest all" will actually act on. One definition, used by both the
   // button's count and the loop, so the number on the button can never promise
   // more than the loop delivers.
+  // Drop a successfully-ingested show from the queue entirely (Ryan,
+  // 2026-08-07). It used to stay in the list wearing a "✓ Ingested" badge AND
+  // holding whatever panel you had expanded before you walked into the review
+  // — so returning from an ingest showed the show you just finished, still
+  // open, at the top of the work you had left. The queue is the remaining
+  // work; a finished show is not remaining work.
+  //
+  // Only on SUCCESS. Errors and cancellations stay put, because those are
+  // still work to do and hiding them would hide the problem.
+  //
+  // Also clears the per-row caches: leaving them keyed by folder_path means a
+  // re-scan of the same directory re-opens the panel you closed months ago.
+  // "Added this session" strip. Cards leave the queue on success, so without
+  // this the only feedback for a completed ingest would be the list quietly
+  // getting shorter. Driven by lq.log, which already records every outcome.
+  function _lqDoneStripHtml() {
+    const done = lq.log.filter(l => l.status === 'done')
+    const bad  = lq.log.filter(l => l.status === 'error')
+    if (!done.length && !bad.length) return ''
+    return `
+      <div class="lq-donestrip">
+        ${done.length ? `
+          <span class="lq-donestrip-n">✓ ${done.length} added this session</span>
+          <span class="lq-donestrip-list">${done.slice(-6).map(l =>
+            l.recording_id
+              ? `<a href="#/recording/${l.recording_id}">${esc(l.name)}</a>`
+              : `<span>${esc(l.name)}</span>`).join('<span class="rec-card-dot">·</span>')}</span>` : ''}
+        ${bad.length ? `<span class="lq-donestrip-err">${bad.length} failed</span>` : ''}
+      </div>`
+  }
+
+  function _lqRemoveRow(folderPath) {
+    lq.rows = lq.rows.filter(r => r.folder_path !== folderPath)
+    lq.expanded.delete(folderPath)
+    lq.features.delete(folderPath)
+  }
+
   function _lqIngestable(r) {
     return !r.error
         && !r._pending
@@ -6247,7 +6295,10 @@ const App = (() => {
         ? { folder_path: row.folder_path, name: row.name, status: 'cancelled' }
         : { folder_path: row.folder_path, name: row.name,
             status: 'done', recording_id: result.recording_id })
-      if (result) invalidateDims()
+      if (result) {
+        invalidateDims()
+        _lqRemoveRow(row.folder_path)   // finished work leaves the queue
+      }
       return result
     } catch (err) {
       lq.activeJob = null
@@ -7950,12 +8001,15 @@ const App = (() => {
           // shows "✓ Ingested / View" rather than offering to ingest a folder
           // that is already in the library — which is exactly what produced
           // the "Already in your library" warning on re-entry (2026-07-31).
-          if (ingest.fromTriage &&
-              !lq.log.some(l => l.folder_path === ingest.folderPath)) {
+          if (ingest.fromTriage) {
             const row = lq.rows.find(r => r.folder_path === ingest.folderPath)
-            lq.log.push({ folder_path: ingest.folderPath,
-                          name: row?.name || ingest.folderPath,
-                          status: 'done', recording_id: result.recording_id })
+            if (!lq.log.some(l => l.folder_path === ingest.folderPath)) {
+              lq.log.push({ folder_path: ingest.folderPath,
+                            name: row?.name || ingest.folderPath,
+                            status: 'done', recording_id: result.recording_id })
+            }
+            // Gone from the queue, not merely badged — see _lqRemoveRow.
+            _lqRemoveRow(ingest.folderPath)
           }
 
           if (after === 'view') {

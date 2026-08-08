@@ -65,15 +65,31 @@ def _throttle():
 
 
 def _get_json(url):
+    """
+    GET and parse one MediaWiki API response, or None.
+
+    IMPORTANT: MediaWiki returns HTTP 200 for parameter errors, with the problem
+    in an `error` key. Treating that as data is how a broken request became
+    "this artist has no photo" for every artist at once (2026-08-08 — the
+    wbgetclaims `property` bug below). Errors are now surfaced at WARNING, not
+    swallowed: a systematic failure has to look different from an ordinary miss.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
         _throttle()
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
             ValueError, OSError) as e:
         log.info("commons/wikidata fetch failed (%s): %s", url, e)
         return None
+
+    if isinstance(data, dict) and data.get("error"):
+        err = data["error"]
+        log.warning("commons/wikidata API error (%s): %s — %s", url,
+                    err.get("code"), err.get("info"))
+        return None
+    return data
 
 
 def qid_from_links(links):
@@ -106,12 +122,20 @@ def image_filenames_for_qid(qid):
     """
     if not qid:
         return []
-    url = ("https://www.wikidata.org/w/api.php?action=wbgetclaims"
-           f"&entity={urllib.parse.quote(qid)}&property=P18|P373&format=json")
+    # wbgetentities, NOT wbgetclaims (fixed 2026-08-08). wbgetclaims' `property`
+    # parameter takes a SINGLE property id; the pipe-joined "P18|P373" this used
+    # to send failed parameter validation, and MediaWiki reports that as HTTP 200
+    # with an `error` body and no `claims` key — which read as "no images" for
+    # every artist in the library. wbgetentities accepts many properties at once
+    # and is the right call for wanting two of them.
+    url = ("https://www.wikidata.org/w/api.php?action=wbgetentities"
+           f"&ids={urllib.parse.quote(qid)}&props=claims&format=json")
     data = _get_json(url)
     if not data:
         return []
-    claims = data.get("claims") or {}
+    entities = data.get("entities") or {}
+    entity = entities.get(qid) or (next(iter(entities.values()), {}) if entities else {})
+    claims = entity.get("claims") or {}
 
     names = []
     for claim in claims.get("P18", []):

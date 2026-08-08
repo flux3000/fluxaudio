@@ -100,8 +100,43 @@ def test_file_info_none_for_empty_filename():
 
 def test_image_filenames_from_p18(monkeypatch):
     monkeypatch.setattr(commons, "_get_json", lambda url: {
-        "claims": {"P18": [{"mainsnak": {"datavalue": {"value": "The Meters 1974.jpg"}}}]}})
+        "entities": {"Q1": {"claims": {
+            "P18": [{"mainsnak": {"datavalue": {"value": "The Meters 1974.jpg"}}}]}}}})
     assert commons.image_filenames_for_qid("Q1") == ["The Meters 1974.jpg"]
+
+
+def test_uses_wbgetentities_not_wbgetclaims(monkeypatch):
+    """Regression guard for 2026-08-08.
+
+    wbgetclaims' `property` parameter takes ONE property id. Asking it for
+    "P18|P373" failed validation, and MediaWiki reports that as HTTP 200 with an
+    `error` body — which read as "no images" for every artist in the library.
+    Two properties means wbgetentities.
+    """
+    seen = {}
+    def fake(url):
+        seen["url"] = url
+        return {"entities": {"Q1": {"claims": {}}}}
+    monkeypatch.setattr(commons, "_get_json", fake)
+    commons.image_filenames_for_qid("Q1")
+    assert "wbgetentities" in seen["url"]
+    assert "wbgetclaims" not in seen["url"]
+
+
+def test_api_error_body_is_not_treated_as_data(monkeypatch):
+    """MediaWiki returns 200 with an `error` key for bad parameters. Reading
+    that as an empty result is what made a broken request indistinguishable
+    from an artist with no photo."""
+    import urllib.request
+
+    class FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            return b'{"error":{"code":"param-illegal","info":"bad property"}}'
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    monkeypatch.setattr(commons, "_throttle", lambda: None)
+    assert commons._get_json("http://x") is None
 
 
 def test_image_filenames_include_category_after_p18(monkeypatch):
@@ -111,10 +146,10 @@ def test_image_filenames_include_category_after_p18(monkeypatch):
     another one" would have nowhere to go.
     """
     def fake(url):
-        if "wbgetclaims" in url:
-            return {"claims": {
+        if "wbgetentities" in url:
+            return {"entities": {"Q1": {"claims": {
                 "P18":  [{"mainsnak": {"datavalue": {"value": "Main.jpg"}}}],
-                "P373": [{"mainsnak": {"datavalue": {"value": "The Meters"}}}]}}
+                "P373": [{"mainsnak": {"datavalue": {"value": "The Meters"}}}]}}}}
         return {"query": {"categorymembers": [
             {"title": "File:Main.jpg"},          # dupe of P18 — must collapse
             {"title": "File:Live 1976.jpg"},
@@ -126,7 +161,8 @@ def test_image_filenames_include_category_after_p18(monkeypatch):
 
 def test_image_filenames_empty_when_entity_has_no_image(monkeypatch):
     """Very common — most Wikidata entities carry no P18 at all."""
-    monkeypatch.setattr(commons, "_get_json", lambda url: {"claims": {}})
+    monkeypatch.setattr(commons, "_get_json",
+                        lambda url: {"entities": {"Q1": {"claims": {}}}})
     assert commons.image_filenames_for_qid("Q1") == []
 
 
