@@ -616,8 +616,28 @@ def browse():
     if not any(real == r or real.startswith(r + os.sep) or r.startswith(real + os.sep)
                or real == "/" for r in roots):
         return jsonify({"error": "Outside the permitted import roots"}), 403
+    # WALK UP RATHER THAN FAIL (2026-08-07). A remembered path routinely stops
+    # existing: ingesting the last show of an act moves its folder into the
+    # library and the empty-parent cleanup removes the act folder behind it. A
+    # 400 here stranded the picker on a path it could never load. Climbing to
+    # the nearest surviving ancestor puts the user somewhere useful instead,
+    # and `redirected_from` lets the UI say why it moved.
+    redirected_from = None
     if not os.path.isdir(path):
-        return jsonify({"error": f"Not a folder: {path}"}), 400
+        redirected_from = path
+        probe = os.path.dirname(path)
+        while probe and probe != "/" and not os.path.isdir(probe):
+            probe = os.path.dirname(probe)
+        fallback = current_app.config.get("IMPORT_DIR") or "/"
+        path = probe if (probe and os.path.isdir(probe)) else fallback
+        if not os.path.isdir(path):
+            return jsonify({"error": f"Not a folder: {redirected_from}"}), 400
+        # Re-check the roots guard for wherever we landed — climbing must not
+        # become a way out of IMPORT_ROOTS.
+        real = os.path.realpath(path)
+        if not any(real == r or real.startswith(r + os.sep) or r.startswith(real + os.sep)
+                   or real == "/" for r in roots):
+            return jsonify({"error": "Outside the permitted import roots"}), 403
     try:
         entries = sorted(os.listdir(path), key=lambda s: s.lower())
     except PermissionError:
@@ -637,6 +657,10 @@ def browse():
     parent = os.path.dirname(path.rstrip(os.sep)) or "/"
     return jsonify({
         "path": path,
+        # Set when the requested folder had vanished and we climbed to an
+        # ancestor — the picker uses it to explain the jump rather than
+        # silently showing somewhere else.
+        "redirected_from": redirected_from,
         "parent": None if parent == path else parent,
         "dirs": dirs,
         "here_has_audio": any(e.lower().endswith(AUDIO_EXT) for e in entries),

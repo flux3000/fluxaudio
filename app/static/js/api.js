@@ -178,6 +178,23 @@ const API = (() => {
       create: (data)     => post('/api/venues/', data),
       update: (id, data) => put(`/api/venues/${id}`, data),
       remove: (id)       => request('DELETE', `/api/venues/${id}`),
+
+      // Photos (2026-08-07) — same shapes and semantics as performers, sharing
+      // one server-side implementation (app/utils/entity_images.py), so the
+      // frontend gallery component works against either namespace unchanged.
+      imageUrl:        (imageId) => `/api/venues/images/${imageId}`,
+      listImages:      (id)      => get(`/api/venues/${id}/images`),
+      uploadImages:    async (id, files) => {
+        const form = new FormData()
+        for (const f of Array.from(files)) form.append('image', f)
+        const res = await fetch(`/api/venues/${id}/images`,
+          { method: 'POST', body: form, credentials: 'same-origin' })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        return data
+      },
+      setPrimaryImage: (imageId) => post(`/api/venues/images/${imageId}/primary`),
+      removeImage:     (imageId) => request('DELETE', `/api/venues/images/${imageId}`),
     },
 
     // ── Genres ───────────────────────────────────────────────────────────────

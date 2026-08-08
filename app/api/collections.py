@@ -31,7 +31,11 @@ def get_collection(collection_id):
     c = db.session.get(Collection, collection_id)
     if not c:
         return jsonify({"error": "Not found"}), 404
-    rows = [recording_row(l.recording) for l in c.recording_links]
+    # card=True: the collection page renders handbill cards (Ryan, 2026-08-07),
+    # which need the performer's genre colour and primary photo. Collections
+    # are small — a few dozen rows — so the extra joins are cheap here in a way
+    # they would not be on the 544-row flat List.
+    rows = [recording_row(l.recording, card=True) for l in c.recording_links]
     rows.sort(key=lambda r: ((r["performer"] or "").lower(),
                              r["start_year"] or 0, r["start_month"] or 0, r["start_day"] or 0))
     return jsonify({"id": c.id, "name": c.name, "description": c.description, "recordings": rows})

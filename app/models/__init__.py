@@ -6,6 +6,7 @@ from .performer import Performer, PerformerResource
 from .performer_image import PerformerImage
 from .artist import Artist, Membership
 from .venue import Venue
+from .venue_image import VenueImage
 from .event import Event
 from .performance import Performance
 from .performance_personnel import PerformancePersonnel

@@ -13,14 +13,14 @@ from pathlib import Path
 
 import json
 
-from flask import Blueprint, jsonify, request, send_file, current_app
+from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy import func
-from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models.performer import Performer, PerformerResource
-from app.models.performer_image import PerformerImage, set_primary
+from app.models.performer_image import PerformerImage
+from app.utils.entity_images import set_primary
 from app.models.genre import Genre
 from app.models.artist import Artist, Membership
 from app.models.performance import Performance
@@ -32,14 +32,16 @@ from app.utils.performers import (
     update_membership_stint_bounds, remove_membership_stint,
 )
 from app.utils import musicbrainz, commons
+from app.utils import entity_images as ei
 from app.utils.performer_research import run_performer_research
 from app.utils.ai_assist import AiAssistError
 from app.utils.prefs import get_api_key, get_pref
 
 bp = Blueprint("performers", __name__)
 
-_ALLOWED_IMAGE_EXTS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                       ".png": "image/png", ".webp": "image/webp"}
+# Canonical list lives in utils/entity_images so both image tables accept the
+# same formats. Aliased here for the Commons fetch path below.
+_ALLOWED_IMAGE_EXTS = ei.ALLOWED_IMAGE_EXTS
 
 
 def _performer_images_dir(performer):
@@ -469,15 +471,13 @@ def musicbrainz_members(performer_id):
 # route mean on write?", and every answer is a silent surprise once a performer
 # has several.
 
+_IMG_URL = "/api/performers/images"
+
+
 def _image_payload(img):
-    return {
-        "id":         img.id,
-        "is_primary": bool(img.is_primary),
-        "origin":     img.origin,
-        "caption":    img.caption,
-        "credit":     img.credit,
-        "url":        f"/api/performers/images/{img.id}",
-    }
+    """Thin alias — the shape lives in utils/entity_images so both image tables
+    serialize identically."""
+    return ei.image_payload(img, _IMG_URL)
 
 
 @bp.route("/<int:performer_id>/images", methods=["GET"])
@@ -493,61 +493,18 @@ def list_performer_images(performer_id):
 @login_required
 def upload_performer_images(performer_id):
     """
-    Upload one or more images. Accepts repeated `image` parts so the drag-and-
-    drop UI can send a whole dropped selection in a single request.
+    Upload one or more images. Accepts repeated `image` parts so drag-and-drop
+    can send a whole dropped selection in a single request.
 
-    The FIRST image a performer ever gets becomes primary automatically —
-    otherwise a fresh upload would leave the card faceless until someone
-    remembered to flag it, which is a pointless extra step in the overwhelmingly
-    common case of exactly one photo.
+    Body lives in app/utils/entity_images.py (2026-08-07) so Performer and Venue
+    photo management cannot drift apart in behaviour — first-image-becomes-
+    primary, partial-success reporting and random basenames are all decided
+    there, once.
     """
     p = db.session.get(Performer, performer_id)
     if not p:
         return jsonify({"error": "Not found"}), 404
-
-    files = [f for f in request.files.getlist("image") if f and f.filename]
-    if not files:
-        return jsonify({"error": "No image file provided"}), 400
-
-    images_dir = _performer_images_dir(p)
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    had_any = bool(p.images)
-    next_order = (max((i.sort_order for i in p.images), default=-1)) + 1
-
-    created, errors = [], []
-    for f in files:
-        ext = os.path.splitext(secure_filename(f.filename))[1].lower()
-        if ext not in _ALLOWED_IMAGE_EXTS:
-            errors.append(f"{f.filename}: unsupported type '{ext}' — use jpg, png, or webp")
-            continue
-
-        # Random basename, not the uploaded one: two files named cover.jpg from
-        # different folders must not collide, and the original name carries no
-        # meaning here (unlike audio, where collectors encode lineage in it).
-        fname = f"img_{secrets.token_hex(6)}{ext}"
-        f.save(str(images_dir / fname))
-
-        img = PerformerImage(performer_id=p.id, filename=fname, ext=ext,
-                             sort_order=next_order, origin="upload")
-        next_order += 1
-        db.session.add(img)
-        created.append(img)
-
-    if not created:
-        return jsonify({"error": "; ".join(errors)}), 400
-
-    db.session.flush()          # need ids before set_primary can compare them
-    if not had_any:
-        set_primary(created[0])
-    db.session.commit()
-
-    out = {"images": [_image_payload(i) for i in created]}
-    if errors:
-        # Partial success is a 200 with the failures listed, not a 400: a drop
-        # of 5 photos where 1 is a .heic should still land the other 4.
-        out["errors"] = errors
-    return jsonify(out)
+    return ei.handle_upload(p, PerformerImage, _performer_images_dir(p), _IMG_URL)
 
 
 @bp.route("/<int:performer_id>/images/fetch", methods=["POST"])
@@ -611,20 +568,12 @@ def fetch_performer_image(performer_id):
 @bp.route("/images/<int:image_id>", methods=["GET"])
 @login_required
 def serve_performer_image(image_id):
-    """
-    Serve one image by its own id.
-
-    Keyed on the image rather than the performer so a card can request exactly
-    the photo the serializer named, with no second lookup and no ambiguity
-    about which of several it means.
-    """
+    """Serve one image by its own id — keyed on the image rather than the
+    performer, so a card can request exactly the photo the serializer named."""
     img = db.session.get(PerformerImage, image_id)
     if not img:
         return jsonify({"error": "No image"}), 404
-    path = _performer_images_dir(img.performer) / img.filename
-    if not path.exists():
-        return jsonify({"error": "Image file missing on disk"}), 404
-    return send_file(str(path), mimetype=_ALLOWED_IMAGE_EXTS.get(img.ext, "image/jpeg"))
+    return ei.handle_serve(img, _performer_images_dir(img.performer))
 
 
 @bp.route("/images/<int:image_id>/primary", methods=["POST"])
@@ -633,16 +582,16 @@ def make_performer_image_primary(image_id):
     img = db.session.get(PerformerImage, image_id)
     if not img:
         return jsonify({"error": "Not found"}), 404
-    set_primary(img)
+    ei.set_primary(img)
     db.session.commit()
-    return jsonify(_image_payload(img))
+    return jsonify(ei.image_payload(img, _IMG_URL))
 
 
 @bp.route("/images/<int:image_id>", methods=["PUT"])
 @login_required
 def update_performer_image(image_id):
-    """Edit caption/credit. Credit matters once auto-fetched images land —
-    a CC-licensed Commons photo carries an attribution requirement."""
+    """Edit caption/credit. Credit matters for fetched images — a CC-licensed
+    Commons photo carries an attribution requirement."""
     img = db.session.get(PerformerImage, image_id)
     if not img:
         return jsonify({"error": "Not found"}), 404
@@ -652,50 +601,16 @@ def update_performer_image(image_id):
     if "credit" in data:
         img.credit = (data["credit"] or "").strip() or None
     db.session.commit()
-    return jsonify(_image_payload(img))
+    return jsonify(ei.image_payload(img, _IMG_URL))
 
 
 @bp.route("/images/<int:image_id>", methods=["DELETE"])
 @login_required
 def delete_performer_image(image_id):
-    """
-    Delete one image, promoting a survivor if the primary was removed.
-
-    Promotion is deliberate rather than leaving the performer primary-less: the
-    card's fallback would cover it, but then `is_primary` quietly stops meaning
-    anything and the Set-primary UI shows nothing selected.
-    """
     img = db.session.get(PerformerImage, image_id)
     if not img:
         return jsonify({"error": "Not found"}), 404
-
-    performer = img.performer
-    was_primary = bool(img.is_primary)
-    path = _performer_images_dir(performer) / img.filename
-
-    db.session.delete(img)
-    db.session.flush()
-
-    if was_primary:
-        survivor = (db.session.query(PerformerImage)
-                    .filter(PerformerImage.performer_id == performer.id)
-                    .order_by(PerformerImage.sort_order, PerformerImage.id)
-                    .first())
-        if survivor:
-            set_primary(survivor)
-
-    db.session.commit()
-
-    # File removed AFTER the DB commit: a failed unlink then leaves a harmless
-    # orphan file rather than a row pointing at nothing, and the reverse order
-    # would show a broken image if the commit rolled back.
-    try:
-        if path.exists():
-            path.unlink()
-    except OSError:
-        pass
-
-    return jsonify({"ok": True})
+    return ei.handle_delete(img, _performer_images_dir(img.performer))
 
 
 # ── Dossier — AI-drafted biography + suggested resource links (2026-07-22) ──

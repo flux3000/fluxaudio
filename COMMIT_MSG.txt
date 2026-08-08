@@ -1,72 +1,49 @@
-Handbill Browse cards, Performer page rebuild, MusicBrainz + Commons
+Ingest defaults to Move; create forms; card initials; ingest recovery
 
-Browse cards
-- Replace the waveform strip with a handbill card: gig-poster typography
-  rendered from the show's own metadata. Waveform-led cards are what the
-  Internet Archive's Live Music Archive already does. Metadata is also the
-  better-covered asset — every performance has a year and 542/544 a city,
-  against 530 with waveform data and 118 with a letter grade.
-- Date renders at full weight: for a live recording the date IS the identity.
-- Handbill is Recommended-only; Recently Added gets its own row-card layout
-  carrying the ingest date, ordered created_at DESC.
-- Card colour comes from the performer's GENRE, not source. New genre.color
-  with a picker in the Genre editor; NULL renders neutral grey.
-- Browse endpoints no longer request `waveform`; recording_row(waveform=) and
-  downsample_peaks() stay intact and tested, and a test now asserts the
-  waveform's ABSENCE (the opt-in eager-loads every track's analysis row).
+Ingest file handling now defaults to MOVE
+- Copy left the show sitting in the import folder, so a later re-scan offered
+  the same recording again and a second ingest was one click away. That is
+  where the duplicates came from. Move makes re-ingesting the same files
+  structurally impossible.
+- Changed in all three places a default was resolved: the server preference
+  fallback, the ingest confirm fallback, and the frontend's own defaults.
+  Move is now listed first in every file-handling select.
 
-Performer page
-- Rebuilt as hero + tabs (Overview / Recordings / Photos). Members move above
-  Description and list one per row with tenure visible — the stint editor was
-  previously undiscoverable.
-- AI Assist moves onto the Description header and now OVERWRITES the bio. First
-  exception to "AI suggests, human approves"; a biography is visible on landing,
-  freely editable, and nothing computes from it.
-- Strip citation markup server-side in performer_research.py so what's stored
-  is clean, not scrubbed at render time.
-- Resources reframed as "Trusted sources" — act-specific sites used as sources
-  of truth by future enrichment jobs.
+Fatal: stranded after ingesting an act's last recording
+- Ingesting the final show of an act moves its folder into the library, and the
+  empty-parent cleanup then removes the act folder. Returning to Add Recording
+  tried to re-open that path and rendered a bare error with NO ACTION — the
+  error was right, having no way out was the bug.
+- _ingestRenderFailed now offers Start over / Go to Library, and clears the
+  remembered folderPath, which is what re-broke the page on every retry.
+- Entering the review step without a scan falls back to the picker instead of
+  throwing.
+- runScan no longer returns silently when #scan-status is absent, and clears
+  the stale path on failure.
+- /api/quality/browse climbs to the nearest surviving ancestor rather than
+  returning 400, re-checking IMPORT_ROOTS after the climb, and reports
+  redirected_from so the picker can explain the jump.
 
-MusicBrainz (new)
-- app/utils/musicbrainz.py + real columns on performer, indexed mbid.
-- Runs at Performer creation on both the ingest and manual paths.
-- Never auto-picks: requires top score >=88 AND a >=12 margin, because a 100
-  with a 98 behind it is ambiguous however high the top looks. The manual
-  lookup does link when that gate is satisfied.
-- 'matched' vs 'linked' are distinct so the page can say "Matched
-  automatically" or "Linked by you" accurately.
-- Members are read-only. MB membership maps onto our stints, which is exactly
-  why it must not write — roster changes cascade into per-show personnel.
-- Disabled under TESTING; circuit breaker after 3 failures so an offline bulk
-  import can't spend minutes on DNS timeouts.
+Create forms
+- New shared renderCreateForm(), used for New venue / performer / artist. The +
+  buttons previously did two different wrong things: Venues navigated to the
+  admin LIST (a view-and-edit screen, not a create flow), and performers and
+  artists used window.prompt(). Removes _promptCreate().
+- Route ordering matters here: the /new routes must precede the
+  '#/<thing>/<id>' prefix matches or '#/artist/new' parses as id NaN.
 
-Wikimedia Commons photos (new)
-- performer_image table: many per act, one primary, origin + source_ref +
-  credit. Replaces the single image_ext slot (left in place, unread).
-- Photo fetch via Wikidata P18 -> Commons. Commons only, never Wikipedia's
-  local file namespace, which hosts non-free "fair use" images that look
-  identical in a scrape. Unreadable licence = refused, never stored with a
-  guess.
-- Repeat fetches skip filenames already imported.
+Avatars
+- Performer cards render an INITIALS disc when there is no photo, matching the
+  entity-page hero. Previously they rendered nothing, so photographed and
+  un-photographed acts produced two different card shapes — and since most
+  acts have no photo, the empty one was the common case.
+- Venue portraits and gallery tiles are square, so a place never reads as a
+  person.
 
-Backfills + shared code
-- backfill_recording_quality.py: librosa analysis and listening quality in one
-  walk of the library (both decode the same audio).
-- backfill_musicbrainz.py, backfill_performer_photos.py. All resumable.
-- Extract analyse/version-check/upsert into app/utils/analysis.py — it existed
-  in three copies and spectral_cutoff_hz was one schema change from diverging.
-- estimate_cost_cents(): pre-flight cost RANGE, not a figure.
+Venue page
+- Tab moves City -> State/Region -> Country -> Notes, and Shift-Tab back.
+  makeInlineEditable gained an optional tabTo hook; it commits, then clicks the
+  next element, reusing the one path that opens an editor.
 
-Fixes
-- .rec-row class collision: the new row cards shadowed the flat recordings
-  table's grid, wrapping every row on the Performer and Venue pages.
-- Restore the Performer page gutter lost with .performer-head.
-- Re-render the Photos pane when a MusicBrainz match lands (it was reading a
-  page-load snapshot and kept saying "match this act first").
-- Remove a duplicate members click handler that cancelled its own toggle.
-- Cost badge rendered as literal HTML via textContent.
-
-31 new tests (MusicBrainz gate + parsing, Commons licence gate), all
-network-free. NOT verified against the live MusicBrainz/Wikidata APIs — every
-fetch from the dev sandbox returned empty, so response shapes come from
-documentation and the backfill runs are first contact.
+REQUIRES: python3 scripts/migrate_add_venue_images.py (if not yet run)
+Not runtime-tested — no Flask in the dev sandbox.

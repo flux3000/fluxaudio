@@ -444,11 +444,10 @@ body {
   color: var(--t1);
 }
 
-/* ── Performer page: editable info + member artists + catalog ────────────────── */
-.performer-head {
-  padding: 28px 28px 18px;
-  border-bottom: 1px solid var(--bd-0);
-}
+/* ── Entity pages (Performer / Venue / Artist / Genre / Collection) ───────────
+   .performer-head and .pp-name-row were removed 2026-08-07 when every one of
+   these pages moved onto the shared hero + tabs shell (entityShellHtml). The
+   `pp-` prefix now means ENTITY page, not performer page. */
 /* ── Performer page: hero + tabs (rebuilt 2026-08-07) ─────────────────────────
    Replaced a single stacked column that put members, genre, the recordings
    table, resources and AI research on one scroll. Everything is now behind
@@ -468,6 +467,8 @@ body {
 /* Ring is the genre colour, tying the page to its Browse card. */
 .pp-portrait-img, .pp-portrait-blank {
   width: 104px; height: 104px; border-radius: 50%;
+  /* Venue overrides this to a square below — a place is not a person, and the
+     silhouette shape is the cheapest way to tell the two pages apart. */
   border: 3px solid var(--ring, var(--bd-1)); background: var(--bg-3);
   display: block; object-fit: cover;
 }
@@ -483,6 +484,28 @@ body {
    performer hero wants more presence without changing those. */
 .pp-hero .pp-name { font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
 
+/* Genre hero "portrait" — the colour that tints every card of its performers.
+   A genre has no likeness, but it does have this, and showing it here doubles
+   as a live preview of what the picker set. */
+/* Venue portraits and gallery tiles are SQUARE (Ryan, 2026-08-07) — rounded
+   rather than circular, so a venue never reads as a performer. */
+.venue-page .pp-portrait-img,
+.venue-page .pp-portrait-blank { border-radius: var(--r-md); }
+.venue-page .pp-ph { border-radius: var(--r-md); }
+
+/* Create forms — one look for New venue / performer / artist. Deliberately
+   narrow: these ask for a name and little else, because everything is editable
+   in place on the page the form creates. */
+.create-form { max-width: 420px; }
+.create-form .ingest-field { margin-bottom: 14px; }
+.cf-opt { color: var(--t3); font-weight: 400; }
+.create-form-actions { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
+
+.gn-swatch {
+  width: 104px; height: 104px; border-radius: 50%;
+  background: var(--genre-fg); border: 3px solid var(--bd-1);
+}
+
 .pp-hero-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
 /* .pp-genre-chip removed 2026-08-07 — the hero shows ONE genre element and it
    is the editable field (.pp-hero .pp-genre-field below), which wears this
@@ -490,6 +513,10 @@ body {
    responded to a click. */
 .pp-hero-fact { font-size: 11.5px; color: var(--t2); }
 .pp-hero-fact b { color: var(--t1); font-weight: 500; }
+
+/* Top-right actions (Delete, view toggles). A flex row so a page can put more
+   than one control there without each page inventing its own layout. */
+.pp-hero-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 .pp-hero-stats { display: flex; gap: 24px; margin-top: 14px; }
 .pp-stat-n {
@@ -756,11 +783,6 @@ body {
    portrait (.pp-portrait-*) above replace them entirely, and nothing in the
    JS referenced them any more. */
 
-.pp-name-row { display: flex; align-items: center; gap: 12px; }
-.pp-name {
-  font-size: 22px; font-weight: 500; color: var(--t0); margin: 0;
-  flex: 1; min-width: 0;
-}
 .pp-delete { margin-left: auto; color: var(--red); flex-shrink: 0; }
 
 /* Click-to-edit affordance */
@@ -5433,6 +5455,10 @@ input[type="range"].progress-bar {
    date is the point — "what's new" is the question, and the show date says
    nothing about that. Server orders newest-ingested first.                   */
 .rec-rowcard-list { display: flex; flex-direction: column; gap: 8px; }
+/* The Recently Added page uses the same row cards as the Browse module, so it
+   needs the page gutter the module inherits from .lib-modules. */
+#recent-rowcards { padding: 0 28px; }
+.recent-more { padding: 14px 28px 28px; }
 
 .rec-rowcard {
   display: grid;
@@ -5459,10 +5485,17 @@ input[type="range"].progress-bar {
 /* Reserves the avatar's width when there's no photo so the columns of a
    12-row list stay aligned — with photos on ~1 performer, a collapsing
    column would make every row start at a different x. */
-.rec-rowcard-avatar-blank {
-  width: 38px; height: 38px; border-radius: 50%; display: block;
-  border: 1px dashed var(--bd-1); opacity: .5;
+/* Initials disc — the DEFAULT avatar, not a fallback (2026-08-07). Most acts
+   have no photo, so this is what a card normally looks like; it uses the same
+   treatment as the entity-page hero so cards and pages agree. */
+.rec-card-photo--initials,
+.rec-rowcard-photo--initials {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--t2); font-weight: 500; letter-spacing: .02em;
+  background: var(--bg-2);
 }
+.rec-card-photo--initials    { font-size: 17px; }
+.rec-rowcard-photo--initials { font-size: 12px; }
 
 .rec-rowcard-date {
   font-size: 12px; font-weight: 600; color: var(--t0);

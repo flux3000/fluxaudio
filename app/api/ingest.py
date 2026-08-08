@@ -709,13 +709,18 @@ def _do_confirm(data, user_id, progress_cb=None, cancel_cb=None):
 
     # ── 6. Move / copy folder into library ────────────────────────────────────
     # Behavior precedence: explicit request payload → saved user preference →
-    # "copy" (safe default — never destroy the source unless asked to).
+    # DEFAULT "move" as of 2026-08-07 (Ryan). It was "copy" on the reasoning
+    # that never destroying the source is the safe choice — but the failure it
+    # actually produced was DUPLICATES: copy leaves the show sitting in the
+    # import folder, a later re-scan offers it again, and nothing stops a
+    # second ingest. Move makes re-ingesting the same files structurally
+    # impossible, and the source is still recoverable from the library itself.
     behavior = (data.get("behavior") or "").strip().lower()
     if behavior not in ("move", "copy"):
         pref = db.session.query(UserPreference).filter_by(
             user_id=user_id, key="ingest_file_behavior"
         ).first()
-        behavior = pref.value if pref else "copy"
+        behavior = pref.value if pref else "move"
     library_root = str(current_app.config["LIBRARY_ROOT"])
 
     tracks_in = data.get("tracks", [])

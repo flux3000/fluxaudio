@@ -170,7 +170,10 @@ const App = (() => {
                            // "Add Recording →" button now submits directly)
     folderPath: null,
     scan:       null,      // full scan API response
-    behavior:   'copy',    // 'copy' | 'move' — default copy: never destroy source unless asked
+    // 'copy' | 'move'. DEFAULT MOVE as of 2026-08-07 (Ryan): copy leaves the
+    // source in place, so a re-scan re-offers the same show and duplicates
+    // creep in. Move makes a second ingest of the same files impossible.
+    behavior:   'move',
     form: {},              // resolved metadata (populated on review step)
     tracks:     [],        // array of { track_number, title, set, duration, filename }
     // True when this review was opened via Bulk Import's "Review →" (see
@@ -819,28 +822,17 @@ const App = (() => {
 
   // Header "+ Create new" action per dimension.
   function createInDim(dim) {
+    // Every dimension now goes to a real create FORM (2026-08-07). Venues used
+    // to land on the admin list — a view-and-edit screen, not a create flow —
+    // and performers/artists used a window.prompt().
     if (dim === 'collections')     window.location.hash = '#/collection/new'
-    else if (dim === 'venues')     window.location.hash = '#/venues'
+    else if (dim === 'venues')     window.location.hash = '#/venue/new'
     else if (dim === 'genres')     window.location.hash = '#/genres'
-    else if (dim === 'performers') _promptCreate('performer')
-    else if (dim === 'artists')    _promptCreate('artist')
+    else if (dim === 'performers') window.location.hash = '#/performer/new'
+    else if (dim === 'artists')    window.location.hash = '#/artist/new'
   }
-  async function _promptCreate(kind) {
-    const name = prompt(`New ${kind} name:`)
-    if (!name || !name.trim()) return
-    try {
-      if (kind === 'performer') {
-        const p = await API.performers.create({ name: name.trim() })
-        _dimCache.performers = null; if (state.expandedDims.has('performers')) _renderDimRecords('performers')
-        window.location.hash = `#/artist/${p.id}`
-      } else {
-        const a = await API.artists.create({ name: name.trim() })
-        _dimCache.artists = null; if (state.expandedDims.has('artists')) _renderDimRecords('artists')
-        window.location.hash = `#/person/${a.id}`
-      }
-    } catch (e) { alert('Failed: ' + e.message) }
-  }
-
+  // _promptCreate() removed 2026-08-07 — every dimension now opens a real
+  // create form (renderCreateForm) instead of a window.prompt().
   async function renderSidebar() {
     const nav = document.getElementById('sidebar-nav')
     if (!nav) return
@@ -944,6 +936,17 @@ const App = (() => {
         openAddToCollectionMenu(parseInt(el.dataset.recId), e.clientX, e.clientY)
       })
     })
+    // Card surfaces get the SAME right-click menu (2026-08-07). Handbill and
+    // row cards are real anchors, so navigation already works without a click
+    // handler — but the add-to-collection menu was table-only, and cards are
+    // now the primary surface on Browse, Recently Added and Collections. That
+    // would have quietly removed the only way to file a recording.
+    container.querySelectorAll('.rec-card[data-rec-id], .rec-rowcard[data-rec-id]').forEach(el => {
+      el.addEventListener('contextmenu', e => {
+        e.preventDefault()
+        openAddToCollectionMenu(parseInt(el.dataset.recId), e.clientX, e.clientY)
+      })
+    })
     container.querySelectorAll('.rec-play-btn').forEach(btn => {
       btn.addEventListener('click', e => {
         e.stopPropagation()
@@ -1014,30 +1017,406 @@ const App = (() => {
   }
 
   // ── Collections views ────────────────────────────────────────────────────────
+  // ══ Shared entity-page shell ═══════════════════════════════════════════════
+  //
+  // Hero + tab strip + panes, used by Performer, Venue, Artist (person), Genre
+  // and Collection (Ryan, 2026-08-07). Extracted rather than copied five times:
+  // four copies is exactly the situation that produced today's three-copy
+  // analysis refactor and the .rec-row class collision, and a spacing or
+  // navigation fix should not need applying five times.
+  //
+  // NAMING: the CSS keeps its `.pp-*` prefix. It reads as "performer page" and
+  // now means "entity page" — renaming sixty-odd selectors and their JS
+  // references overnight is a large diff with real regression risk for zero
+  // behavioural gain. Treat `pp-` as the entity-page namespace.
+  //
+  // opts:
+  //   navBack   {label, hash} | null   — breadcrumb
+  //   portrait  html | ''              — left-hand hero visual (id it yourself)
+  //   title     html                   — already-escaped heading content
+  //   titleId   string                 — so callers can wire inline editing
+  //   chips     html | ''              — genre pill, facts line, etc.
+  //   stats     [[value, label], …]    — hero stat blocks
+  //   actions   html | ''              — top-right buttons (Delete, toggles)
+  //   pageClass string | ''             — extra class for per-entity tweaks
+  //                                       (Venue uses it for square portraits)
+  //   tabs      [{id, label, count, html, active}]
+  //
+  // Tabs are show/hide over already-rendered panes, never a re-fetch: that is
+  // what keeps a half-typed description or a running AI Assist job alive across
+  // a tab switch, and it is why tab state is deliberately NOT in the hash.
+  function entityShellHtml(opts) {
+    const tabs = (opts.tabs || []).filter(Boolean)
+    const activeId = (tabs.find(t => t.active) || tabs[0] || {}).id
+    const stats = opts.stats || []
+    return `
+      <div class="performer-page${opts.pageClass ? ' ' + opts.pageClass : ''}">
+        ${opts.navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="pp-back-btn">← ${esc(opts.navBack.label)}</div></div>` : ''}
+
+        <div class="pp-hero">
+          ${opts.portrait ? `<div class="pp-hero-portrait">${opts.portrait}</div>` : ''}
+          <div class="pp-hero-main">
+            <h1 class="pp-name${opts.titleEditable ? ' pp-editable' : ''}"
+                ${opts.titleId ? `id="${opts.titleId}"` : ''}
+                ${opts.titleEditable ? 'title="Click to edit"' : ''}>${opts.title}</h1>
+            ${opts.chips ? `<div class="pp-hero-chips">${opts.chips}</div>` : ''}
+            ${stats.length ? `<div class="pp-hero-stats">${stats.map(([n, l]) => `
+              <div class="pp-stat"><div class="pp-stat-n">${esc(String(n))}</div><div class="pp-stat-l">${esc(l)}</div></div>`).join('')}</div>` : ''}
+          </div>
+          ${opts.actions ? `<div class="pp-hero-actions">${opts.actions}</div>` : ''}
+        </div>
+
+        ${tabs.length > 1 ? `
+          <div class="pp-tabs" role="tablist">
+            ${tabs.map(t => `
+              <button class="pp-tab${t.id === activeId ? ' active' : ''}" data-pane="${t.id}" role="tab">${esc(t.label)}${
+                t.count != null ? `<span class="pp-tab-n">${esc(String(t.count))}</span>` : ''}</button>`).join('')}
+          </div>` : ''}
+
+        <div class="pp-panes">
+          ${tabs.map(t => `
+            <div class="pp-pane${t.id === activeId ? ' active' : ''}" data-pane="${t.id}">${t.html || ''}</div>`).join('')}
+        </div>
+      </div>`
+  }
+
+  // ══ Shared photo gallery ═══════════════════════════════════════════════════
+  //
+  // The Photos tab for any entity with images — Performer and Venue today
+  // (Ryan, 2026-08-07). Parameterised by an API namespace rather than
+  // duplicated, so make-primary, delete-promotes-a-survivor, drag-and-drop and
+  // partial-upload reporting behave identically wherever photos appear.
+  //
+  // opts:
+  //   mountId    string             — element the gallery renders into
+  //   api        object             — must expose listImages / uploadImages /
+  //                                   setPrimaryImage / removeImage / imageUrl
+  //   entityId   number
+  //   images     array              — initial list, avoids a first round-trip
+  //   fetchTile  {label, sub, run, disabledNote} | null
+  //                                  — optional extra tile (Performer's
+  //                                    Wikimedia lookup); Venue has none
+  //   onChange   fn(images)         — called after any mutation, so a hero
+  //                                   portrait or tab badge can follow along
+  //
+  // Returns { refresh() } so callers can force a reload after external changes.
+  function createPhotoGallery(opts) {
+    let images = opts.images || []
+
+    function render() {
+      const box = document.getElementById(opts.mountId)
+      if (!box) return
+      const ft = typeof opts.fetchTile === 'function' ? opts.fetchTile() : opts.fetchTile
+      box.innerHTML = `
+        <div class="pp-gal" data-gal="1">
+          ${images.map(img => `
+            <div class="pp-ph${img.is_primary ? ' is-primary' : ''}" data-img-id="${img.id}"
+                 title="${img.credit ? esc(img.credit) : ''}">
+              <img src="${opts.api.imageUrl(img.id)}" alt="" loading="lazy">
+              ${img.is_primary ? '<span class="pp-ph-tag">Primary</span>' : ''}
+              ${img.credit ? `<span class="pp-ph-credit">${esc(img.credit)}</span>` : ''}
+              <div class="pp-ph-acts">
+                ${img.is_primary ? '' : `<button type="button" class="pp-ph-btn" data-act="primary">Make primary</button>`}
+                <button type="button" class="pp-ph-btn" data-act="delete">Delete</button>
+              </div>
+            </div>`).join('')}
+          <div class="pp-drop" data-drop="1">
+            <span class="pp-drop-plus">＋</span>
+            <span>Drop photos here<br>or click to browse</span>
+            <div class="pp-drop-veil">Drop to upload</div>
+          </div>
+          ${ft ? `
+            <div class="pp-drop pp-fetch-tile${ft.run ? '' : ' is-disabled'}" data-fetch="1"
+                 ${ft.run ? '' : 'aria-disabled="true"'}>
+              <span class="pp-drop-plus">☁</span>
+              ${ft.run
+                ? `<span>${esc(ft.label)}<br><span class="pp-drop-sub">${esc(ft.sub || '')}</span></span>`
+                : `<span class="pp-drop-sub">${esc(ft.disabledNote || '')}</span>`}
+            </div>` : ''}
+        </div>
+        <input type="file" data-input="1" multiple
+               accept="image/png,image/jpeg,image/webp" style="display:none" />
+        <div class="pp-fetch-msg" data-msg="1"></div>
+        <div class="pp-gal-note">${
+          images.length
+            ? 'The primary photo is the one shown on this page and on cards.'
+            : 'No photos yet. The primary photo appears on this page and on cards.'
+        }</div>`
+
+      const input = box.querySelector('[data-input]')
+      const msg   = box.querySelector('[data-msg]')
+      input.addEventListener('change', e => { upload(e.target.files); input.value = '' })
+
+      // Delegated, and always re-fetching after a mutation rather than patching
+      // the local array: the SERVER owns the one-primary rule and the
+      // promote-on-delete rule, so mirroring them here would be a second
+      // implementation waiting to disagree with the first.
+      box.querySelector('[data-gal]').addEventListener('click', async e => {
+        const btn = e.target.closest('.pp-ph-btn')
+        if (!btn) return
+        e.preventDefault()
+        const id = Number(btn.closest('.pp-ph').dataset.imgId)
+        try {
+          if (btn.dataset.act === 'primary') await opts.api.setPrimaryImage(id)
+          else {
+            if (!confirm('Delete this photo?')) return
+            await opts.api.removeImage(id)
+          }
+          await refresh()
+        } catch (err) { alert('Failed: ' + err.message) }
+      })
+
+      const drop = box.querySelector('[data-drop]')
+      drop.addEventListener('click', () => input.click())
+      // Counter, not a boolean — dragenter/dragleave fire for every child
+      // element crossed, so a flag flickers off halfway across the tile.
+      let depth = 0
+      drop.addEventListener('dragover', e => e.preventDefault())
+      drop.addEventListener('dragenter', e => { e.preventDefault(); depth++; drop.classList.add('is-dropping') })
+      drop.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; drop.classList.remove('is-dropping') } })
+      drop.addEventListener('drop', e => {
+        e.preventDefault(); depth = 0; drop.classList.remove('is-dropping')
+        const files = Array.from(e.dataTransfer.files || []).filter(f => f.type.startsWith('image/'))
+        if (files.length) upload(files)
+      })
+
+      const fetchEl = box.querySelector('[data-fetch]')
+      if (fetchEl && ft && ft.run) {
+        fetchEl.addEventListener('click', async () => {
+          if (fetchEl.classList.contains('is-busy')) return
+          fetchEl.classList.add('is-busy')
+          msg.className = 'pp-fetch-msg'
+          msg.textContent = ft.busyNote || 'Searching…'
+          try {
+            const res = await ft.run()
+            if (!res.ok) {
+              msg.textContent = res.note || 'Nothing found.'
+              fetchEl.classList.remove('is-busy')
+              return
+            }
+            await refresh()
+            // Written AFTER refresh: that redraw would otherwise wipe it.
+            const m = document.getElementById(opts.mountId).querySelector('[data-msg]')
+            m.className = 'pp-fetch-msg is-ok'
+            m.textContent = res.note || 'Added.'
+          } catch (err) {
+            msg.className = 'pp-fetch-msg is-err'
+            msg.textContent = err.message
+            fetchEl.classList.remove('is-busy')
+          }
+        })
+      }
+    }
+
+    async function upload(files) {
+      if (!files || !files.length) return
+      try {
+        const res = await opts.api.uploadImages(opts.entityId, files)
+        await refresh()
+        // Partial success is a 200 with an `errors` list — four of five photos
+        // landing must not read as failure, but the rejected one has to say why.
+        if (res.errors && res.errors.length) alert('Some files were skipped:\n' + res.errors.join('\n'))
+      } catch (err) { alert('Upload failed: ' + err.message) }
+    }
+
+    async function refresh() {
+      images = await opts.api.listImages(opts.entityId)
+      render()
+      if (opts.onChange) opts.onChange(images)
+    }
+
+    render()
+    if (opts.onChange) opts.onChange(images)
+    return { refresh, get images() { return images } }
+  }
+
+  // Round entity portrait for a hero. Falls back to INITIALS rather than a
+  // silhouette icon: with photos on a small minority of entities, the no-photo
+  // state is the normal appearance and should look intentional.
+  function heroPortraitHtml(name, imageUrl, ringColor) {
+    const ring = esc(ringColor || 'var(--bd-1)')
+    if (imageUrl) {
+      return `<img class="pp-portrait-img" style="--ring:${ring}" src="${imageUrl}" alt="${esc(name)}">`
+    }
+    const initials = String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2)
+      .map(w => w[0]).join('').toUpperCase()
+    return `<div class="pp-portrait-blank" style="--ring:${ring}">${esc(initials)}</div>`
+  }
+
+  // ══ Shared "create entity" form ════════════════════════════════════════════
+  //
+  // One simple form per dimension (Ryan, 2026-08-07). The + buttons previously
+  // did two different wrong things: Venues navigated to the ADMIN LIST — a
+  // view-and-edit screen inconsistent with everything else and not a create
+  // flow at all — while Performers and Artists used a bare window.prompt().
+  //
+  // Built on the entity shell so a create form looks like the page it will
+  // become, and deliberately minimal: name plus whatever else is genuinely
+  // required. Everything else is editable in place afterwards, which is the
+  // established pattern for every object in this app.
+  //
+  // opts: { title, backHash, fields: [{id, label, placeholder, required}],
+  //         onSave(values) -> hash to navigate to, invalidate: dimName }
+  function renderCreateForm(opts) {
+    setNavCurrent(opts.title)
+    const fields = opts.fields
+    setMainHTML(entityShellHtml({
+      navBack: opts.backHash ? { label: opts.backLabel || 'Back', hash: opts.backHash } : null,
+      title: esc(opts.title),
+      tabs: [{
+        id: 'form', label: 'New',
+        html: `
+          <div class="create-form">
+            ${fields.map(f => `
+              <div class="ingest-field">
+                <label for="cf-${f.id}">${esc(f.label)}${f.required ? '' : ' <span class="cf-opt">(optional)</span>'}</label>
+                ${f.multiline
+                  ? `<textarea id="cf-${f.id}" placeholder="${esc(f.placeholder || '')}"></textarea>`
+                  : `<input type="text" id="cf-${f.id}" placeholder="${esc(f.placeholder || '')}" autocomplete="off" />`}
+              </div>`).join('')}
+            <div class="create-form-actions">
+              <button class="btn btn-primary btn-sm" id="cf-save">Create</button>
+              <button class="btn btn-ghost btn-sm" id="cf-cancel">Cancel</button>
+              <span class="pp-sec-msg" id="cf-msg"></span>
+            </div>
+          </div>`,
+      }],
+    }))
+    wireEntityShell(mainContent, opts.backHash ? { hash: opts.backHash } : null)
+
+    const val = id => document.getElementById('cf-' + id).value.trim()
+    const msgEl = document.getElementById('cf-msg')
+    const first = document.getElementById('cf-' + fields[0].id)
+    first?.focus()
+
+    async function save() {
+      const values = {}
+      for (const f of fields) {
+        values[f.id] = val(f.id) || null
+        if (f.required && !values[f.id]) {
+          msgEl.className = 'pp-sec-msg is-err'
+          msgEl.textContent = `${f.label} is required`
+          document.getElementById('cf-' + f.id).focus()
+          return
+        }
+      }
+      const btn = document.getElementById('cf-save')
+      btn.disabled = true; btn.textContent = 'Creating…'
+      msgEl.className = 'pp-sec-msg'; msgEl.textContent = ''
+      try {
+        const hash = await opts.onSave(values)
+        if (opts.invalidate) invalidateDims(opts.invalidate)
+        window.location.hash = hash
+      } catch (e) {
+        msgEl.className = 'pp-sec-msg is-err'
+        msgEl.textContent = e.message
+        btn.disabled = false; btn.textContent = 'Create'
+      }
+    }
+
+    document.getElementById('cf-save').addEventListener('click', save)
+    document.getElementById('cf-cancel').addEventListener('click', () => {
+      window.location.hash = opts.backHash || '#/'
+    })
+    // Enter submits from any single-line field — a two-field form should not
+    // require reaching for the mouse.
+    mainContent.querySelectorAll('.create-form input').forEach(el =>
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save() } }))
+  }
+
+  const renderVenueForm = () => renderCreateForm({
+    title: 'New venue', backHash: '#/venues', backLabel: 'Venues', invalidate: 'venues',
+    fields: [
+      { id: 'name',    label: 'Venue name', required: true, placeholder: 'The Fillmore' },
+      { id: 'city',    label: 'City',    placeholder: 'San Francisco' },
+      { id: 'state',   label: 'State / Region', placeholder: 'CA' },
+      { id: 'country', label: 'Country', placeholder: 'United States' },
+    ],
+    onSave: async v => `#/venue/${(await API.venues.create(v)).id}`,
+  })
+
+  const renderPerformerForm = () => renderCreateForm({
+    title: 'New performer', backHash: '#/', backLabel: 'Library', invalidate: 'performers',
+    fields: [
+      // Name only. Everything else — genre, members, description — is edited in
+      // place on the performer page, and a MusicBrainz lookup runs on create,
+      // so asking for more here would mostly duplicate what it fetches.
+      { id: 'name', label: 'Performer name', required: true, placeholder: 'The Meters' },
+    ],
+    onSave: async v => `#/performer/${(await API.performers.create(v)).id}`,
+  })
+
+  const renderArtistForm = () => renderCreateForm({
+    title: 'New artist', backHash: '#/artists', backLabel: 'Artists', invalidate: 'artists',
+    fields: [
+      { id: 'name',      label: 'Artist name', required: true, placeholder: 'George Porter Jr.' },
+      // "Last, First" — drives sidebar ordering via COALESCE(sort_name, name).
+      { id: 'sort_name', label: 'Sort name', placeholder: 'Porter, George Jr.' },
+    ],
+    onSave: async v => `#/person/${(await API.artists.create(v)).id}`,
+  })
+
+  // Wires the shell's tab strip and back link. `root` is normally mainContent.
+  function wireEntityShell(root, navBack) {
+    root.querySelectorAll('.pp-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        root.querySelectorAll('.pp-tab').forEach(t => t.classList.remove('active'))
+        root.querySelectorAll('.pp-pane').forEach(p => p.classList.remove('active'))
+        btn.classList.add('active')
+        root.querySelector(`.pp-pane[data-pane="${btn.dataset.pane}"]`)?.classList.add('active')
+      })
+    })
+    if (navBack) {
+      root.querySelector('#pp-back-btn')?.addEventListener('click', () => {
+        window.location.hash = navBack.hash
+      })
+    }
+  }
+
+  // A recordings pane using the flat catalog table — the shape Venue, Artist,
+  // Genre and Performer all want. `showPerformer` differs per page: a Performer
+  // page needn't repeat the act's name on every row, a Venue page must.
+  function recordingsPaneHtml(rows, { showPerformer = false, mountId = 'rec-table-entity', empty = 'No recordings yet' } = {}) {
+    if (!rows.length) {
+      return `<div class="empty-state" style="min-height:180px"><div class="empty-title">${esc(empty)}</div></div>`
+    }
+    return recTableHeadHtml(showPerformer)
+         + `<div class="rec-table" id="${mountId}">${rows.map(r => flatRowHtml(r, showPerformer)).join('')}</div>`
+  }
+
   async function renderCollectionsIndex() {
     setActiveNav('collections'); setActiveArtist(null); setLoading()
     setNavCurrent('Collections')
     let cols = []
     try { cols = await API.collections.list() } catch (_) {}
-    const rows = cols.map(c => `
-      <div class="artist-index-row" data-id="${c.id}">
-        <span class="artist-index-name">${esc(c.name)}</span>
-        <span class="artist-index-members">${esc(c.description || '')}</span>
-        <span class="artist-index-count">${c.recording_count} rec</span>
-      </div>`).join('')
-    setMainHTML(`
-      <div class="action-bar">
-        <span style="font-size:13px; font-weight:500; color:var(--t0)">Collections</span>
-        <button class="btn btn-ghost btn-sm" id="btn-new-collection" style="margin-left:auto">+ New collection</button>
-      </div>
-      <div class="artist-index-list">${rows || '<div class="empty-state" style="min-height:120px"><div>No collections yet</div></div>'}</div>`)
-    mainContent.querySelectorAll('.artist-index-row').forEach(el =>
-      el.addEventListener('click', () => { window.location.hash = `#/collection/${el.dataset.id}` }))
+
+    // Same tile component the Browse dashboard uses, so a collection looks
+    // like itself wherever you meet it (Ryan, 2026-08-07 — "playbill style
+    // across the board"). A collection has no date or venue, so a literal
+    // handbill would be mostly empty; the tile is the card language minus the
+    // fields collections don't have.
+    setMainHTML(entityShellHtml({
+      title: 'Collections',
+      stats: [[cols.length, cols.length === 1 ? 'Collection' : 'Collections']],
+      actions: `<button class="btn btn-ghost btn-sm" id="btn-new-collection">+ New collection</button>`,
+      tabs: [{
+        id: 'collections', label: 'Collections',
+        html: cols.length
+          ? `<div class="lib-module-grid lib-module-grid--tiles">${cols.map(colTileHtml).join('')}</div>`
+          : `<div class="empty-state" style="min-height:160px"><div class="empty-title">No collections yet</div><div class="empty-sub">Right-click any recording to start one.</div></div>`,
+      }],
+    }))
+    wireEntityShell(mainContent, null)
+
     document.getElementById('btn-new-collection').addEventListener('click', async () => {
       const name = prompt('New collection name:')
       if (!name || !name.trim()) return
-      try { const c = await API.collections.create({ name: name.trim() }); window.location.hash = `#/collection/${c.id}` }
-      catch (e) { alert('Failed: ' + e.message) }
+      try {
+        const c = await API.collections.create({ name: name.trim() })
+        _dimCache.collections = null
+        if (state.expandedDims.has('collections')) _renderDimRecords('collections')
+        window.location.hash = `#/collection/${c.id}`
+      } catch (e) { alert('Failed: ' + e.message) }
     })
   }
 
@@ -1088,38 +1467,35 @@ const App = (() => {
     setNavCurrent(c.name)
     const colRows = c.recordings || []
     const descText = c.description && c.description.trim()
-    // Browse is a fixed, global dashboard (Recommended/Recently Added/
-    // Performers/Collections/On This Day) — NOT this collection's own
-    // recordings. Only List shows the collection-scoped table. Same
-    // fluxLibraryView preference as Library/Recently Added (deliberate,
-    // Ryan's call — see the design spec).
-    const mode = getLibraryViewMode()
-    const bodyHtml = mode === 'browse'
-      ? `<div class="lib-modules" id="lib-modules-mount"></div>`
-      : `${colRows.length ? recTableHeadHtml(true) : ''}
-         <div class="rec-table" id="rec-table-collection">${colRows.map(r => flatRowHtml(r, true)).join('') || '<div class="empty-state" style="min-height:120px"><div>Empty — right-click a recording anywhere to add it here.</div></div>'}</div>`
+    const navBack = state.navBack
 
-    setMainHTML(`
-      <div class="performer-page">
-        <div class="performer-head">
-          <div class="pp-name-row">
-            <h1 class="pp-name pp-editable" id="col-name" title="Click to edit">${esc(c.name)}</h1>
-            ${libToggleHtml()}
-            <button class="btn btn-ghost btn-sm pp-delete" id="col-delete" title="Delete collection">Delete</button>
-          </div>
-          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="col-desc" title="Click to edit">${descText ? esc(c.description) : 'Add a description…'}</div>
-          <div class="subtitle">${c.recordings.length} recording${c.recordings.length !== 1 ? 's' : ''}</div>
-        </div>
-        ${bodyHtml}
-      </div>`)
+    // HANDBILL CARDS, no Browse/List toggle (Ryan, 2026-08-07). The toggle used
+    // to put this page into the global dashboard — Recommended, Performers, On
+    // This Day — instead of the collection's own recordings, which is the one
+    // place the global-preference decision produced a plainly wrong result
+    // (flagged as a judgment call on 08-02, now resolved by removing the
+    // choice). A collection is a curated set; cards are the right register for
+    // it and there is no second mode to pick.
+    setMainHTML(entityShellHtml({
+      navBack,
+      title: esc(c.name),
+      titleId: 'col-name',
+      titleEditable: true,
+      stats: [[colRows.length, colRows.length === 1 ? 'Recording' : 'Recordings']],
+      actions: `<button class="btn btn-ghost btn-sm pp-delete" id="col-delete" title="Delete collection">Delete</button>`,
+      tabs: [{
+        id: 'recordings', label: 'Recordings',
+        html: `
+          <div class="pp-sec">Description</div>
+          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="col-desc" title="Click to edit">${descText ? esc(c.description) : 'Add a description\u2026'}</div>
+          <div class="pp-sec" style="margin-top:24px">Recordings</div>
+          ${colRows.length
+            ? `<div class="lib-module-grid">${colRows.map(recCardHtml).join('')}</div>`
+            : `<div class="empty-state" style="min-height:160px"><div class="empty-title">Empty collection</div><div class="empty-sub">Right-click a recording anywhere to add it here.</div></div>`}`,
+      }],
+    }))
+    wireEntityShell(mainContent, navBack)
 
-    wireLibToggle(mainContent, () => renderCollectionView(id))
-    if (mode === 'browse') {
-      await renderBrowseModules(document.getElementById('lib-modules-mount'))
-    } else {
-      wireRecordingRows(mainContent)
-      if (colRows.length) wireDateAddedSort(document.getElementById('rec-table-collection'), colRows, true)
-    }
 
     const refreshSidebar = () => { _dimCache.collections = null; if (state.expandedDims.has('collections')) _renderDimRecords('collections') }
     async function saveField(patch) {
@@ -1238,25 +1614,36 @@ const App = (() => {
     }).join('')
 
     const descText = a.bio && a.bio.trim()
-    setMainHTML(`
-      <div class="performer-page">
-        <div class="performer-head">
-          <div class="pp-name-row">
-            <h1 class="pp-name pp-editable" id="pn-name" title="Click to edit">${esc(a.name)}</h1>
-            <button class="btn btn-ghost btn-sm pp-delete" id="pn-delete" title="Delete artist">Delete</button>
-          </div>
-          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pn-desc" title="Click to edit">${descText ? esc(a.bio) : 'Add a bio…'}</div>
+    const navBack = state.navBack
 
-          <div class="pp-artists-block">
-            <div class="pp-artists-label">Performers</div>
+    setMainHTML(entityShellHtml({
+      navBack,
+      portrait: heroPortraitHtml(a.name, null),
+      title: esc(a.name),
+      titleId: 'pn-name',
+      titleEditable: true,
+      chips: `<span class="pp-hero-fact">${performers.length} performer${performers.length !== 1 ? 's' : ''}</span>`,
+      stats: [
+        [totalRecordings, totalRecordings === 1 ? 'Recording' : 'Recordings'],
+        ...(totalGuestRecordings ? [[totalGuestRecordings, 'Guest']] : []),
+      ],
+      actions: `<button class="btn btn-ghost btn-sm pp-delete" id="pn-delete" title="Delete artist">Delete</button>`,
+      // No Photos tab: photos are scoped to Performer level (Ryan, 2026-08-07).
+      // A person's likeness would need its own table and its own Commons path,
+      // and the card surfaces all key off the act, not the individual.
+      tabs: [
+        { id: 'overview', label: 'Overview', active: true, html: `
+            <div class="pp-sec">Performers</div>
             <div class="pp-artists" id="pn-performers"></div>
-          </div>
 
-          <div class="subtitle">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''} · ${performers.length} performer${performers.length !== 1 ? 's' : ''}${totalGuestRecordings ? ` · ${totalGuestRecordings} guest recording${totalGuestRecordings !== 1 ? 's' : ''}` : ''}</div>
-        </div>
-        ${groupsHtml || (guestGroupsHtml ? '' : '<div class="empty-state" style="min-height:160px"><div class="empty-title">No appearances yet</div></div>')}
-        ${guestGroupsHtml ? `<div class="pp-section-label">Guest Appearances</div>${guestGroupsHtml}` : ''}
-      </div>`)
+            <div class="pp-sec">Bio</div>
+            <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pn-desc" title="Click to edit">${descText ? esc(a.bio) : 'Add a bio\u2026'}</div>` },
+        { id: 'recordings', label: 'Recordings', count: totalRecordings + totalGuestRecordings, html: `
+            ${groupsHtml || (guestGroupsHtml ? '' : '<div class="empty-state" style="min-height:160px"><div class="empty-title">No appearances yet</div></div>')}
+            ${guestGroupsHtml ? `<div class="pp-sec" style="margin-top:24px">Guest appearances</div>${guestGroupsHtml}` : ''}` },
+      ],
+    }))
+    wireEntityShell(mainContent, navBack)
 
     wireRecordingRows(mainContent)
 
@@ -1403,15 +1790,21 @@ const App = (() => {
     return (r && r.genre_color) ? r.genre_color : 'var(--t2)'
   }
 
-  // Circular performer photo for the cards. Empty string when the performer has
-  // no primary image — the element is omitted entirely rather than rendering a
-  // placeholder silhouette, matching the modules' own "hide when empty" rule.
-  // Only 1 of 164 performers has a photo today, so ABSENCE IS THE DEFAULT
-  // LAYOUT and the card must look finished without it.
+  // Performer avatar for the cards — photo when there is one, INITIALS when
+  // there isn't (Ryan, 2026-08-07). It previously rendered nothing without a
+  // photo, which made cards for photographed and un-photographed acts two
+  // different shapes. Since most acts have no photo, the initials disc IS the
+  // normal appearance, and using the same one the Performer page hero uses
+  // makes every card and page agree.
   function perfPhotoHtml(r, cls) {
-    if (!r || !r.image_id) return ''
-    return `<img class="${cls}" src="${API.performers.imageUrl(r.image_id)}"
-                 alt="" loading="lazy">`
+    if (!r) return ''
+    if (r.image_id) {
+      return `<img class="${cls}" src="${API.performers.imageUrl(r.image_id)}"
+                   alt="" loading="lazy">`
+    }
+    const initials = String(r.performer || '?').split(/\s+/).filter(Boolean)
+      .slice(0, 2).map(w => w[0]).join('').toUpperCase()
+    return `<span class="${cls} ${cls}--initials">${esc(initials)}</span>`
   }
 
   // Footer bits shared by both card layouts. Composes from whatever exists —
@@ -1486,7 +1879,7 @@ const App = (() => {
       <a class="rec-rowcard" href="#/recording/${r.id}" data-rec-id="${r.id}"
          style="--genre-fg:${esc(genreColor(r))}">
         <div class="rec-rowcard-spine"></div>
-        <div class="rec-rowcard-avatar">${photo || '<span class="rec-rowcard-avatar-blank"></span>'}</div>
+        <div class="rec-rowcard-avatar">${photo}</div>
         <div class="rec-rowcard-date">${esc(date || '—')}</div>
         <div class="rec-rowcard-main">
           <div class="rec-rowcard-performer truncate">${esc(r.performer || '')}</div>
@@ -1688,6 +2081,11 @@ const App = (() => {
 
   /** Recently Added — virtual view, the N most recently ingested recordings.
    *  Not a collection; just a live query, always exactly correct. */
+  // Recently Added page size. 20 is about a screenful of row cards; the full
+  // 50 is one click away and already in memory.
+  const RECENT_INITIAL = 20
+  const RECENT_MAX = 50
+
   async function renderRecentView() {
     setActiveNav('recent')
     setActiveArtist(null)
@@ -1697,7 +2095,7 @@ const App = (() => {
 
     let rows
     try {
-      rows = await API.recordings.recent(50)
+      rows = await API.recordings.recent(RECENT_MAX, { card: true })
     } catch (e) {
       setMainHTML(`<div class="empty-state"><div class="empty-title">Failed to load recent recordings</div></div>`)
       return
@@ -1712,10 +2110,34 @@ const App = (() => {
         <div class="subtitle">${rows.length} most recently added recording${rows.length !== 1 ? 's' : ''}</div>
       </div>`
 
+    // Browse mode = a FULL version of the Browse page's Recently Added module
+    // (Ryan, 2026-08-07). It previously rendered `renderBrowseModules()` — the
+    // entire global dashboard, Recommended and Performers and all — which made
+    // "Recently Added" show everything except a longer list of recently added
+    // recordings. Same class of bug as the Collection view's.
     if (getLibraryViewMode() === 'browse') {
-      setMainHTML(`${headerHtml}<div class="lib-modules" id="lib-modules-mount"></div>`)
+      setMainHTML(`${headerHtml}
+        <div class="rec-rowcard-list" id="recent-rowcards"></div>
+        <div class="recent-more" id="recent-more"></div>`)
       wireLibToggle(mainContent, renderRecentView)
-      await renderBrowseModules(document.getElementById('lib-modules-mount'))
+
+      // Start short, expand on request. The whole 50 is already fetched, so
+      // this is a display cut, not a second request — "show more" should feel
+      // instant, and the payload for 50 rows is trivial.
+      let shown = RECENT_INITIAL
+      const listEl = document.getElementById('recent-rowcards')
+      const moreEl = document.getElementById('recent-more')
+      const draw = () => {
+        listEl.innerHTML = rows.slice(0, shown).map(recentRowCardHtml).join('')
+        moreEl.innerHTML = rows.length > shown
+          ? `<button type="button" class="btn btn-ghost btn-sm" id="recent-more-btn">Show all ${rows.length}</button>`
+          : ''
+        document.getElementById('recent-more-btn')?.addEventListener('click', () => {
+          shown = rows.length
+          draw()
+        })
+      }
+      draw()
       return
     }
 
@@ -1810,39 +2232,23 @@ const App = (() => {
 
     const photoCount = (performer.images || []).length
 
-    setMainHTML(`
-      <div class="performer-page">
-        ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="pp-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
-
-        <div class="pp-hero">
-          <div class="pp-hero-portrait" id="pp-hero-portrait"></div>
-          <div class="pp-hero-main">
-            <h1 class="pp-name pp-editable" id="pp-name" title="Click to edit">${esc(performer.name)}</h1>
-            <div class="pp-hero-chips">
-              <!-- ONE genre element, and it is the editable one. A static
-                   colour pill alongside it (as first built) showed the same
-                   value twice and only one of them responded to a click. -->
-              <span class="pp-editable pp-genre-field" id="pp-genre"
+    setMainHTML(entityShellHtml({
+      navBack,
+      portrait: '<div id="pp-hero-portrait"></div>',
+      title: esc(performer.name),
+      titleId: 'pp-name',
+      titleEditable: true,
+      // ONE genre element, and it is the editable one. A static colour pill
+      // alongside it (as first built) showed the same value twice and only one
+      // of them responded to a click.
+      chips: `<span class="pp-editable pp-genre-field" id="pp-genre"
                     style="--genre-fg:${esc((performer.genre && performer.genre.color) || 'var(--t2)')}"
-                    title="Click to edit"></span>
-              ${mbBits ? `<span class="pp-hero-fact">${mbBits}</span>` : ''}
-            </div>
-            <div class="pp-hero-stats">
-              ${stats.map(([n, l]) => `
-                <div class="pp-stat"><div class="pp-stat-n">${esc(String(n))}</div><div class="pp-stat-l">${l}</div></div>`).join('')}
-            </div>
-          </div>
-          <button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>
-        </div>
-
-        <div class="pp-tabs" role="tablist">
-          <button class="pp-tab active" data-pane="overview" role="tab">Overview</button>
-          <button class="pp-tab" data-pane="recordings" role="tab">Recordings<span class="pp-tab-n">${totalRecordings}</span></button>
-          <button class="pp-tab" data-pane="photos" role="tab">Photos${photoCount ? `<span class="pp-tab-n">${photoCount}</span>` : ''}</button>
-        </div>
-
-        <div class="pp-panes">
-          <div class="pp-pane active" data-pane="overview">
+                    title="Click to edit"></span>`
+           + (mbBits ? `<span class="pp-hero-fact">${mbBits}</span>` : ''),
+      stats,
+      actions: `<button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>`,
+      tabs: [
+        { id: 'overview',   label: 'Overview', active: true, html: `
             <!-- Members first (Ryan, 2026-08-07): who the act IS comes before
                  prose about it, and Description is empty on most performers so
                  leading with it opened the page on a placeholder. -->
@@ -1850,19 +2256,17 @@ const App = (() => {
             <div class="pp-artists" id="pp-artists"></div>
             <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
 
-            <!-- AI Assist sits ON the Description header (Ryan, 2026-08-07):
-                 it's an enrichment action for this one field, not a research
-                 panel, so it belongs where its output lands. Clicking it
-                 OVERWRITES the description — a deliberate exception to the
-                 project's "AI suggests, human approves" rule, made because a
-                 biography is low-stakes, freely re-editable, and the
-                 copy-into-place step was pure friction. -->
+            <!-- AI Assist sits ON the Description header: it's an enrichment
+                 action for this one field, not a research panel, so it belongs
+                 where its output lands. Clicking it OVERWRITES the description
+                 — a deliberate exception to "AI suggests, human approves",
+                 made because a biography is low-stakes and freely re-editable. -->
             <div class="pp-sec-row">
               <div class="pp-sec">Description</div>
-              <button type="button" class="btn btn-ghost btn-xs iq-ai-btn" id="pp-dossier-run">✨ AI Assist</button>
+              <button type="button" class="btn btn-ghost btn-xs iq-ai-btn" id="pp-dossier-run">\u2728 AI Assist</button>
               <span class="pp-sec-msg" id="pp-dossier-msg"></span>
             </div>
-            <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
+            <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description\u2026'}</div>
 
             <div class="pp-block">
               <h2 class="pp-block-title">MusicBrainz</h2>
@@ -1870,54 +2274,26 @@ const App = (() => {
               <div id="pp-mb"></div>
             </div>
 
-            <!-- Reframed 2026-08-07 from "Resources" (a generic link list) to
-                 sources the ENRICHMENT JOBS should trust. Flux already knows to
-                 consult Wikipedia and setlist.fm; what it can't know is the
-                 act-specific archive a collector knows about — Marc Morvan's
-                 Pat Metheny site being the example. Ordered last because it's
-                 the thing you fill in AFTER seeing what the two automated
-                 passes above did and didn't find. -->
+            <!-- Reframed from "Resources" to sources the ENRICHMENT JOBS should
+                 trust. Flux already knows to consult Wikipedia and setlist.fm;
+                 what it can't know is the act-specific archive a collector
+                 knows about. Ordered last because it's what you fill in AFTER
+                 seeing what the automated passes missed. -->
             <div class="pp-block">
               <h2 class="pp-block-title">Trusted sources</h2>
-              <div class="pp-block-hint">Sites worth trusting for this act specifically — a fan-maintained show database, an archivist's site. We already check the obvious ones, so add what we wouldn't know to look for. These are treated as sources of truth in future research and ingest jobs.</div>
+              <div class="pp-block-hint">Sites worth trusting for this act specifically \u2014 a fan-maintained show database, an archivist's site. We already check the obvious ones, so add what we wouldn't know to look for. These are treated as sources of truth in future research and ingest jobs.</div>
               <div class="pp-resources" id="pp-resources"></div>
-            </div>
-          </div>
-
-          <div class="pp-pane" data-pane="recordings">
-            ${perfRows.length ? recTableHeadHtml(false) : ''}
-            <div class="rec-table" id="rec-table-performer">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
-          </div>
-
-          <div class="pp-pane" data-pane="photos">
-            <div id="pp-photos"></div>
-          </div>
-        </div>
-      </div>`)
-
-    // ── Tab switching ───────────────────────────────────────────────────────
-    // Pure show/hide over already-rendered panes — no re-fetch, no re-render.
-    // That keeps in-progress state (a half-typed description, an open stint
-    // drawer, a running AI Assist job) alive across a tab switch, which is the
-    // whole reason not to route tabs through the hash.
-    const ppRoot = mainContent
-    ppRoot.querySelectorAll('.pp-tab').forEach(btn => {
-      btn.addEventListener('click', () => {
-        ppRoot.querySelectorAll('.pp-tab').forEach(t => t.classList.remove('active'))
-        ppRoot.querySelectorAll('.pp-pane').forEach(p => p.classList.remove('active'))
-        btn.classList.add('active')
-        ppRoot.querySelector(`.pp-pane[data-pane="${btn.dataset.pane}"]`)?.classList.add('active')
-      })
-    })
+            </div>` },
+        { id: 'recordings', label: 'Recordings', count: totalRecordings,
+          html: recordingsPaneHtml(perfRows, { mountId: 'rec-table-performer' }) },
+        { id: 'photos',     label: 'Photos', count: photoCount || null,
+          html: '<div id="pp-photos"></div>' },
+      ],
+    }))
+    wireEntityShell(mainContent, navBack)
 
     wireRecordingRows(mainContent)
     if (perfRows.length) wireDateAddedSort(document.getElementById('rec-table-performer'), perfRows, false)
-
-    if (navBack) {
-      document.getElementById('pp-back-btn')?.addEventListener('click', () => {
-        window.location.hash = navBack.hash
-      })
-    }
 
     const refreshSidebar = () => { _dimCache.performers = null; if (state.expandedDims.has('performers')) _renderDimRecords('performers') }
 
@@ -2711,10 +3087,26 @@ const App = (() => {
         el.classList.toggle('pp-empty', !shown)
       }
       field.addEventListener('blur', () => commit(true))
-      field.addEventListener('keydown', e => {
+      field.addEventListener('keydown', async e => {
         if (e.key === 'Escape') { e.preventDefault(); commit(false) }
         else if (e.key === 'Enter' && !opts.multiline) { e.preventDefault(); field.blur() }
         else if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); field.blur() }
+        else if (e.key === 'Tab' && opts.tabTo) {
+          // TAB ADVANCES TO THE NEXT FIELD (Ryan, 2026-08-07). Without this,
+          // Tab left the browser to pick a focus target — usually nothing
+          // useful, since the neighbouring "fields" are spans that only become
+          // inputs on click. Editing a venue's City/State/Country meant three
+          // separate mouse trips.
+          //
+          // `tabTo` names the next element's id; committing first, then
+          // clicking it, reuses the exact same open-editor path a real click
+          // takes, so there is only one way an editor is ever opened.
+          e.preventDefault()
+          await commit(true)
+          const nextId = typeof opts.tabTo === 'function' ? opts.tabTo(e.shiftKey) : opts.tabTo
+          const next = nextId && document.getElementById(nextId)
+          if (next) next.click()
+        }
       })
     })
   }
@@ -4407,8 +4799,8 @@ const App = (() => {
     if (batch.behavior == null) {
       try {
         const prefs = await API.preferences.get()
-        batch.behavior = prefs.ingest_file_behavior || 'copy'
-      } catch (_) { batch.behavior = 'copy' }
+        batch.behavior = prefs.ingest_file_behavior || 'move'
+      } catch (_) { batch.behavior = 'move' }
     }
 
     // Listening Quality gate (2026-07-30): only folders the triage step
@@ -4452,8 +4844,8 @@ const App = (() => {
           <div class="batch-behavior-row">
             <label class="batch-behavior-label" for="batch-behavior-select">File handling</label>
             <select id="batch-behavior-select">
+              <option value="move" ${batch.behavior !== 'copy' ? 'selected' : ''}>Move into library (source removed)</option>
               <option value="copy" ${batch.behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
-              <option value="move" ${batch.behavior === 'move' ? 'selected' : ''}>Move into library (source removed)</option>
             </select>
           </div>
           <div class="batch-tier-pills" style="margin-top:10px">
@@ -4609,7 +5001,7 @@ const App = (() => {
       source:             e.source  || null,
       lineage:            e.lineage || null,
       is_complete:        true,
-      behavior:           batch.behavior || 'copy',   // synced with the shared preference
+      behavior:           batch.behavior || 'move',   // synced with the shared preference
       info_file_content:  scan.info_file_content || null,
       fingerprints:       scan.fingerprints || [],
       tracks,
@@ -4723,16 +5115,52 @@ const App = (() => {
       case 'source':  show(renderIngestSource);  break
       case 'folder':  show(renderIngestSource);  break  // legacy alias
       case 'triage':  show(renderTriageView);    break
-      case 'review':  show(renderIngestReview);  break
-      case 'tracks':  show(renderIngestReview);  break  // merged into review step
+      // A review step with no scan cannot render anything meaningful — that
+      // happens when the page is re-entered after its source folder was moved
+      // or removed. Fall back to the picker rather than throwing into the
+      // recovery screen.
+      case 'review':
+      case 'tracks':                                    // merged into review step
+        if (!ingest.scan) { resetIngestState(); show(renderIngestSource); break }
+        show(renderIngestReview); break
       case 'success': show(renderIngestSuccess); break
     }
   }
 
+  // ALWAYS OFFER A WAY OUT (2026-08-07). This used to render a bare red
+  // message with no action, which is how Ryan got stranded: he ingested the
+  // last recording of an act, the source folder was removed by the Move +
+  // empty-parent cleanup, and returning to Add Recording tried to re-open that
+  // now-missing folder. The error was correct; having no button was the bug.
   function _ingestRenderFailed(e) {
     console.error('[ingest] render failed', e)
-    setMainHTML(`<div class="empty-state" style="color:var(--red)">
-      Could not open this step — ${esc(e && e.message || String(e))}</div>`)
+    setMainHTML(`
+      <div class="empty-state">
+        <div class="empty-title">Could not open this step</div>
+        <div class="empty-sub" style="color:var(--red)">${esc(e && e.message || String(e))}</div>
+        <div style="margin-top:14px; display:flex; gap:8px; justify-content:center">
+          <button class="btn btn-primary btn-sm" id="ingest-recover">Start over</button>
+          <button class="btn btn-ghost btn-sm" id="ingest-recover-home">Go to Library</button>
+        </div>
+      </div>`)
+    document.getElementById('ingest-recover')?.addEventListener('click', resetIngestToSource)
+    document.getElementById('ingest-recover-home')?.addEventListener('click', () => {
+      resetIngestState(); window.location.hash = '#/'
+    })
+  }
+
+  // Drop every remembered scan/folder and go back to the picker. The stale
+  // `folderPath` is the thing that re-breaks the page on each retry, so
+  // clearing it IS the recovery — not just re-rendering.
+  function resetIngestState() {
+    ingest.scan = null
+    ingest.folderPath = null
+    ingest.step = 'source'
+  }
+
+  function resetIngestToSource() {
+    resetIngestState()
+    renderIngestStep()
   }
 
   // ── Stage 1: Source ────────────────────────────────────────────────────────
@@ -4801,7 +5229,13 @@ const App = (() => {
       finally { busy = false }
       if (j.error) { say(j.error); paint(null); return }
       here = j.path
-      say('')
+      // The server climbs to the nearest surviving ancestor when a remembered
+      // path has gone (routinely: ingesting an act's last show moves its folder
+      // into the library and the empty-parent cleanup removes the act folder).
+      // Say so rather than silently landing somewhere else.
+      say(j.redirected_from
+        ? `${j.redirected_from.split('/').pop()} is no longer here — it was probably moved into the library. Showing its parent folder.`
+        : '')
       paint(j)
     }
 
@@ -5546,8 +5980,8 @@ const App = (() => {
           <label class="lq-behavior">
             <span>Files:</span>
             <select id="lq-behavior" ${lq.running ? 'disabled' : ''}>
-              <option value="copy"${batch.behavior !== 'move' ? ' selected' : ''}>Copy</option>
-              <option value="move"${batch.behavior === 'move' ? ' selected' : ''}>Move</option>
+              <option value="move"${batch.behavior !== 'copy' ? ' selected' : ''}>Move</option>
+              <option value="copy"${batch.behavior === 'copy' ? ' selected' : ''}>Copy</option>
             </select>
           </label>
         </div>
@@ -5800,7 +6234,7 @@ const App = (() => {
         state: e.state || null, country: e.country || null,
         source: e.source || null, lineage: e.lineage || null,
         is_complete: true,
-        behavior: batch.behavior || 'copy',
+        behavior: batch.behavior || 'move',
         info_file_content: scan.info_file_content || null,
         fingerprints: scan.fingerprints || [],
         tracks,
@@ -5848,7 +6282,14 @@ const App = (() => {
   async function runScan(folderPath) {
     ingest.folderPath = folderPath  // re-set in case the render-reset cleared it
     const statusEl = document.getElementById('scan-status')
-    if (!statusEl) return
+    // No status element means we are not on the picker — previously this
+    // returned silently and the caller was left waiting forever. Fail loudly
+    // into the recovery screen instead.
+    if (!statusEl) {
+      try { await API.recordings.scan(folderPath) }
+      catch (e) { _ingestRenderFailed(e); return }
+      return
+    }
     statusEl.innerHTML = `
       <div class="empty-state" style="min-height:100px">
         <div class="loading-spinner"></div>
@@ -5861,9 +6302,14 @@ const App = (() => {
       renderIngestStep()
       window.fluxDebug?.refresh()   // update the debug panel's Paula section if it's already open
     } catch (e) {
+      // Clear the remembered folder: if it has gone away, keeping it means the
+      // next visit to this page fails the same way.
+      ingest.folderPath = null
+      ingest.scan = null
       statusEl.innerHTML = `
         <div style="color:var(--red); font-size:13px; margin-top:12px; padding:12px 16px; background:rgba(224,85,85,0.08); border-radius:var(--r-sm);">
           Scan failed: ${esc(e.message)}
+          <div style="color:var(--t2); margin-top:6px">If this show was just ingested, its source folder was moved into the library and is no longer here.</div>
         </div>`
     }
   }
@@ -7444,13 +7890,13 @@ const App = (() => {
       // dropdown to Copy could still get a Move, because Review submitted
       // through this path (2026-07-31). When the review was opened from triage,
       // the dropdown the user was just looking at wins.
-      let behavior = 'copy'
+      let behavior = 'move'
       if (ingest.fromTriage && batch.behavior) {
         behavior = batch.behavior
       } else {
         try {
           const prefs = await API.preferences.get()
-          behavior = prefs.ingest_file_behavior || 'copy'
+          behavior = prefs.ingest_file_behavior || 'move'
         } catch (_) { /* fall back to copy */ }
       }
 
@@ -7714,33 +8160,65 @@ const App = (() => {
     const venueRows = v.recordings || []
     const rowsHtml = venueRows.map(r => flatRowHtml(r, true)).join('')
 
-    setMainHTML(`
-      <div class="performer-page">
-        ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="vn-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
-        <div class="performer-head">
-          <div class="pp-name-row">
-            <h1 class="pp-name pp-editable" id="vn-name" title="Click to edit">${esc(v.name)}</h1>
-            <button class="btn btn-ghost btn-sm pp-delete" id="vn-delete" title="Delete venue">Delete</button>
-          </div>
-          <div class="vn-loc">
-            <span class="vn-field"><label>City</label><span class="pp-editable vn-val ${v.city ? '' : 'pp-empty'}" id="vn-city">${v.city ? esc(v.city) : '—'}</span></span>
-            <span class="vn-field"><label>State / Region</label><span class="pp-editable vn-val ${v.state ? '' : 'pp-empty'}" id="vn-state">${v.state ? esc(v.state) : '—'}</span></span>
-            <span class="vn-field"><label>Country</label><span class="pp-editable vn-val ${v.country ? '' : 'pp-empty'}" id="vn-country">${v.country ? esc(v.country) : '—'}</span></span>
-          </div>
-          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="vn-bio" title="Click to edit">${descText ? esc(v.bio) : 'Add notes…'}</div>
-        </div>
-        ${venueRows.length ? recTableHeadHtml(true) : ''}
-        <div class="rec-table" id="rec-table-venue">${rowsHtml || '<div class="empty-state" style="min-height:140px"><div class="empty-title">No recordings from this venue yet</div></div>'}</div>
-      </div>`)
+    const photoCount = (v.images || []).length
+    const loc = fmtLocation(v.city, v.state, v.country)
 
+    setMainHTML(entityShellHtml({
+      navBack,
+      pageClass: 'venue-page',      // square portrait + square gallery tiles
+      portrait: '<div id="vn-portrait"></div>',
+      title: esc(v.name),
+      titleId: 'vn-name',
+      titleEditable: true,
+      chips: loc ? `<span class="pp-hero-fact">${esc(loc)}</span>` : '',
+      stats: [
+        [venueRows.length, venueRows.length === 1 ? 'Recording' : 'Recordings'],
+        [v.performance_count || 0, (v.performance_count === 1) ? 'Show' : 'Shows'],
+      ],
+      actions: `<button class="btn btn-ghost btn-sm pp-delete" id="vn-delete" title="Delete venue">Delete</button>`,
+      tabs: [
+        { id: 'overview', label: 'Overview', active: true, html: `
+            <div class="pp-sec">Location</div>
+            <div class="vn-loc">
+              <span class="vn-field"><label>City</label><span class="pp-editable vn-val ${v.city ? '' : 'pp-empty'}" id="vn-city">${v.city ? esc(v.city) : '\u2014'}</span></span>
+              <span class="vn-field"><label>State / Region</label><span class="pp-editable vn-val ${v.state ? '' : 'pp-empty'}" id="vn-state">${v.state ? esc(v.state) : '\u2014'}</span></span>
+              <span class="vn-field"><label>Country</label><span class="pp-editable vn-val ${v.country ? '' : 'pp-empty'}" id="vn-country">${v.country ? esc(v.country) : '\u2014'}</span></span>
+            </div>
+
+            <div class="pp-sec">Notes</div>
+            <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="vn-bio" title="Click to edit">${descText ? esc(v.bio) : 'Add notes\u2026'}</div>` },
+        { id: 'recordings', label: 'Recordings', count: venueRows.length,
+          // showPerformer: true — a venue hosts many different acts, so the row
+          // must name who played. The Performer page omits it for the reverse
+          // reason.
+          html: recordingsPaneHtml(venueRows, { showPerformer: true, mountId: 'rec-table-venue',
+                                                empty: 'No recordings from this venue yet' }) },
+        { id: 'photos', label: 'Photos', count: photoCount || null,
+          html: '<div id="vn-photos"></div>' },
+      ],
+    }))
+    wireEntityShell(mainContent, navBack)
     wireRecordingRows(mainContent)
     if (venueRows.length) wireDateAddedSort(document.getElementById('rec-table-venue'), venueRows, true)
 
-    if (navBack) {
-      document.getElementById('vn-back-btn')?.addEventListener('click', () => {
-        window.location.hash = navBack.hash
-      })
+    // Photos — the shared gallery, no fetch tile: the Wikidata bridge we use
+    // runs through the Performer's MusicBrainz match, and venues have no
+    // equivalent, so uploads are the only route in.
+    const vnPortrait = () => {
+      const el = document.getElementById('vn-portrait')
+      if (!el) return
+      const primary = (v.images || [])[0]
+      el.innerHTML = heroPortraitHtml(v.name, primary ? API.venues.imageUrl(primary.id) : null)
     }
+    createPhotoGallery({
+      mountId: 'vn-photos', api: API.venues, entityId: id, images: v.images || [],
+      onChange: imgs => {
+        v.images = imgs
+        vnPortrait()
+        const tab = mainContent.querySelector('.pp-tab[data-pane="photos"]')
+        if (tab) tab.innerHTML = 'Photos' + (imgs.length ? `<span class="pp-tab-n">${imgs.length}</span>` : '')
+      },
+    })
 
     const refreshSidebar = () => invalidateDims('venues')
     async function saveField(patch) {
@@ -7748,14 +8226,19 @@ const App = (() => {
       catch (e) { alert('Save failed: ' + e.message) }
     }
     makeInlineEditable(document.getElementById('vn-name'), {
+      tabTo: shift => shift ? null : 'vn-city',
       get: () => v.name,
       onSave: async val => { val = val.trim(); if (!val || val === v.name) return; v.name = val; await saveField({ name: val }) },
     })
-    ;['city', 'state', 'country'].forEach(f => {
+    ;['city', 'state', 'country'].forEach((f, i, arr) => {
       makeInlineEditable(document.getElementById('vn-' + f), {
-        placeholder: '—',
+        placeholder: '\u2014',
         get: () => v[f] || '',
         onSave: async val => { val = val.trim(); v[f] = val; await saveField({ [f]: val || null }) },
+        // Forward: City → State → Country → Notes. Shift-Tab walks back up.
+        tabTo: shift => shift
+          ? (i > 0 ? 'vn-' + arr[i - 1] : 'vn-name')
+          : (i < arr.length - 1 ? 'vn-' + arr[i + 1] : 'vn-bio'),
       })
     })
     makeInlineEditable(document.getElementById('vn-bio'), {
@@ -7998,27 +8481,34 @@ const App = (() => {
         <div class="rec-table">${p.recordings.map(r => flatRowHtml(r, false)).join('')}</div>
       </div>`).join('')
 
-    setMainHTML(`
-      <div class="performer-page">
-        ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="gn-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
-        <div class="performer-head">
-          <div class="pp-name-row">
-            <h1 class="pp-name pp-editable" id="gn-name" title="Click to edit">${esc(g.name)}</h1>
-            <button class="btn btn-ghost btn-sm pp-delete" id="gn-delete" title="Delete genre">Delete</button>
-          </div>
-          <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="gn-desc" title="Click to edit">${descText ? esc(g.description) : 'Add a description…'}</div>
-        </div>
-        <div class="subtitle">${g.performer_count} performer${g.performer_count !== 1 ? 's' : ''} · ${g.recording_count} recording${g.recording_count !== 1 ? 's' : ''}</div>
-        ${performers.length ? perfSectionsHtml : '<div class="empty-state" style="min-height:140px"><div class="empty-title">No performers assigned to this genre yet</div><div class="empty-sub">Assign some from the <a href="#/genres/assign">bulk assignment screen</a>.</div></div>'}
-      </div>`)
-
+    setMainHTML(entityShellHtml({
+      navBack,
+      // Colour swatch instead of a portrait — a genre has no likeness, but it
+      // does have the colour that tints every card of its performers, so
+      // showing it here is both the identity and a live preview of the picker.
+      portrait: `<div class="gn-swatch" style="--genre-fg:${esc(g.color || 'var(--t2)')}"></div>`,
+      title: esc(g.name),
+      titleId: 'gn-name',
+      titleEditable: true,
+      chips: g.color ? `<span class="pp-hero-fact">${esc(g.color)}</span>` : '',
+      stats: [
+        [g.performer_count || 0, (g.performer_count === 1) ? 'Performer' : 'Performers'],
+        [g.recording_count || 0, (g.recording_count === 1) ? 'Recording' : 'Recordings'],
+      ],
+      actions: `<button class="btn btn-ghost btn-sm pp-delete" id="gn-delete" title="Delete genre">Delete</button>`,
+      // No Photos tab (Ryan, 2026-08-07) — a genre has nothing to photograph.
+      tabs: [
+        { id: 'overview', label: 'Overview', active: true, html: `
+            <div class="pp-sec">Description</div>
+            <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="gn-desc" title="Click to edit">${descText ? esc(g.description) : 'Add a description\u2026'}</div>` },
+        { id: 'recordings', label: 'Recordings', count: g.recording_count || 0, html:
+            performers.length
+              ? perfSectionsHtml
+              : `<div class="empty-state" style="min-height:160px"><div class="empty-title">No performers assigned to this genre yet</div><div class="empty-sub">Assign some from the <a href="#/genres/assign">bulk assignment screen</a>.</div></div>` },
+      ],
+    }))
+    wireEntityShell(mainContent, navBack)
     wireRecordingRows(mainContent)
-
-    if (navBack) {
-      document.getElementById('gn-back-btn')?.addEventListener('click', () => {
-        window.location.hash = navBack.hash
-      })
-    }
 
     const refreshSidebar = () => invalidateDims('genres')
     async function saveField(patch) {
@@ -8450,6 +8940,15 @@ const App = (() => {
       if (id) renderRecordingView(id)
       else    renderLibraryView()
 
+    // Create forms MUST precede the '#/<thing>/<id>' prefix matches below —
+    // otherwise '#/artist/new' is parsed as id "new" (NaN) and renders a broken
+    // detail page instead of the form.
+    } else if (hash === '#/venue/new') {
+      renderVenueForm()
+    } else if (hash === '#/performer/new') {
+      renderPerformerForm()
+    } else if (hash === '#/artist/new') {
+      renderArtistForm()
     } else if (hash.startsWith('#/artist/')) {
       const id = parseInt(hash.split('/')[2])
       if (id) renderArtistView(id)
@@ -8579,7 +9078,7 @@ const App = (() => {
     const keySet   = prefs.has_api_key
     const noKeychain = prefs.keychain_available === false
     const model    = prefs.ai_model || 'claude-sonnet-5'
-    const behavior = prefs.ingest_file_behavior || 'copy'
+    const behavior = prefs.ingest_file_behavior || 'move'
 
     const overlay = document.createElement('div')
     overlay.className = 'modal-overlay'
@@ -8603,8 +9102,8 @@ const App = (() => {
 
           <label class="settings-label" style="margin-top:14px">Ingest file handling</label>
           <select id="settings-behavior">
+            <option value="move" ${behavior !== 'copy' ? 'selected' : ''}>Move into library (source removed)</option>
             <option value="copy" ${behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
-            <option value="move" ${behavior === 'move' ? 'selected' : ''}>Move into library</option>
           </select>
         </div>
         <div class="modal-footer">

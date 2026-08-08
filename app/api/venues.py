@@ -8,13 +8,18 @@ Routes:
   PUT  /api/venues/<id>    — update venue
 """
 
-from flask import Blueprint, request, jsonify
+from pathlib import Path
+
+from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required
 from sqlalchemy import or_
 
 from app.extensions import db
 from app.models.venue import Venue
+from app.models.venue_image import VenueImage
 from app.utils.serialize import recording_row
+from app.utils.ingest import _sanitize_path
+from app.utils import entity_images as ei
 
 bp = Blueprint("venues", __name__)
 
@@ -69,7 +74,71 @@ def get_venue(venue_id):
         "performance_count": len(v.performances),
         "recording_count":   len(recordings),
         "recordings":        recordings,
+        "has_image":         bool(v.images),
+        "images":            [ei.image_payload(i, _IMG_URL) for i in v.images],
     })
+
+
+# ── Photos (2026-08-07) ──────────────────────────────────────────────────────
+# Parallel table to performer_image, shared behaviour via utils/entity_images.
+# Files live under LIBRARY_ROOT/_venues/<sanitized name>/_images — the `_venues`
+# prefix keeps them out of the performer namespace, because a venue and an act
+# can share a name ("Fillmore") and two entities writing one folder is a
+# collision waiting to happen.
+
+_IMG_URL = "/api/venues/images"
+
+
+def _venue_images_dir(venue):
+    library_root = current_app.config["LIBRARY_ROOT"]
+    return Path(library_root) / "_venues" / _sanitize_path(venue.name) / "_images"
+
+
+@bp.route("/<int:venue_id>/images", methods=["GET"])
+@login_required
+def list_venue_images(venue_id):
+    v = db.session.get(Venue, venue_id)
+    if not v:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify([ei.image_payload(i, _IMG_URL) for i in v.images])
+
+
+@bp.route("/<int:venue_id>/images", methods=["POST"])
+@login_required
+def upload_venue_images(venue_id):
+    v = db.session.get(Venue, venue_id)
+    if not v:
+        return jsonify({"error": "Not found"}), 404
+    return ei.handle_upload(v, VenueImage, _venue_images_dir(v), _IMG_URL)
+
+
+@bp.route("/images/<int:image_id>", methods=["GET"])
+@login_required
+def serve_venue_image(image_id):
+    img = db.session.get(VenueImage, image_id)
+    if not img:
+        return jsonify({"error": "No image"}), 404
+    return ei.handle_serve(img, _venue_images_dir(img.venue))
+
+
+@bp.route("/images/<int:image_id>/primary", methods=["POST"])
+@login_required
+def make_venue_image_primary(image_id):
+    img = db.session.get(VenueImage, image_id)
+    if not img:
+        return jsonify({"error": "Not found"}), 404
+    ei.set_primary(img)
+    db.session.commit()
+    return jsonify(ei.image_payload(img, _IMG_URL))
+
+
+@bp.route("/images/<int:image_id>", methods=["DELETE"])
+@login_required
+def delete_venue_image(image_id):
+    img = db.session.get(VenueImage, image_id)
+    if not img:
+        return jsonify({"error": "Not found"}), 404
+    return ei.handle_delete(img, _venue_images_dir(img.venue))
 
 
 @bp.route("/", methods=["POST"])

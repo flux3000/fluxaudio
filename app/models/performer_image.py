@@ -29,6 +29,10 @@ from app.extensions import db
 class PerformerImage(db.Model):
     __tablename__ = "performer_image"
 
+    # The hook every helper in app/utils/entity_images.py keys off — the only
+    # thing that differs between this table and venue_image.
+    __parent_fk__ = "performer_id"
+
     id           = db.Column(db.Integer, primary_key=True)
     performer_id = db.Column(db.Integer,
                              db.ForeignKey("performer.id", ondelete="CASCADE"),
@@ -70,35 +74,7 @@ class PerformerImage(db.Model):
                 f"{self.filename}{' PRIMARY' if self.is_primary else ''}>")
 
 
-def set_primary(image):
-    """
-    Make `image` its performer's primary, clearing any sibling that held it.
-
-    The single enforcement point for the one-primary rule — see the module
-    docstring. Does NOT commit: callers decide the transaction boundary.
-    """
-    (db.session.query(PerformerImage)
-     .filter(PerformerImage.performer_id == image.performer_id,
-             PerformerImage.id != image.id,
-             PerformerImage.is_primary.is_(True))
-     .update({"is_primary": False}, synchronize_session=False))
-    image.is_primary = True
-    return image
-
-
-def primary_for(performer_id):
-    """
-    The performer's primary image, or the oldest image if none is flagged.
-
-    The fallback matters: deleting the primary must not leave a performer with
-    photos but no face on the card. Callers get a usable image whenever one
-    exists at all, and `is_primary` becomes a preference rather than a
-    precondition.
-    """
-    rows = (db.session.query(PerformerImage)
-            .filter(PerformerImage.performer_id == performer_id)
-            .order_by(PerformerImage.is_primary.desc(),
-                      PerformerImage.sort_order,
-                      PerformerImage.id)
-            .first())
-    return rows
+# Behaviour lives in app/utils/entity_images.py so Performer and Venue photo
+# management cannot drift apart (2026-08-07). Re-exported here because existing
+# callers import these names from this module.
+from app.utils.entity_images import set_primary, primary_for   # noqa: E402,F401
