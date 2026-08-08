@@ -91,6 +91,64 @@ body.theme-light {
 
 body.theme-light .info-file-textarea:focus { background: rgba(0,0,0,0.02); }
 
+/* ── Peer mode (browsing someone else's library) ─────────────────────────────
+   Ryan, 2026-08-08. The layout is deliberately IDENTICAL to your own library —
+   same cards, same pages, same everything — so what has to change is the
+   chrome, unmistakably and at all times. A badge you stop noticing on day two
+   is exactly the wrong signal for "these recordings are not yours."
+
+   Warm Ash → COOL SLATE. Surfaces lose their warmth and the accent moves from
+   amber-tan to teal. That reads instantly as a different place without
+   requiring you to read anything.
+
+   Genre colours are NOT touched. Those are content, not chrome: a Funk card
+   must be the same colour in everyone's library or the colour stops meaning
+   genre. Same for the source badges and the semantic green/amber/red.
+
+   Applied to <html> rather than <body> so it composes with theme-light, which
+   lives on <body>. The two are independent axes: light/dark is a preference,
+   peer/own is a context, and every combination has to work. */
+html.peer-mode {
+  /* Surfaces — Cool Slate (dark) */
+  --bg-0:  #0f1214;
+  --bg-1:  #151a1e;
+  --bg-2:  #12171a;
+  --bg-3:  #1c2328;
+  --bg-4:  #242d33;
+  --bg-5:  #2c373e;
+
+  --t0: #d4dde2;
+  --t1: #8fa3ad;
+  --t2: #667884;
+  --t3: #4a5a64;
+
+  /* Accent — cool teal, the counterpart to the owned library's amber */
+  --accent:      #5fa8b5;
+  --accent-lit:  #7dc2ce;
+  --accent-dim:  rgba(95,168,181,0.14);
+  --accent-dim2: rgba(95,168,181,0.24);
+}
+
+html.peer-mode body.theme-light {
+  /* Cool Slate (light) — a cool paper rather than the warm Parchment */
+  --bg-0:  #eef2f4;
+  --bg-1:  #e4eaed;
+  --bg-2:  #e9eef1;
+  --bg-3:  #f7fafb;
+  --bg-4:  #dae2e6;
+  --bg-5:  #ccd7dc;
+
+  --t0: #1b262b;
+  --t1: #3f5259;
+  --t2: #68797f;
+  --t3: #93a4aa;
+
+  --accent:      #2e7d8c;
+  --accent-lit:  #1f5f6c;
+  --accent-dim:  rgba(46,125,140,0.12);
+  --accent-dim2: rgba(46,125,140,0.20);
+}
+
 /* ── Reset ──────────────────────────────────────────────────────────────────── */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -3181,6 +3239,103 @@ input[type="range"].progress-bar {
 /* ── Sidebar nav (all-caps top-level; expandable dimensions) ──────────────────── */
 
 /* Prominent "Add Recording" button pinned at the top of the column */
+/* ── Peers / Sharing page ──────────────────────────────────
+   Master-detail: the list is a scan of who has access, the pane is one peer.
+   Same idiom as the Venues and Genres admin screens, so the third list-and-
+   detail page in the app doesn't invent a fourth layout.                    */
+.peer-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; }
+.peer-list { display: flex; flex-direction: column; gap: 2px; }
+.peer-row {
+  padding: 8px 10px; border-radius: var(--r-sm); cursor: pointer;
+  border: 1px solid transparent;
+}
+.peer-row:hover { background: var(--bg-1); }
+.peer-row.active { background: var(--accent-dim); border-color: var(--accent); }
+.peer-row-name { font-size: 12.5px; color: var(--t0); }
+.peer-row-meta { font-size: 10.5px; color: var(--t3); margin-top: 2px; }
+/* A revoked peer stays visible rather than disappearing — you need to see that
+   access WAS removed, not just that someone is absent. */
+.peer-row.is-revoked .peer-row-name { color: var(--t3); text-decoration: line-through; }
+.peer-empty { font-size: 11.5px; color: var(--t3); font-style: italic; padding: 10px 0; }
+.peer-badge--revoked {
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--red); border: 1px solid var(--red); border-radius: 3px; padding: 2px 6px;
+}
+
+.peer-grants { display: flex; flex-direction: column; gap: 2px; max-width: 520px; }
+.peer-grant {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; margin: 0 -8px; border-radius: var(--r-sm);
+  font-size: 12px; color: var(--t1); cursor: pointer;
+}
+.peer-grant:hover { background: var(--bg-1); }
+.peer-grant.is-on { color: var(--t0); }
+.peer-grant-name { flex: 1; min-width: 0; }
+.peer-grant-count { font-size: 10.5px; color: var(--t3); font-variant-numeric: tabular-nums; }
+
+/* The invite is shown ONCE — the server keeps only a hash. Loud on purpose,
+   because navigating away really does lose it. */
+.peer-invite-box {
+  margin-top: 12px; padding: 12px 14px;
+  background: var(--bg-1); border: 1px solid var(--accent); border-radius: var(--r-sm);
+}
+.peer-invite-label {
+  font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--t3); margin-bottom: 6px;
+}
+.peer-invite-code {
+  display: block; font-family: var(--font-mono); font-size: 12.5px;
+  color: var(--accent-lit); word-break: break-all; line-height: 1.5;
+}
+.peer-invite-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.peer-invite-note { font-size: 10.5px; color: var(--t3); }
+.peer-invite-warn { font-size: 10.5px; color: var(--amber); margin-top: 10px; line-height: 1.5; }
+
+.peer-act {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 5px 0; border-bottom: 1px solid var(--bd-0); font-size: 11.5px; color: var(--t1);
+}
+.peer-act:last-child { border-bottom: none; }
+.peer-act-when { color: var(--t3); white-space: nowrap; }
+
+@media (max-width: 860px) {
+  .peer-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Library selector ────────────────────────────────────────────────────────
+   Above Add Recordings. With one library it is a plain label, not a control:
+   a dropdown arrow opening a menu of one would promise something the app
+   can't yet do. It grows a caret the moment a remote exists. */
+.lib-select {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 12px 4px; padding: 8px 10px;
+  border: 1px solid var(--bd-1); border-radius: var(--r-sm);
+  background: var(--bg-2); font-size: 12px; color: var(--t0);
+  cursor: pointer; transition: border-color .12s, background .12s;
+}
+.lib-select.is-solo { cursor: default; }
+.lib-select:not(.is-solo):hover { border-color: var(--accent); background: var(--bg-3); }
+.lib-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* In a remote library the selector itself carries the accent, so the thing
+   naming where you are is also the thing that looks different. */
+.lib-select.is-remote { border-color: var(--accent); color: var(--accent-lit); }
+.lib-select-icon { color: var(--accent); font-size: 12px; flex-shrink: 0; }
+.lib-select-name { flex: 1; min-width: 0; font-weight: 500; }
+.lib-select-caret { color: var(--t3); font-size: 10px; }
+
+.lib-select-menu {
+  margin: 0 12px 6px; padding: 4px;
+  background: var(--bg-3); border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+}
+.lib-select-opt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 3px;
+  font-size: 12px; color: var(--t1); cursor: pointer;
+}
+.lib-select-opt:hover { background: var(--bg-4); color: var(--t0); }
+.lib-select-opt.active { color: var(--accent-lit); }
+
 .nav-add-btn {
   display: flex; align-items: center; justify-content: center; gap: 7px;
   margin: 4px 12px 10px; padding: 8px 12px;

@@ -833,14 +833,110 @@ const App = (() => {
   }
   // _promptCreate() removed 2026-08-07 — every dimension now opens a real
   // create form (renderCreateForm) instead of a window.prompt().
+  // ══ Library selector ═══════════════════════════════════════════════════════
+  //
+  // Sits above "Add Recordings" (Ryan, 2026-08-08). Your own library is the
+  // default and always first; libraries shared WITH you appear beneath it once
+  // the outbound side exists.
+  //
+  // Built now, before there is anything to select, on purpose: it is the frame
+  // the peer theme hangs off, and it makes "which library am I in?" a question
+  // the UI answers at all times rather than only when the answer is unusual.
+  // With one entry it renders as a plain, non-interactive label — a dropdown
+  // arrow that opens a menu of one is a lie about what the app can do.
+  //
+  // `remotes` stays empty until `remote_node` lands (milestone 2); the selector
+  // reads it rather than checking a feature flag, so it starts working the day
+  // remotes exist with no change here.
+  const libraryState = {
+    remotes: [],        // [{id, display_name, last_connected_at}]
+    activeId: null,     // null = my own library
+  }
+
+  function activeLibrary() {
+    if (libraryState.activeId == null) return null
+    return libraryState.remotes.find(r => r.id === libraryState.activeId) || null
+  }
+
+  function librarySelectorHtml() {
+    const active = activeLibrary()
+    const label = active ? active.display_name : 'My Library'
+    const solo = libraryState.remotes.length === 0
+    return `
+      <div class="lib-select${solo ? ' is-solo' : ''}${active ? ' is-remote' : ''}"
+           id="lib-select" ${solo ? '' : 'role="button" tabindex="0"'}>
+        <span class="lib-select-icon">${active ? '⇄' : '◈'}</span>
+        <span class="lib-select-name truncate">${esc(label)}</span>
+        ${solo ? '' : '<span class="lib-select-caret">▾</span>'}
+      </div>
+      <div class="lib-select-menu" id="lib-select-menu" style="display:none"></div>`
+  }
+
+  function wireLibrarySelector(nav) {
+    const el = nav.querySelector('#lib-select')
+    const menu = nav.querySelector('#lib-select-menu')
+    if (!el || !menu || libraryState.remotes.length === 0) return
+
+    const close = () => { menu.style.display = 'none' }
+    const open = () => {
+      menu.innerHTML = [
+        { id: null, display_name: 'My Library' },
+        ...libraryState.remotes,
+      ].map(l => `
+        <div class="lib-select-opt${l.id === libraryState.activeId ? ' active' : ''}"
+             data-lib-id="${l.id == null ? '' : l.id}">
+          <span class="lib-select-icon">${l.id == null ? '◈' : '⇄'}</span>
+          <span class="truncate">${esc(l.display_name)}</span>
+        </div>`).join('')
+      menu.style.display = 'block'
+      menu.querySelectorAll('.lib-select-opt').forEach(opt =>
+        opt.addEventListener('click', () => {
+          const raw = opt.dataset.libId
+          switchLibrary(raw === '' ? null : Number(raw))
+          close()
+        }))
+    }
+    el.addEventListener('click', () => {
+      menu.style.display === 'block' ? close() : open()
+    })
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click() }
+    })
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#lib-select, #lib-select-menu')) close()
+    })
+  }
+
+  // Switching library is a whole-app context change, not a navigation: the
+  // theme flips, the sidebar reloads, and the current view is meaningless in
+  // the new context. So it resets to the library root rather than trying to
+  // map, say, /performer/12 onto a different database's ids.
+  function switchLibrary(id) {
+    if (libraryState.activeId === id) return
+    libraryState.activeId = id
+    applyPeerTheme()
+    window.location.hash = '#/'
+    renderSidebar()
+    route()
+  }
+
+  // Peer mode retints the CHROME only — surfaces and accent. Genre colours are
+  // untouched because those are content: a Funk card must look the same colour
+  // in anyone's library or the colour stops meaning genre.
+  function applyPeerTheme() {
+    document.documentElement.classList.toggle('peer-mode', libraryState.activeId != null)
+  }
+
   async function renderSidebar() {
     const nav = document.getElementById('sidebar-nav')
     if (!nav) return
     _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = _dimCache.genres = null
     nav.innerHTML = `
+      ${librarySelectorHtml()}
       <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recordings</a>
       <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
       <a class="nav-item nav-top" data-nav="recent" href="#/recent"><span class="nav-icon">◷</span> Recently Added</a>
+      <a class="nav-item nav-top" data-nav="peers" href="#/peers"><span class="nav-icon">⇄</span> Sharing</a>
       ${_dimSection('collections', null, 'Collections', true)}
       ${_dimSection('venues', '◎', 'Venues')}
       ${_dimSection('performers', '✦', 'Performers')}
@@ -860,6 +956,7 @@ const App = (() => {
         else createInDim(dim)
       })
     })
+    wireLibrarySelector(nav)
     state.expandedDims.forEach(dim => _renderDimRecords(dim))
     setActiveNav(state._activeNav)
   }
@@ -1322,6 +1419,234 @@ const App = (() => {
     // require reaching for the mouse.
     mainContent.querySelectorAll('.create-form input').forEach(el =>
       el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save() } }))
+  }
+
+  // ══ Peers — inbound sharing management ═════════════════════════════════════
+  //
+  // A frontend for api/peers.py, which has existed since 2026-07-16 and was
+  // curl-only until now. NOTHING here is new server surface — every call maps
+  // to an endpoint that already works and is already tested.
+  //
+  // Sharing is COLLECTION-ONLY (Ryan, 2026-08-08). Artist-level, whole-library
+  // and per-recording grants were considered and dropped: collections are
+  // already the arbitrary-set-of-recordings primitive, and bulk tools for
+  // filling a collection make "share everything" a collection you build once
+  // rather than a second grant model to maintain. That decision is why this
+  // page needs no migration at all.
+  async function renderPeersPage(preSelectId = null) {
+    setActiveNav('peers')
+    setNavCurrent('Sharing')
+    setLoading()
+
+    let peers = [], collections = []
+    try {
+      [peers, collections] = await Promise.all([
+        API.peers.list(), API.collections.list(),
+      ])
+    } catch (e) {
+      setMainHTML(`<div class="empty-state"><div class="empty-title">Could not load peers</div><div class="empty-sub">${esc(e.message)}</div></div>`)
+      return
+    }
+
+    let activeId = preSelectId || (peers[0] && peers[0].id) || null
+
+    setMainHTML(entityShellHtml({
+      title: 'Sharing',
+      stats: [
+        [peers.filter(p => p.is_active).length, 'Peers'],
+        [collections.length, collections.length === 1 ? 'Collection' : 'Collections'],
+      ],
+      actions: `<button class="btn btn-ghost btn-sm" id="peer-new">+ Add peer</button>`,
+      tabs: [{
+        id: 'peers', label: 'Peers',
+        html: `
+          <div class="peer-layout">
+            <div class="peer-list" id="peer-list"></div>
+            <div class="peer-detail" id="peer-detail"></div>
+          </div>`,
+      }],
+    }))
+    wireEntityShell(mainContent, null)
+
+    function renderList() {
+      const el = document.getElementById('peer-list')
+      if (!peers.length) {
+        el.innerHTML = `<div class="peer-empty">No peers yet.<br>Add one to start sharing.</div>`
+        return
+      }
+      el.innerHTML = peers.map(p => `
+        <div class="peer-row${p.id === activeId ? ' active' : ''}${p.is_active ? '' : ' is-revoked'}" data-id="${p.id}">
+          <div class="peer-row-name truncate">${esc(p.name)}</div>
+          <div class="peer-row-meta">${
+            !p.is_active ? 'Revoked'
+            : p.has_joined ? `${p.grant_count} collection${p.grant_count === 1 ? '' : 's'}`
+            : p.pending_invites ? 'Invited — not joined'
+            : 'Not invited'
+          }</div>
+        </div>`).join('')
+      el.querySelectorAll('.peer-row').forEach(row =>
+        row.addEventListener('click', () => {
+          activeId = Number(row.dataset.id)
+          renderList(); renderDetail()
+        }))
+    }
+
+    async function renderDetail() {
+      const el = document.getElementById('peer-detail')
+      if (activeId == null) {
+        el.innerHTML = `<div class="peer-empty">Select a peer, or add one.</div>`
+        return
+      }
+      el.innerHTML = `<div class="peer-empty">Loading…</div>`
+      let p
+      try { p = await API.peers.get(activeId) }
+      catch (e) { el.innerHTML = `<div class="peer-empty">Failed to load: ${esc(e.message)}</div>`; return }
+
+      const granted = new Set(p.grants.map(g => g.collection_id))
+      el.innerHTML = `
+        <div class="pp-sec-row">
+          <h2 class="pp-block-title" id="peer-name" title="Click to edit">${esc(p.name)}</h2>
+          ${p.is_active
+            ? `<button class="btn btn-ghost btn-xs" id="peer-revoke" style="margin-left:auto; color:var(--red)">Revoke access</button>`
+            : `<span class="peer-badge peer-badge--revoked" style="margin-left:auto">Revoked</span>`}
+        </div>
+        <div class="pp-desc pp-editable ${p.contact_note ? '' : 'pp-empty'}" id="peer-note" title="Click to edit">${
+          p.contact_note ? esc(p.contact_note) : 'Add a note — who is this?'}</div>
+
+        <div class="pp-block">
+          <h2 class="pp-block-title">Shared collections</h2>
+          <div class="pp-block-hint">A peer sees every recording in every collection ticked here. Sharing a collection shares everything in it, including anything you add later.</div>
+          ${collections.length ? `
+            <div class="peer-grants">
+              ${collections.map(c => `
+                <label class="peer-grant${granted.has(c.id) ? ' is-on' : ''}">
+                  <input type="checkbox" data-col-id="${c.id}" ${granted.has(c.id) ? 'checked' : ''} ${p.is_active ? '' : 'disabled'}>
+                  <span class="peer-grant-name truncate">${esc(c.name)}</span>
+                  <span class="peer-grant-count">${c.recording_count}</span>
+                </label>`).join('')}
+            </div>`
+            : `<div class="peer-empty">No collections yet — <a href="#/collections">create one</a> to have something to share.</div>`}
+        </div>
+
+        <div class="pp-block">
+          <h2 class="pp-block-title">Invite</h2>
+          <div class="pp-block-hint">Generates a one-time code. It is shown once and stored only as a hash — if it's lost, mint a new one.</div>
+          <div class="ai-assist-cta">
+            <button class="btn btn-primary btn-sm" id="peer-invite" ${p.is_active ? '' : 'disabled'}>
+              ${p.has_joined ? 'New invite' : 'Create invite'}</button>
+            <div class="ai-assist-hint">${
+              p.has_joined ? `Joined · ${p.devices.length} device${p.devices.length === 1 ? '' : 's'}`
+              : p.pending_invites ? `${p.pending_invites} invite pending`
+              : 'Not yet invited'}</div>
+          </div>
+          <div id="peer-invite-out"></div>
+        </div>
+
+        <div class="pp-block">
+          <h2 class="pp-block-title">Activity</h2>
+          <div class="pp-block-hint">${p.last_seen_at ? 'Last seen ' + esc(fmtDateAdded(p.last_seen_at)) : 'Never connected.'}</div>
+          <div id="peer-activity"></div>
+        </div>`
+
+      makeInlineEditable(document.getElementById('peer-name'), {
+        get: () => p.name,
+        onSave: async v => {
+          v = v.trim(); if (!v || v === p.name) return
+          await API.peers.update(p.id, { name: v })
+          p.name = v
+          const row = peers.find(x => x.id === p.id); if (row) row.name = v
+          renderList()
+        },
+      })
+      makeInlineEditable(document.getElementById('peer-note'), {
+        multiline: true, placeholder: 'Add a note — who is this?',
+        get: () => p.contact_note || '',
+        onSave: async v => { v = v.trim(); p.contact_note = v; await API.peers.update(p.id, { contact_note: v || null }) },
+      })
+
+      // Grants toggle immediately — a checkbox that needs a Save button is a
+      // checkbox that will be left unsaved.
+      el.querySelectorAll('.peer-grants input').forEach(cb =>
+        cb.addEventListener('change', async () => {
+          const cid = Number(cb.dataset.colId)
+          cb.disabled = true
+          try {
+            if (cb.checked) await API.peers.addGrants(p.id, [cid])
+            else await API.peers.revokeGrant(p.id, cid)
+            cb.closest('.peer-grant').classList.toggle('is-on', cb.checked)
+            const row = peers.find(x => x.id === p.id)
+            if (row) { row.grant_count += cb.checked ? 1 : -1; renderList() }
+          } catch (e) {
+            cb.checked = !cb.checked
+            alert('Failed: ' + e.message)
+          } finally { cb.disabled = false }
+        }))
+
+      document.getElementById('peer-invite')?.addEventListener('click', async () => {
+        const out = document.getElementById('peer-invite-out')
+        out.innerHTML = `<div class="peer-empty">Creating…</div>`
+        try {
+          const inv = await API.peers.mintInvite(p.id)
+          // Shown ONCE. The server stores only a SHA-256 hash, so there is no
+          // "show it again" — say so plainly rather than letting someone
+          // navigate away assuming they can come back for it.
+          out.innerHTML = `
+            <div class="peer-invite-box">
+              <div class="peer-invite-label">${inv.invite ? 'Send this to your peer' : 'Invite code'}</div>
+              <code class="peer-invite-code" id="peer-invite-code">${esc(inv.invite || inv.code)}</code>
+              <div class="peer-invite-actions">
+                <button class="btn btn-ghost btn-xs" id="peer-invite-copy">Copy</button>
+                <span class="peer-invite-note">Shown once · expires ${esc(fmtDateAdded(inv.expires_at))}</span>
+              </div>
+              ${inv.base_url_set ? '' : `
+                <div class="peer-invite-warn">No public address configured, so this is the bare code. Set <code>SHARE_BASE_URL</code> and mint again to get a single paste-able string.</div>`}
+            </div>`
+          document.getElementById('peer-invite-copy').addEventListener('click', () => {
+            navigator.clipboard?.writeText(inv.invite || inv.code)
+            document.getElementById('peer-invite-copy').textContent = '✓ Copied'
+          })
+          const row = peers.find(x => x.id === p.id)
+          if (row) { row.pending_invites += 1; renderList() }
+        } catch (e) { out.innerHTML = `<div class="peer-empty" style="color:var(--red)">${esc(e.message)}</div>` }
+      })
+
+      document.getElementById('peer-revoke')?.addEventListener('click', async () => {
+        if (!confirm(`Revoke all access for "${p.name}"?\n\nThis kills every grant and every device token at once. It cannot be undone — you would need to invite them again.`)) return
+        try {
+          await API.peers.revoke(p.id)
+          peers = await API.peers.list()
+          renderList(); renderDetail()
+        } catch (e) { alert('Failed: ' + e.message) }
+      })
+
+      try {
+        const acts = await API.peers.activity(p.id)
+        const box = document.getElementById('peer-activity')
+        if (box) {
+          box.innerHTML = acts.length
+            ? `<div>${acts.slice(0, 12).map(a => `
+                <div class="peer-act">
+                  <span class="truncate">${esc([a.performer, a.date].filter(Boolean).join(' · ') || a.track_title || 'track')}</span>
+                  <span class="peer-act-when">${esc(fmtDateAdded(a.occurred_at))}</span>
+                </div>`).join('')}</div>`
+            : `<div class="peer-empty">Nothing streamed yet.</div>`
+        }
+      } catch (_) { /* activity is nice-to-have, never blocks the page */ }
+    }
+
+    document.getElementById('peer-new').addEventListener('click', async () => {
+      const name = prompt('Peer name — your own label for this person:')
+      if (!name || !name.trim()) return
+      try {
+        const created = await API.peers.create({ name: name.trim() })
+        peers = await API.peers.list()
+        activeId = created.id
+        renderList(); renderDetail()
+      } catch (e) { alert('Failed: ' + e.message) }
+    })
+
+    renderList()
+    renderDetail()
   }
 
   const renderVenueForm = () => renderCreateForm({
@@ -9052,6 +9377,8 @@ const App = (() => {
       if (id) renderPersonView(id)
       else    renderLibraryView()
 
+    } else if (hash === '#/peers') {
+      renderPeersPage()
     } else if (hash === '#/collections') {
       renderCollectionsIndex()
 

@@ -122,6 +122,22 @@ const API = (() => {
       mbMembers:    (id)       => get(`/api/performers/${id}/musicbrainz/members`),
     },
 
+    // ── Peers (inbound sharing — who I share TO) ─────────────────────────────
+    // Every one of these endpoints has existed since 2026-07-16 and was
+    // curl-only until now; this is a client for them, not new surface.
+    peers: {
+      list:        ()             => get('/api/peers/'),
+      get:         (id)           => get(`/api/peers/${id}`),
+      create:      (data)         => post('/api/peers/', data),
+      update:      (id, data)     => request('PATCH', `/api/peers/${id}`, data),
+      revoke:      (id)           => post(`/api/peers/${id}/revoke`),
+      addGrants:   (id, ids)      => post(`/api/peers/${id}/grants`, { collection_ids: ids }),
+      revokeGrant: (id, colId)    => request('DELETE', `/api/peers/${id}/grants/${colId}`),
+      // Returns the raw code ONCE — it is hashed at rest and unrecoverable.
+      mintInvite:  (id, days)     => post(`/api/peers/${id}/invites`, days ? { expires_days: days } : {}),
+      activity:    (id)           => get(`/api/peers/${id}/activity`),
+    },
+
     // ── Performances ─────────────────────────────────────────────────────────
     performances: {
       get:    (id)       => get(`/api/performances/${id}`),

@@ -105,3 +105,20 @@ class Config:
     # (see app._validate_server_mode): refuses to start with DEV_MODE on or
     # with a default/blank SECRET_KEY.
     SERVER_MODE = _env_flag("SERVER_MODE", default=False)
+
+    # ── Peer sharing identity (2026-08-08) ────────────────────
+    # api/peers.py and api/share.py already read these; until now nothing
+    # DEFINED them, so `mint_invite` returned `invite: null` and there was no
+    # way to hand a peer the single `address#code` string the design calls for.
+    #
+    # SHARE_BASE_URL is the address a peer's app will hit — the Cloudflare
+    # Tunnel hostname once that exists. Deliberately unset by default: an
+    # invite string containing a wrong address is worse than no invite string,
+    # because it fails at the peer's end with nothing to point at. The admin UI
+    # shows the raw code and explains what's missing instead.
+    SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL") or None
+
+    # How this node introduces itself on enroll and /api/share/me. The owner
+    # falls back to the first admin's username when unset (see share.py).
+    SHARE_NODE_NAME = os.environ.get("SHARE_NODE_NAME") or "Flux Library"
+    SHARE_OWNER_NAME = os.environ.get("SHARE_OWNER_NAME") or None
