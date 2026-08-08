@@ -3,6 +3,7 @@ from .user import User, UserArtistPermission
 from .user_preference import UserPreference
 from .genre import Genre
 from .performer import Performer, PerformerResource
+from .performer_image import PerformerImage
 from .artist import Artist, Membership
 from .venue import Venue
 from .event import Event

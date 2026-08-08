@@ -24,8 +24,7 @@ from app import create_app
 from app.extensions import db
 from app.models.recording import Recording
 from app.models.track import Track
-from app.models.track_analysis import TrackAnalysis
-from app.utils.analysis import analyse_track, ANALYSIS_VERSION
+from app.utils.analysis import analyse_and_store_track, ANALYSIS_VERSION
 from config import Config
 from datetime import datetime, timezone
 
@@ -84,58 +83,28 @@ def run():
             for track in rec.tracks:
                 abs_path = os.path.join(folder_abs, track.file_path)
 
-                # Check for existing analysis
-                if not REANALYZE:
-                    existing = (
-                        db.session.query(TrackAnalysis)
-                        .filter_by(track_id=track.id, analysis_version=ANALYSIS_VERSION)
-                        .first()
-                    )
-                    if existing:
-                        print(f"  ✓  skip  {track.file_path}")
-                        track_skipped += 1
-                        continue
-
-                if not os.path.isfile(abs_path):
-                    print(f"  ✗  missing  {track.file_path}")
-                    track_failed += 1
-                    continue
-
+                # The analyse + version-check + upsert logic lives in
+                # app/utils/analysis.py (extracted 2026-08-07) so this script,
+                # analyse_recording(), and the quality backfill all share one
+                # copy and cannot drift as track_analysis gains columns.
                 print(f"  ⏳ analyzing  {track.file_path}", end="", flush=True)
-                t0     = time.time()
-                result = analyse_track(abs_path)
+                t0 = time.time()
+                status = analyse_and_store_track(track, abs_path, db.session,
+                                                 reanalyze=REANALYZE)
                 elapsed = time.time() - t0
 
-                if result is None:
-                    print(f"  ← FAILED ({elapsed:.1f}s)")
+                if status == "ok":
+                    track_ok += 1
+                    print(f"  ← ok ({elapsed:.1f}s)")
+                elif status == "skipped":
+                    track_skipped += 1
+                    print("  ← skip (current)")
+                elif status == "missing":
                     track_failed += 1
-                    continue
-
-                # Upsert
-                ta = db.session.query(TrackAnalysis).filter_by(track_id=track.id).first()
-                if ta is None:
-                    ta = TrackAnalysis(track_id=track.id)
-                    db.session.add(ta)
-
-                ta.sample_rate_hz       = result["sample_rate_hz"]
-                ta.bit_depth            = result["bit_depth"]
-                ta.bitrate_kbps         = result["bitrate_kbps"]
-                ta.rms_db               = result["rms_db"]
-                ta.peak_db              = result["peak_db"]
-                ta.noise_floor_db       = result["noise_floor_db"]
-                ta.dynamic_range_db     = result["dynamic_range_db"]
-                ta.clipping_pct         = result["clipping_pct"]
-                ta.dc_offset            = result["dc_offset"]
-                ta.spectral_centroid_hz = result["spectral_centroid_hz"]
-                ta.spectral_cutoff_hz   = result["spectral_cutoff_hz"]
-                ta.bpm                  = result["bpm"]
-                ta.waveform_json        = result["waveform_json"]
-                ta.analysis_version     = result["analysis_version"]
-                ta.analyzed_at          = datetime.now(timezone.utc)
-
-                db.session.commit()   # commit per-track — avoids SQLite lock on long runs
-                track_ok += 1
-                print(f"  ← ok ({elapsed:.1f}s)")
+                    print("  ← MISSING on disk")
+                else:
+                    track_failed += 1
+                    print(f"  ← FAILED ({elapsed:.1f}s)")
 
         elapsed_total = time.time() - t_start
         mins, secs    = divmod(int(elapsed_total), 60)

@@ -921,6 +921,90 @@ def test_genre_name_uniqueness(api):
     assert dup.status_code == 409
 
 
+def test_genre_color_roundtrip_validation_and_clearing(api):
+    """Colour is `#rrggbb` only, normalised to lowercase, and CLEARABLE.
+
+    Clearing matters as much as setting: NULL is a first-class state that
+    renders the same neutral grey as a performer with no genre at all, so it
+    must not be a validation failure. Shorthand and named colours are refused
+    at the door so every consumer gets one canonical form.
+    """
+    g = api.post("/api/genres/", json={"name": "Dub", "color": "#AABBCC"}).get_json()
+    assert g["color"] == "#aabbcc"          # normalised on create
+
+    assert api.put(f"/api/genres/{g['id']}", json={"color": "#123abc"}).status_code == 200
+    assert api.get(f"/api/genres/{g['id']}").get_json()["color"] == "#123abc"
+
+    for bad in ("#abc", "red", "123abc", "#12345g"):
+        r = api.put(f"/api/genres/{g['id']}", json={"color": bad})
+        assert r.status_code == 400, bad
+
+    # Both null and empty string clear it.
+    assert api.put(f"/api/genres/{g['id']}", json={"color": None}).status_code == 200
+    assert api.get(f"/api/genres/{g['id']}").get_json()["color"] is None
+    api.put(f"/api/genres/{g['id']}", json={"color": "#aabbcc"})
+    assert api.put(f"/api/genres/{g['id']}", json={"color": ""}).status_code == 200
+    assert api.get(f"/api/genres/{g['id']}").get_json()["color"] is None
+
+
+def test_recording_row_card_fields_opt_in(app, seeded_ids):
+    """`card=True` adds genre/genre_color/image_id; default omits them entirely.
+
+    Absence, not null, is the assertion for the default case — this serializer
+    also backs the 544-row flat List, and each card field walks Recording →
+    Performance → Performer → (Genre | PerformerImage). Shipping them
+    unconditionally would tax List to benefit two small Browse modules.
+    """
+    from app.extensions import db as _db
+    from app.utils.serialize import recording_row
+    from app.models.recording import Recording
+    from app.models.genre import Genre
+    from app.models.performer_image import PerformerImage
+
+    rec = _db.session.get(Recording, seeded_ids["recording_id"])
+
+    plain = recording_row(rec)
+    for key in ("genre", "genre_color", "image_id"):
+        assert key not in plain
+
+    card = recording_row(rec, card=True)
+    assert card["genre"] is None          # no genre assigned yet
+    assert card["genre_color"] is None    # never substitutes a default
+    assert card["image_id"] is None
+
+    performer = rec.performance.performer
+    performer.genre = Genre(name="Trip Hop", color="#445566")
+    _db.session.add(PerformerImage(performer_id=performer.id,
+                                   filename="img_x.jpg", ext=".jpg",
+                                   is_primary=True))
+    _db.session.commit()
+
+    card = recording_row(rec, card=True)
+    assert card["genre"] == "Trip Hop"
+    assert card["genre_color"] == "#445566"
+    assert card["image_id"] is not None
+
+
+def test_recording_row_card_image_falls_back_when_no_primary_flagged(app, seeded_ids):
+    """A performer with images but none flagged primary still gets a face.
+
+    Deleting the primary must never leave a card blank while photos exist, so
+    the serializer falls back to the first image rather than requiring the flag.
+    """
+    from app.extensions import db as _db
+    from app.utils.serialize import recording_row
+    from app.models.recording import Recording
+    from app.models.performer_image import PerformerImage
+
+    rec = _db.session.get(Recording, seeded_ids["recording_id"])
+    pid = rec.performance.performer_id
+    _db.session.add(PerformerImage(performer_id=pid, filename="img_y.png",
+                                   ext=".png", is_primary=False))
+    _db.session.commit()
+
+    assert recording_row(rec, card=True)["image_id"] is not None
+
+
 def test_genre_delete_guarded_while_referenced(api, seeded_ids):
     from app.models.performer import Performer
 
@@ -961,7 +1045,13 @@ def test_performer_put_accepts_and_clears_genre_id(api, seeded_ids):
     r = api.put(f"/api/performers/{pid}", json={"genre_id": g["id"]})
     assert r.status_code == 200
     fetched = api.get(f"/api/performers/{pid}").get_json()
-    assert fetched["genre"] == {"id": g["id"], "name": "Newgrass Test"}
+    # Field-wise rather than whole-dict equality: the genre payload gained
+    # `color` on 2026-08-07 and will gain more. This test is about the FK
+    # assignment round-tripping, so it should not fail every time an unrelated
+    # display field is added to the serializer.
+    assert fetched["genre"]["id"] == g["id"]
+    assert fetched["genre"]["name"] == "Newgrass Test"
+    assert fetched["genre"]["color"] is None   # no colour set on create
 
     # Clearing back to null is a legitimate, supported edit.
     r2 = api.put(f"/api/performers/{pid}", json={"genre_id": None})
@@ -1161,9 +1251,15 @@ def test_recommended_never_repeats_a_performer_in_one_draw(api, db):
     assert len(ids) == len(set(ids))   # no recording picked twice
 
 
-def test_recommended_includes_waveform_and_respects_limit(api, seeded_ids, db):
-    """Recommended cards need the waveform (unlike the flat List rows), and
-    `limit` is honored."""
+def test_recommended_omits_waveform_and_respects_limit(api, seeded_ids, db):
+    """`limit` is honored, and the payload carries NO waveform.
+
+    Inverted 2026-08-07 when the Browse card became a handbill rendered from
+    metadata. Asserting the ABSENCE matters: the waveform opt-in triggers an
+    eager load of every track's analysis row, so a future caller quietly
+    switching it back on is a real performance regression, not a cosmetic one.
+    The card's own fields are asserted here so the endpoint can't drop them.
+    """
     rec = _db.session.get(Recording, seeded_ids["recording_id"])
     rec.quality = "A+"
     db.session.commit()
@@ -1173,7 +1269,9 @@ def test_recommended_includes_waveform_and_respects_limit(api, seeded_ids, db):
     picks = resp.get_json()
     assert len(picks) <= 1
     if picks:
-        assert "waveform" in picks[0]
+        assert "waveform" not in picks[0]
+        for key in ("performer", "start_year", "venue", "source"):
+            assert key in picks[0]
 
 
 def test_recommended_empty_pool_returns_empty_list(api, seeded_ids, db):

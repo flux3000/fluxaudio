@@ -16,6 +16,7 @@ overwrote a recording's date. Nothing here auto-applies either.
 """
 
 import os
+import re
 import time
 
 from app.utils.ai_assist import AiAssistError, _compute_cost
@@ -38,10 +39,13 @@ performing act for an archivist's reference page (this is a library of live conc
 recordings — ROIOs — not a commercial streaming catalog).
 
 Rules:
-- Draft a biography: a few concise paragraphs — formation, key lineup history, era/genre,
+- Write a biography: a few concise paragraphs — formation, key lineup history, era/genre,
 notable characteristics as a live act. Grounded in what your research actually supports;
 never invent unverifiable specifics (exact dates, member names, etc.) just to sound complete.
 If your research is thin, write a shorter, honest biography rather than padding it.
+- PLAIN PROSE ONLY in the biography. No citation markers, no footnote brackets like [1],
+no markdown, no HTML, no <cite> tags. Separate paragraphs with a blank line and nothing
+else. Cited sources belong in the 'sources' field, never inline in the text.
 - Suggest external resource links: prioritize collector/taper community sites, discography
 or setlist databases (setlist.fm, etree, archive.org, a fan-maintained "known shows"
 database if one exists for this act), and dedicated fan archives. These are the kind of
@@ -83,13 +87,42 @@ _SUBMIT_TOOL = {
 }
 
 
+# Citation markup the web-search tool leaves in generated prose. It surfaced as
+# literal "<cite index=...>" text in the biography on the Performer page
+# (2026-08-07). Stripped SERVER-SIDE so what we store is already clean —
+# scrubbing at render time would leave the mess in `dossier_json` forever and
+# require every future consumer to re-implement the same cleanup.
+_CITE_RE = re.compile(r"</?cite[^>]*>", re.IGNORECASE)
+# Bare bracketed reference markers: [1], [12], [1,2], [3][4]
+_REF_RE = re.compile(r"\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]")
+_WS_RE = re.compile(r"[ \t]{2,}")
+
+
+def _clean_prose(text):
+    """Strip citation markup and tidy whitespace, preserving paragraph breaks."""
+    if not text:
+        return text
+    out = _CITE_RE.sub("", text)
+    out = _REF_RE.sub("", out)
+    # Punctuation left stranded by a removed marker: "word ." / "word ,"
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)
+    out = _WS_RE.sub(" ", out)
+    # Collapse 3+ newlines to a paragraph break; keep single/double as authored.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def _extract_dossier(resp):
     """Pull the submit_dossier tool input from the response; fall back to text."""
     for block in resp.content:
         if getattr(block, "type", None) == "tool_use" and block.name == "submit_dossier":
-            return dict(block.input)
+            data = dict(block.input)
+            for key in ("biography", "thinking"):
+                if data.get(key):
+                    data[key] = _clean_prose(data[key])
+            return data
     text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text")
-    return {"thinking": text.strip() or "No structured result returned.",
+    return {"thinking": _clean_prose(text) or "No structured result returned.",
             "biography": "", "resources": [], "sources": []}
 
 

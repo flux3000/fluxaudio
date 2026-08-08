@@ -71,28 +71,55 @@ const API = (() => {
       updateStint:   (stintId, data)      => put(`/api/performers/stints/${stintId}`, data),
       removeStint:   (stintId)            => request('DELETE', `/api/performers/stints/${stintId}`),
 
-      // Profile picture (2026-07-22) — a raw upload, not JSON, so it bypasses
-      // request()'s JSON.stringify/Content-Type: letting the browser set its
-      // own multipart boundary is required for a file upload to parse
-      // server-side. imageUrl() is a plain URL string for an <img src>, not a
-      // fetch call — the browser requests it directly (same-origin session
-      // cookie covers the @login_required check, same as the waveform/
-      // spectrogram images already do).
-      imageUrl: (id) => `/api/performers/${id}/image?t=${Date.now()}`,   // cache-bust on re-upload
-      uploadImage: async (id, file) => {
+      // Profile pictures (2026-07-22; MULTI-IMAGE 2026-08-07) — a raw upload,
+      // not JSON, so it bypasses request()'s JSON.stringify/Content-Type:
+      // letting the browser set its own multipart boundary is required for a
+      // file upload to parse server-side. imageUrl() is a plain URL string for
+      // an <img src>, not a fetch call — the browser requests it directly
+      // (same-origin session cookie covers the @login_required check, same as
+      // the waveform/spectrogram images already do).
+      //
+      // Images are addressed BY IMAGE ID, not by performer: a performer now has
+      // several and "the performer's image" no longer identifies one.
+      imageUrl:     (imageId) => `/api/performers/images/${imageId}`,
+      listImages:   (id)      => get(`/api/performers/${id}/images`),
+      // Accepts a FileList or array — the whole drop goes in one request.
+      uploadImages: async (id, files) => {
         const form = new FormData()
-        form.append('image', file)
-        const res = await fetch(`/api/performers/${id}/image`, { method: 'POST', body: form, credentials: 'same-origin' })
+        for (const f of Array.from(files)) form.append('image', f)
+        const res = await fetch(`/api/performers/${id}/images`,
+          { method: 'POST', body: form, credentials: 'same-origin' })
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
         return data
       },
-      removeImage: (id) => request('DELETE', `/api/performers/${id}/image`),
+      // Wikidata → Wikimedia Commons photo lookup. Returns {found:false} when
+      // the act simply has no freely-licensed photo — an ordinary outcome, not
+      // an error, so it resolves rather than throwing.
+      fetchImage:      (id)            => post(`/api/performers/${id}/images/fetch`),
+      setPrimaryImage: (imageId)       => post(`/api/performers/images/${imageId}/primary`),
+      updateImage:     (imageId, data) => put(`/api/performers/images/${imageId}`, data),
+      removeImage:     (imageId)       => request('DELETE', `/api/performers/images/${imageId}`),
 
-      // Dossier — AI-drafted bio + suggested resource links, background job
-      // (same shape as API.ingest.aiAssist*).
+      // AI Assist — AI-drafted bio + suggested resource links, background job
+      // (same shape as API.ingest.aiAssist*). The ROUTES keep the older
+      // "dossier" name: renaming a working endpoint to match a UI label buys
+      // nothing and breaks anything already pointed at it. The user-facing
+      // wording is AI Assist everywhere (Ryan, 2026-08-07).
+      // Pre-flight cost RANGE for one pass — see utils/ai_assist.py.
+      aiEstimate:     ()           => get('/api/performers/ai-estimate'),
       startDossier:   (id)         => post(`/api/performers/${id}/dossier`),
       dossierStatus:  (id, jobId)  => get(`/api/performers/${id}/dossier/${jobId}`),
+
+      // MusicBrainz — structured facts, separate from AI Assist by design
+      // (curated database, no hallucination surface; see utils/musicbrainz.py).
+      // Looks up AND links if the match is unambiguous — see api/performers.py.
+      // Returns {status:'matched'} or {status, candidates:[...]} to choose from.
+      mbLookup:     (id, q)    => post(`/api/performers/${id}/musicbrainz/lookup`, q ? { q } : {}),
+      mbCandidates: (id, q) =>
+        get(`/api/performers/${id}/musicbrainz/candidates${q ? '?q=' + encodeURIComponent(q) : ''}`),
+      mbResolve:    (id, mbid) => post(`/api/performers/${id}/musicbrainz`, { mbid }),
+      mbMembers:    (id)       => get(`/api/performers/${id}/musicbrainz/members`),
     },
 
     // ── Performances ─────────────────────────────────────────────────────────
@@ -107,11 +134,19 @@ const API = (() => {
     // ── Recordings ───────────────────────────────────────────────────────────
     recordings: {
       get:        (id)       => get(`/api/recordings/${id}`),
-      // `waveform` opts into the downsampled card strip (Browse's Recently
-      // Added module) — omitted/false keeps the List view's request exactly
-      // as it was (no waveform decode tax). See app/utils/serialize.py.
-      recent:     (limit, waveform) =>
-        get(`/api/recordings/recent?limit=${limit || 50}${waveform ? '&waveform=1' : ''}`),
+      // Two independent opt-ins, both off by default so the List view's flat
+      // table request is unchanged (see app/utils/serialize.py):
+      //   `waveform` — downsampled peak strip. Nothing requests it since the
+      //                card became a handbill; kept because it's real and tested.
+      //   `card`     — genre colour + performer primary image, for Browse's
+      //                Recently Added row cards.
+      recent:     (limit, opts) => {
+        const o = opts || {}
+        const qs = [`limit=${limit || 50}`]
+        if (o.waveform) qs.push('waveform=1')
+        if (o.card)     qs.push('card=1')
+        return get(`/api/recordings/recent?${qs.join('&')}`)
+      },
       // Browse's Recommended module — 3 cards by default, seeded by date
       // (stable within a day). `reroll` is an incrementing counter kept in
       // memory client-side, not persisted — bumping it is the "Show me

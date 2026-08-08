@@ -160,4 +160,18 @@ def resolve_or_create_performer(name, member_names=None):
     db.session.flush()
     if member_names:
         set_performer_members(performer, member_names)
+
+    # MusicBrainz lookup on creation (2026-08-07). Synchronous, and deliberately
+    # so: this runs inside the ingest BACKGROUND job, where the user is already
+    # watching a copy progress bar, and doing it here means the facts are set on
+    # the in-session object before the caller commits — no second thread, no
+    # race against an uncommitted row.
+    #
+    # Cannot fail an ingest: try_match_performer() swallows everything, is a
+    # no-op under TESTING, and a process-wide circuit breaker stops retrying
+    # once offline (otherwise a 40-show bulk import would spend eight minutes
+    # timing out on DNS). See app/utils/musicbrainz.py.
+    from app.utils import musicbrainz as _mb
+    _mb.try_match_performer(performer)
+
     return performer

@@ -48,7 +48,9 @@ def test_migrate_add_performer_image_dossier_idempotent(tmp_path):
     assert "dossier_json" in cols
 
 
-# ── Profile picture upload/serve/delete ─────────────────────────────────────
+# ── Profile pictures — multi-image (rewritten 2026-08-07) ───────────────────
+# The singular /image endpoints were replaced by /images (plural, keyed by
+# image id) when a Performer gained multiple photos with one flagged primary.
 
 def test_upload_get_delete_performer_image(api, app, seeded_ids, tmp_path):
     app.config["LIBRARY_ROOT"] = str(tmp_path)
@@ -56,47 +58,90 @@ def test_upload_get_delete_performer_image(api, app, seeded_ids, tmp_path):
 
     # No image yet.
     assert api.get(f"/api/performers/{pid}").get_json()["has_image"] is False
-    assert api.get(f"/api/performers/{pid}/image").status_code == 404
+    assert api.get(f"/api/performers/{pid}/images").get_json() == []
 
-    # Upload a jpg.
-    r = api.post(f"/api/performers/{pid}/image",
-                data={"image": (BytesIO(b"\xff\xd8\xff fake jpeg bytes"), "photo.jpg")},
-                content_type="multipart/form-data")
+    # Upload a jpg. The FIRST image becomes primary automatically — a fresh
+    # upload must not leave the card faceless pending a second click.
+    r = api.post(f"/api/performers/{pid}/images",
+                 data={"image": (BytesIO(b"\xff\xd8\xff fake jpeg bytes"), "photo.jpg")},
+                 content_type="multipart/form-data")
     assert r.status_code == 200
-    assert r.get_json()["image_ext"] == ".jpg"
+    img = r.get_json()["images"][0]
+    assert img["is_primary"] is True
+    assert img["origin"] == "upload"
 
-    expected = tmp_path / "Bill Evans" / "_images" / "profile.jpg"
-    assert expected.exists()
+    images_dir = tmp_path / "Bill Evans" / "_images"
+    assert len(list(images_dir.glob("img_*.jpg"))) == 1
     assert api.get(f"/api/performers/{pid}").get_json()["has_image"] is True
 
-    r = api.get(f"/api/performers/{pid}/image")
+    r = api.get(f"/api/performers/images/{img['id']}")
     assert r.status_code == 200
     assert r.mimetype == "image/jpeg"
 
-    # Replace with a different extension — the old file must not linger.
-    r = api.post(f"/api/performers/{pid}/image",
-                data={"image": (BytesIO(b"fake png bytes"), "new.png")},
-                content_type="multipart/form-data")
+    # Delete removes both row and file.
+    r = api.delete(f"/api/performers/images/{img['id']}")
     assert r.status_code == 200
-    assert not expected.exists()
-    assert (tmp_path / "Bill Evans" / "_images" / "profile.png").exists()
-
-    # Delete.
-    r = api.delete(f"/api/performers/{pid}/image")
-    assert r.status_code == 200
-    assert not (tmp_path / "Bill Evans" / "_images" / "profile.png").exists()
+    assert list(images_dir.glob("img_*")) == []
     assert api.get(f"/api/performers/{pid}").get_json()["has_image"] is False
-    assert api.get(f"/api/performers/{pid}/image").status_code == 404
+    assert api.get(f"/api/performers/images/{img['id']}").status_code == 404
+
+
+def test_multiple_images_one_primary_and_promotion_on_delete(api, app, seeded_ids, tmp_path):
+    """Several images coexist, exactly one is primary, and deleting the primary
+    promotes a survivor rather than leaving the performer primary-less."""
+    app.config["LIBRARY_ROOT"] = str(tmp_path)
+    pid = seeded_ids["performer_id"]
+
+    r = api.post(f"/api/performers/{pid}/images", content_type="multipart/form-data",
+                 data={"image": [(BytesIO(b"a"), "one.jpg"),
+                                 (BytesIO(b"b"), "two.png"),
+                                 (BytesIO(b"c"), "three.webp")]})
+    assert r.status_code == 200
+    assert len(r.get_json()["images"]) == 3
+
+    imgs = api.get(f"/api/performers/{pid}/images").get_json()
+    assert len(imgs) == 3
+    assert sum(1 for i in imgs if i["is_primary"]) == 1
+    assert imgs[0]["is_primary"] is True    # ordered primary-first
+
+    # Promote the third; the old primary must be cleared in the same act.
+    third = imgs[2]
+    assert api.post(f"/api/performers/images/{third['id']}/primary").status_code == 200
+    imgs = api.get(f"/api/performers/{pid}/images").get_json()
+    assert sum(1 for i in imgs if i["is_primary"]) == 1
+    assert imgs[0]["id"] == third["id"]
+
+    # Deleting the primary promotes a survivor.
+    assert api.delete(f"/api/performers/images/{third['id']}").status_code == 200
+    imgs = api.get(f"/api/performers/{pid}/images").get_json()
+    assert len(imgs) == 2
+    assert sum(1 for i in imgs if i["is_primary"]) == 1
 
 
 def test_upload_rejects_unsupported_extension(api, app, seeded_ids, tmp_path):
     app.config["LIBRARY_ROOT"] = str(tmp_path)
     pid = seeded_ids["performer_id"]
-    r = api.post(f"/api/performers/{pid}/image",
-                data={"image": (BytesIO(b"nope"), "notes.txt")},
-                content_type="multipart/form-data")
+    r = api.post(f"/api/performers/{pid}/images",
+                 data={"image": (BytesIO(b"nope"), "notes.txt")},
+                 content_type="multipart/form-data")
     assert r.status_code == 400
-    assert _db_performer(pid).image_ext is None
+    assert api.get(f"/api/performers/{pid}/images").get_json() == []
+
+
+def test_partial_upload_lands_good_files_and_reports_bad(api, app, seeded_ids, tmp_path):
+    """A drop of 3 photos where 1 is unsupported must land the other 2 — a
+    partial success is a 200 with an `errors` list, not a blanket 400."""
+    app.config["LIBRARY_ROOT"] = str(tmp_path)
+    pid = seeded_ids["performer_id"]
+    r = api.post(f"/api/performers/{pid}/images", content_type="multipart/form-data",
+                 data={"image": [(BytesIO(b"a"), "ok.jpg"),
+                                 (BytesIO(b"b"), "bad.heic"),
+                                 (BytesIO(b"c"), "ok2.png")]})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert len(body["images"]) == 2
+    assert len(body["errors"]) == 1
+    assert "heic" in body["errors"][0]
 
 
 def _db_performer(pid):

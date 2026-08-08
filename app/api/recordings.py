@@ -49,17 +49,46 @@ bp = Blueprint("recordings", __name__)
 # (?waveform=1). Same endpoint, opt-in param, per the recording_row() design —
 # see app/utils/serialize.py.
 
+def _card_eager(query):
+    """
+    Eager-load everything `recording_row(card=True)` walks.
+
+    Without this each card row lazy-loads Performance → Performer → Genre and
+    → PerformerImage separately, which is an N+1 the moment a module shows more
+    than a couple of cards. Defined once so every card-bearing endpoint loads
+    the same set — the serializer's docstring names this as the caller's
+    responsibility, and three copies of it would eventually disagree.
+    """
+    return query.options(
+        selectinload(Recording.performance)
+        .selectinload(Performance.performer)
+        .selectinload(Performer.images),
+        selectinload(Recording.performance)
+        .selectinload(Performance.performer)
+        .selectinload(Performer.genre),
+    )
+
+
 @bp.route("/recent")
 @login_required
 def recent_recordings():
     limit = request.args.get("limit", 50, type=int) or 50
     limit = max(1, min(limit, 200))
     waveform = request.args.get("waveform", "").lower() in ("1", "true", "yes")
+    # `card=1` adds genre colour + primary image for Browse's Recently Added
+    # row cards. Opt-in for the same reason as waveform: this endpoint also
+    # backs the List view's flat table, which needs none of it.
+    card = request.args.get("card", "").lower() in ("1", "true", "yes")
     query = Recording.query
     if waveform:
         query = query.options(selectinload(Recording.tracks).selectinload(Track.analysis))
+    if card:
+        query = _card_eager(query)
+    # Reverse chronological by ingest time — most recently added first. This is
+    # the module's whole premise, so it is the query's order, not something the
+    # client re-sorts.
     recs = query.order_by(Recording.created_at.desc()).limit(limit).all()
-    return jsonify([recording_row(r, waveform=waveform) for r in recs])
+    return jsonify([recording_row(r, waveform=waveform, card=card) for r in recs])
 
 
 # ── GET /api/recordings/recommended ───────────────────────────────────────────
@@ -153,7 +182,7 @@ def recommended_recordings():
     limit = max(1, min(limit, 12))
     reroll = request.args.get("reroll", 0, type=int) or 0
 
-    pool = _recommended_pool_query().all()
+    pool = _card_eager(_recommended_pool_query()).all()
     if not pool:
         return jsonify([])
 
@@ -183,7 +212,14 @@ def recommended_recordings():
     ordered = unplayed + played   # unplayed strongly preferred, never excluded
 
     picks = _select_diverse(ordered, limit, perf_by_rec, genre_by_performer)
-    return jsonify([recording_row(r, waveform=True) for r in picks])
+    # No waveform as of 2026-08-07: the Browse card is a handbill rendered from
+    # metadata, so shipping downsampled peaks here was pure payload. The
+    # serializer's opt-in param is untouched and still tested.
+    #
+    # card=True unconditionally — unlike /recent, this endpoint has exactly one
+    # consumer (the Recommended module), so there is no flat-list caller to
+    # protect and no reason to make it a parameter.
+    return jsonify([recording_row(r, card=True) for r in picks])
 
 
 # ── GET /api/recordings/on-this-day ───────────────────────────────────────────

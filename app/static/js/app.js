@@ -1345,58 +1345,157 @@ const App = (() => {
     })
   }
 
-  // Source → CSS color token, shared by the waveform strip and (indirectly)
-  // the existing sourceBadge(). Kept separate rather than parsing sourceBadge's
-  // HTML back apart.
+  // Source → CSS color token. Kept separate rather than parsing sourceBadge's
+  // HTML back apart. Drives the card's accent rules and source chip.
   function _sourceColorVar(source) {
     return { SBD: '--sbd-fg', AUD: '--aud-fg', MTX: '--mtx-fg', FM: '--fm-fg' }[source] || '--other-fg'
   }
 
-  // Card waveform strip. `peaks` is the serializer's downsampled magnitude
-  // array (app/utils/waveform.py::downsample_peaks, 0.0-1.0) or null/empty
-  // when the recording has no usable analysis — degrades to a flat colored
-  // line rather than leaving a hole (the design spec's stated failure mode).
-  function waveformStripHtml(peaks, source) {
-    const colorVar = _sourceColorVar(source)
-    if (!peaks || !peaks.length) {
-      return `<div class="rec-card-waveform rec-card-waveform--flat" style="--wf-color:var(${colorVar})"></div>`
-    }
-    const n = peaks.length
-    const barW = 100 / n
-    const bars = peaks.map((v, i) => {
-      const h = Math.max(3, Math.round(Math.min(1, Math.max(0, v)) * 100))
-      const x = (i * barW).toFixed(3)
-      return `<rect x="${x}%" y="${((100 - h) / 2).toFixed(3)}%" width="${(barW * 0.7).toFixed(3)}%" height="${h}%" />`
-    }).join('')
-    return `
-      <svg class="rec-card-waveform" viewBox="0 0 100 100" preserveAspectRatio="none" style="--wf-color:var(${colorVar})">
-        ${bars}
-      </svg>`
+  // MusicBrainz's public page for an artist. The MBID is a stable permalink,
+  // so this needs no lookup — and it's the only way to actually VERIFY a match
+  // on a vague name like "Acoustic All-Stars", where our one-line summary
+  // can't settle it but the real entry's releases and relationships can.
+  function mbArtistUrl(mbid) {
+    return mbid ? `https://musicbrainz.org/artist/${encodeURIComponent(mbid)}` : '#'
   }
 
-  // Shared card component — Recommended and Recently Added both use this.
-  // Meta line composes from whatever exists (grade is present on only ~22% of
-  // recordings — it must not read as "missing something" without one).
-  function recCardHtml(r) {
-    const date = fmtDate(r.start_year, r.start_month, r.start_day)
-    const loc  = fmtLocation(r.city, r.state, r.country)
-    const meta = []
-    if (r.quality) meta.push(`<span class="${qualityClass(r.quality)}">${esc(r.quality)}</span>`)
-    if (r.track_count) meta.push(`${r.track_count} track${r.track_count === 1 ? '' : 's'}`)
+  // Defensive strip of citation markup in stored AI text. The real fix is
+  // server-side in performer_research.py (_clean_prose), so what gets SAVED is
+  // clean — this only covers dossiers written before that landed, which would
+  // otherwise show "<cite index=…>" on the page forever.
+  function stripCitations(text) {
+    return String(text || '')
+      .replace(/<\/?cite[^>]*>/gi, '')
+      .replace(/\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]/g, '')
+      .replace(/\s+([.,;:!?])/g, '$1')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim()
+  }
+
+  const _BILL_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                        'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+
+  // Handbill date line — the card's most prominent element after the act.
+  //
+  // Deliberately NOT fmtDate(): this is display typography, uppercase and
+  // spaced for a poster, while fmtDate() is the app's neutral everywhere-else
+  // format. Degrades through three precisions because 50 of 544 recordings
+  // have a partial date — a card must never render "NOV undefined · 2000".
+  //
+  //   full     → "NOV 3 · 2000"
+  //   no day   → "SEP 1989"
+  //   year only→ "1965"
+  function handbillDate(y, m, d) {
+    if (!y) return ''
+    const mon = (m >= 1 && m <= 12) ? _BILL_MONTHS[m - 1] : null
+    if (mon && d) return `${mon} ${d} · ${y}`
+    if (mon)      return `${mon} ${y}`
+    return String(y)
+  }
+
+  // Genre colour with the agreed fallback. 70 of 164 performers have no genre,
+  // so NULL is the common case, not an error case — those cards get a neutral
+  // warm grey and read as quiet rather than broken (Ryan, 2026-08-07). The
+  // fallback lives HERE and nowhere else: the serializer deliberately sends
+  // null rather than substituting a default, so there is exactly one place
+  // that decides what "no genre" looks like.
+  function genreColor(r) {
+    return (r && r.genre_color) ? r.genre_color : 'var(--t2)'
+  }
+
+  // Circular performer photo for the cards. Empty string when the performer has
+  // no primary image — the element is omitted entirely rather than rendering a
+  // placeholder silhouette, matching the modules' own "hide when empty" rule.
+  // Only 1 of 164 performers has a photo today, so ABSENCE IS THE DEFAULT
+  // LAYOUT and the card must look finished without it.
+  function perfPhotoHtml(r, cls) {
+    if (!r || !r.image_id) return ''
+    return `<img class="${cls}" src="${API.performers.imageUrl(r.image_id)}"
+                 alt="" loading="lazy">`
+  }
+
+  // Footer bits shared by both card layouts. Composes from whatever exists —
+  // grade is present on ~22% of recordings, so its absence must read as normal
+  // rather than as something missing.
+  function recCardFootParts(r) {
+    const foot = []
+    if (r.source) foot.push(`<span class="rec-card-src">${esc(r.source)}</span>`)
+    if (r.track_count) {
+      foot.push(`<span>${r.track_count} track${r.track_count === 1 ? '' : 's'}</span>`)
+    }
     const runtime = fmtRuntime(r.duration_sec)
-    if (runtime) meta.push(runtime)
-    const badge = sourceBadge(r.source)
+    if (runtime) foot.push(`<span>${esc(runtime)}</span>`)
+    if (r.quality) foot.push(`<span class="${qualityClass(r.quality)}">${esc(r.quality)}</span>`)
+    return foot
+  }
+
+  // ── Handbill card — RECOMMENDED MODULE ONLY (Ryan, 2026-08-07) ─────────────
+  //
+  // Replaced the waveform strip: waveform-led cards are what the Internet
+  // Archive's Live Music Archive already does, so they read as derivative.
+  // This renders the METADATA as the artwork instead — also the better-covered
+  // asset, since every performance has a year and 542 of 544 have a city,
+  // against 530 with waveform data and only 118 with a letter grade.
+  //
+  // Scoped to Recommended deliberately. The handbill is tall, centred and
+  // deliberately showy; that works for three hero picks and would be
+  // exhausting repeated down a twelve-item Recently Added list, which is why
+  // that module now has its own row layout below.
+  //
+  // Colour comes from the performer's GENRE, not the source — source is a
+  // technical attribute and makes a poor identity, whereas genre groups the
+  // library the way a listener actually browses it.
+  function recCardHtml(r) {
+    const date = handbillDate(r.start_year, r.start_month, r.start_day)
+    const loc  = fmtLocation(r.city, r.state, r.country)
+    const foot = recCardFootParts(r)
+    const photo = perfPhotoHtml(r, 'rec-card-photo')
     return `
-      <a class="rec-card" href="#/recording/${r.id}" data-rec-id="${r.id}">
-        <div class="rec-card-strip">
-          ${waveformStripHtml(r.waveform, r.source)}
-          ${badge ? `<div class="rec-card-badge">${badge}</div>` : ''}
+      <a class="rec-card" href="#/recording/${r.id}" data-rec-id="${r.id}"
+         style="--genre-fg:${esc(genreColor(r))}">
+        <div class="rec-card-spine"></div>
+        ${photo}
+        ${date ? `<div class="rec-card-date">${esc(date)}</div>` : ''}
+        <div class="rec-card-rule"></div>
+        <div class="rec-card-performer">${esc(r.performer || '')}</div>
+        <div class="rec-card-rule"></div>
+        <div class="rec-card-venue">${esc(r.venue || '(unknown venue)')}</div>
+        ${loc ? `<div class="rec-card-loc">${esc(loc)}</div>` : ''}
+        ${r.genre ? `<div class="rec-card-genre">${esc(r.genre)}</div>` : ''}
+        <div class="rec-card-foot">${foot.join('<span class="rec-card-dot">·</span>')}</div>
+      </a>`
+  }
+
+  // ── Row card — RECENTLY ADDED MODULE ─────────────────────────────────────
+  //
+  // Full-width row with list-like density but card styling (Ryan, 2026-08-07):
+  // a browsable middle ground between the handbill and the flat table. Carries
+  // more per-recording detail than the handbill precisely because a row has
+  // horizontal space a 3-up card doesn't.
+  //
+  // The ingest date is the point of this module — "what's new" is the question
+  // being answered, and the show date (1969) says nothing about that. The
+  // server orders by created_at DESC; this does not re-sort.
+  function recentRowCardHtml(r) {
+    const date = handbillDate(r.start_year, r.start_month, r.start_day)
+    const loc  = fmtLocation(r.city, r.state, r.country)
+    const foot = recCardFootParts(r)
+    const photo = perfPhotoHtml(r, 'rec-rowcard-photo')
+    const venue = [r.venue || '(unknown venue)', loc].filter(Boolean).join(' · ')
+    return `
+      <a class="rec-rowcard" href="#/recording/${r.id}" data-rec-id="${r.id}"
+         style="--genre-fg:${esc(genreColor(r))}">
+        <div class="rec-rowcard-spine"></div>
+        <div class="rec-rowcard-avatar">${photo || '<span class="rec-rowcard-avatar-blank"></span>'}</div>
+        <div class="rec-rowcard-date">${esc(date || '—')}</div>
+        <div class="rec-rowcard-main">
+          <div class="rec-rowcard-performer truncate">${esc(r.performer || '')}</div>
+          <div class="rec-rowcard-venue truncate">${esc(venue)}</div>
         </div>
-        <div class="rec-card-body">
-          <div class="rec-card-performer truncate">${esc(r.performer || '')}</div>
-          <div class="rec-card-date truncate">${esc(date)}</div>
-          <div class="rec-card-venue truncate">${esc(r.venue || '(unknown venue)')}${loc ? ', ' + esc(loc) : ''}</div>
-          <div class="rec-card-meta truncate">${meta.join(' · ')}</div>
+        <div class="rec-rowcard-meta">${foot.join('<span class="rec-card-dot">·</span>')}</div>
+        <div class="rec-rowcard-added">
+          <span class="rec-rowcard-added-lbl">Added</span>
+          <span class="rec-rowcard-added-val">${esc(fmtDateAdded(r.created_at) || '—')}</span>
         </div>
       </a>`
   }
@@ -1471,7 +1570,12 @@ const App = (() => {
     _libRecommendedReroll = 0
     const [recommended, recentCards, performers, collections, onThisDay] = await Promise.all([
       API.recordings.recommended(3, 0).catch(() => []),
-      API.recordings.recent(12, true).catch(() => []),
+      // No waveform: both card layouts render from metadata only (2026-08-07).
+      // The endpoint's ?waveform=1 opt-in stays available and tested — the
+      // eager-load it triggers is a real cost and nothing needs it right now.
+      // `card:true` DOES fetch genre colour + performer photo, which the row
+      // cards use. Server returns these newest-first by ingest time.
+      API.recordings.recent(12, { card: true }).catch(() => []),
       API.performers.list().catch(() => []),
       API.collections.list().catch(() => []),
       API.recordings.onThisDay().catch(() => []),
@@ -1484,8 +1588,10 @@ const App = (() => {
         `<div class="lib-module-grid">${recommended.map(recCardHtml).join('')}</div>`))
     }
     if (recentCards.length) {
+      // Row cards, not handbills — see recentRowCardHtml. Already in
+      // reverse-chronological ingest order from the server.
       sections.push(libModuleHtml('lib-mod-recent', 'Recently Added', '',
-        `<div class="lib-module-grid">${recentCards.map(recCardHtml).join('')}</div>`))
+        `<div class="rec-rowcard-list">${recentCards.map(recentRowCardHtml).join('')}</div>`))
     }
     if (performers.length) {
       const LEAD = 12
@@ -1682,49 +1788,127 @@ const App = (() => {
     const rowsHtml = perfRows.map(r => flatRowHtml(r, false)).join('')
 
     const descText = performer.bio && performer.bio.trim()
+
+    const mbf = performer.musicbrainz || {}
+
+    // ── Hero stat: recordings only (Ryan, 2026-08-07) ────────────────────────
+    // Venue count and total runtime were cut as uninteresting. Span was cut as
+    // potentially INCONSISTENT with our own data — it was derived from whatever
+    // dates happen to be filled in, so an act with one undated show would
+    // advertise a range that contradicts the recordings listed right below it.
+    // The derivations for all three are gone rather than left computed-unused.
+    const stats = [
+      [totalRecordings, totalRecordings === 1 ? 'Recording' : 'Recordings'],
+    ]
+
+    // MusicBrainz one-liner: type · origin · active years, whichever exist.
+    const mbBits = [
+      mbf.type ? `<b>${esc(mbf.type)}</b>` : '',
+      mbf.area ? esc(mbf.area) : '',
+      mbf.begin ? `active <b>${esc(mbf.begin)}${mbf.end ? '–' + esc(mbf.end) : '–present'}</b>` : '',
+    ].filter(Boolean).join(' · ')
+
+    const photoCount = (performer.images || []).length
+
     setMainHTML(`
       <div class="performer-page">
         ${navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="pp-back-btn">← ${esc(navBack.label)}</div></div>` : ''}
-        <div class="performer-head">
-          <div class="pp-head-row">
-            <div class="pp-head-main">
-              <div class="pp-name-row">
-                <h1 class="pp-name pp-editable" id="pp-name" title="Click to edit">${esc(performer.name)}</h1>
-                <button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>
-              </div>
-              <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
 
-              <div class="pp-artists-block">
-                <div class="pp-artists-label">Members</div>
-                <div class="pp-artists mg-row" id="pp-artists"></div>
-                <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
-              </div>
-
-              <div class="pp-artists-block">
-                <div class="pp-artists-label">Genre</div>
-                <span class="pp-editable pp-genre-field" id="pp-genre" title="Click to edit"></span>
-              </div>
+        <div class="pp-hero">
+          <div class="pp-hero-portrait" id="pp-hero-portrait"></div>
+          <div class="pp-hero-main">
+            <h1 class="pp-name pp-editable" id="pp-name" title="Click to edit">${esc(performer.name)}</h1>
+            <div class="pp-hero-chips">
+              <!-- ONE genre element, and it is the editable one. A static
+                   colour pill alongside it (as first built) showed the same
+                   value twice and only one of them responded to a click. -->
+              <span class="pp-editable pp-genre-field" id="pp-genre"
+                    style="--genre-fg:${esc((performer.genre && performer.genre.color) || 'var(--t2)')}"
+                    title="Click to edit"></span>
+              ${mbBits ? `<span class="pp-hero-fact">${mbBits}</span>` : ''}
             </div>
-            <div class="pp-head-image" id="pp-head-image"></div>
+            <div class="pp-hero-stats">
+              ${stats.map(([n, l]) => `
+                <div class="pp-stat"><div class="pp-stat-n">${esc(String(n))}</div><div class="pp-stat-l">${l}</div></div>`).join('')}
+            </div>
           </div>
+          <button class="btn btn-ghost btn-sm pp-delete" id="pp-delete" title="Delete performer">Delete</button>
         </div>
 
-        <div class="subtitle" id="pp-rec-count">${totalRecordings} recording${totalRecordings !== 1 ? 's' : ''}</div>
-        ${perfRows.length ? recTableHeadHtml(false) : ''}
-        <div class="rec-table" id="rec-table-performer">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
+        <div class="pp-tabs" role="tablist">
+          <button class="pp-tab active" data-pane="overview" role="tab">Overview</button>
+          <button class="pp-tab" data-pane="recordings" role="tab">Recordings<span class="pp-tab-n">${totalRecordings}</span></button>
+          <button class="pp-tab" data-pane="photos" role="tab">Photos${photoCount ? `<span class="pp-tab-n">${photoCount}</span>` : ''}</button>
+        </div>
 
-        <div class="pp-bottom-section">
-          <div class="pp-artists-block">
-            <div class="pp-artists-label">Resources</div>
-            <div class="pp-resources" id="pp-resources"></div>
+        <div class="pp-panes">
+          <div class="pp-pane active" data-pane="overview">
+            <!-- Members first (Ryan, 2026-08-07): who the act IS comes before
+                 prose about it, and Description is empty on most performers so
+                 leading with it opened the page on a placeholder. -->
+            <div class="pp-sec">Members</div>
+            <div class="pp-artists" id="pp-artists"></div>
+            <div class="pp-stint-editor" id="pp-stint-editor" style="display:none"></div>
+
+            <!-- AI Assist sits ON the Description header (Ryan, 2026-08-07):
+                 it's an enrichment action for this one field, not a research
+                 panel, so it belongs where its output lands. Clicking it
+                 OVERWRITES the description — a deliberate exception to the
+                 project's "AI suggests, human approves" rule, made because a
+                 biography is low-stakes, freely re-editable, and the
+                 copy-into-place step was pure friction. -->
+            <div class="pp-sec-row">
+              <div class="pp-sec">Description</div>
+              <button type="button" class="btn btn-ghost btn-xs iq-ai-btn" id="pp-dossier-run">✨ AI Assist</button>
+              <span class="pp-sec-msg" id="pp-dossier-msg"></span>
+            </div>
+            <div class="pp-desc pp-editable ${descText ? '' : 'pp-empty'}" id="pp-desc" title="Click to edit">${descText ? esc(performer.bio) : 'Add a description…'}</div>
+
+            <div class="pp-block">
+              <h2 class="pp-block-title">MusicBrainz</h2>
+              <div class="pp-block-hint">Links this act to its MusicBrainz entry, so future ingests know where to look for information about it.</div>
+              <div id="pp-mb"></div>
+            </div>
+
+            <!-- Reframed 2026-08-07 from "Resources" (a generic link list) to
+                 sources the ENRICHMENT JOBS should trust. Flux already knows to
+                 consult Wikipedia and setlist.fm; what it can't know is the
+                 act-specific archive a collector knows about — Marc Morvan's
+                 Pat Metheny site being the example. Ordered last because it's
+                 the thing you fill in AFTER seeing what the two automated
+                 passes above did and didn't find. -->
+            <div class="pp-block">
+              <h2 class="pp-block-title">Trusted sources</h2>
+              <div class="pp-block-hint">Sites worth trusting for this act specifically — a fan-maintained show database, an archivist's site. We already check the obvious ones, so add what we wouldn't know to look for. These are treated as sources of truth in future research and ingest jobs.</div>
+              <div class="pp-resources" id="pp-resources"></div>
+            </div>
           </div>
 
-          <div class="pp-artists-block">
-            <div class="pp-artists-label">Dossier <span class="pp-artists-label-note">— AI-drafted biography &amp; resource suggestions</span></div>
-            <div class="pp-dossier" id="pp-dossier"></div>
+          <div class="pp-pane" data-pane="recordings">
+            ${perfRows.length ? recTableHeadHtml(false) : ''}
+            <div class="rec-table" id="rec-table-performer">${rowsHtml || '<div class="empty-state" style="min-height:200px"><div class="empty-title">No recordings yet</div></div>'}</div>
+          </div>
+
+          <div class="pp-pane" data-pane="photos">
+            <div id="pp-photos"></div>
           </div>
         </div>
       </div>`)
+
+    // ── Tab switching ───────────────────────────────────────────────────────
+    // Pure show/hide over already-rendered panes — no re-fetch, no re-render.
+    // That keeps in-progress state (a half-typed description, an open stint
+    // drawer, a running AI Assist job) alive across a tab switch, which is the
+    // whole reason not to route tabs through the hash.
+    const ppRoot = mainContent
+    ppRoot.querySelectorAll('.pp-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        ppRoot.querySelectorAll('.pp-tab').forEach(t => t.classList.remove('active'))
+        ppRoot.querySelectorAll('.pp-pane').forEach(p => p.classList.remove('active'))
+        btn.classList.add('active')
+        ppRoot.querySelector(`.pp-pane[data-pane="${btn.dataset.pane}"]`)?.classList.add('active')
+      })
+    })
 
     wireRecordingRows(mainContent)
     if (perfRows.length) wireDateAddedSort(document.getElementById('rec-table-performer'), perfRows, false)
@@ -1821,19 +2005,62 @@ const App = (() => {
     // Members row uses the same (+) button + inline picker style as the
     // recording page's Members/Guests rows (2026-07-22) — no Guests row here,
     // guests are a per-show concept and don't apply to the act itself.
+    // One member per ROW, not a run of chips (Ryan, 2026-08-07).
+    //
+    // The old chip row hid the entire stint feature: tenure dates only appeared
+    // if you happened to click a name, and nothing suggested a name was
+    // clickable. A row gives the dates somewhere to live permanently, and
+    // members with no stint recorded say so explicitly — "Tenure not set" is a
+    // prompt, whereas blank space is invisible.
+    function memberTenure(m) {
+      const stints = m.stints || []
+      if (!stints.length) return null
+      const fmt = s => {
+        const a = [s.start_year, s.start_month, s.start_day].filter(Boolean).join('-')
+        const b = [s.end_year, s.end_month, s.end_day].filter(Boolean).join('-')
+        if (!a && !b) return null           // unbounded = "always a member"
+        return `${a || '?'} – ${b || 'present'}`
+      }
+      const parts = stints.map(fmt).filter(Boolean)
+      return parts.length ? parts.join(', ') : null
+    }
+
     function renderArtists() {
       const box = document.getElementById('pp-artists')
       box.innerHTML =
-        members.map((m, i) => `
-          <span class="member-chip ${expandedMemberId === m.id ? 'member-chip--expanded' : ''}">
-            <span class="member-chip-name" data-id="${m.id}" title="Click to edit stint dates">${esc(m.name)}</span>
-            <span class="member-chip-x" data-i="${i}" title="Remove">×</span>
-          </span>`).join('') +
-        `<button type="button" class="mg-add-btn" id="pp-add-btn" title="Add Member Name">+</button>
-         <span class="artist-picker-wrap mg-add-picker" id="pp-add-picker" style="display:none">
-           <input type="text" class="member-input mg-role-input" id="pp-add-input" autocomplete="off" placeholder="Add Member Name…" />
-           <div class="artist-dropdown" id="pp-add-dd" style="display:none"></div>
-         </span>`
+        members.map((m, i) => {
+          const tenure = memberTenure(m)
+          const open = expandedMemberId === m.id
+          return `
+          <div class="pp-member-row${open ? ' is-open' : ''}">
+            <button type="button" class="pp-member-name member-chip-name" data-id="${m.id}"
+                    title="Edit tenure dates">${esc(m.name)}</button>
+            <span class="pp-member-tenure${tenure ? '' : ' is-unset'}" data-id="${m.id}"
+                  title="Edit tenure dates">${tenure ? esc(tenure) : 'Tenure not set'}</span>
+            <span class="pp-member-edit" data-id="${m.id}" title="Edit tenure dates">${open ? 'Close' : 'Edit'}</span>
+            <span class="member-chip-x pp-member-x" data-i="${i}" title="Remove member">×</span>
+          </div>`
+        }).join('') +
+        // No "no members recorded" message — an empty list is self-evident
+        // (Ryan, 2026-08-07), and the Add control below already says what to do.
+        `<div class="pp-member-add">
+           <button type="button" class="mg-add-btn" id="pp-add-btn" title="Add Member Name">+</button>
+           <span class="pp-member-add-lbl">Add member</span>
+           <span class="artist-picker-wrap mg-add-picker" id="pp-add-picker" style="display:none">
+             <input type="text" class="member-input mg-role-input" id="pp-add-input" autocomplete="off" placeholder="Add Member Name…" />
+             <div class="artist-dropdown" id="pp-add-dd" style="display:none"></div>
+           </span>
+         </div>`
+
+      // Whole row opens the editor — name, tenure text and the Edit affordance
+      // all point at the same action, so the target isn't a single small word.
+      box.querySelectorAll('.pp-member-name, .pp-member-tenure, .pp-member-edit').forEach(el =>
+        el.addEventListener('click', () => {
+          const id = parseInt(el.dataset.id)
+          expandedMemberId = (expandedMemberId === id) ? null : id
+          renderArtists(); renderStintEditor()
+        }))
+
       box.querySelectorAll('.member-chip-x').forEach(x =>
         x.addEventListener('click', async () => {
           const removedId = members[parseInt(x.dataset.i)]?.id
@@ -1841,18 +2068,18 @@ const App = (() => {
           if (expandedMemberId === removedId) expandedMemberId = null
           await persistMembers(); renderArtists(); renderStintEditor()
         }))
-      box.querySelectorAll('.member-chip-name').forEach(el =>
-        el.addEventListener('click', () => {
-          const id = parseInt(el.dataset.id)
-          expandedMemberId = (expandedMemberId === id) ? null : id
-          renderArtists(); renderStintEditor()
-        }))
-      document.getElementById('pp-add-btn').addEventListener('click', () => {
+      // (The old `.member-chip-name` handler lived here. Removed 2026-08-07:
+      // the row markup keeps that class for styling, so it was binding a
+      // SECOND toggle to the same element — two toggles per click cancel out
+      // and the editor never opened.)
+      const openPicker = () => {
         const picker = document.getElementById('pp-add-picker')
         const showing = picker.style.display !== 'none'
         picker.style.display = showing ? 'none' : 'inline-flex'
         if (!showing) document.getElementById('pp-add-input').focus()
-      })
+      }
+      document.getElementById('pp-add-btn').addEventListener('click', openPicker)
+      box.querySelector('.pp-member-add-lbl')?.addEventListener('click', openPicker)
       const input = box.querySelector('#pp-add-input')
       wirePickerDropdown(input, document.getElementById('pp-add-dd'), API.artists.search,
         async ({ name }) => {
@@ -1943,6 +2170,10 @@ const App = (() => {
     function renderResources() {
       const box = document.getElementById('pp-resources')
       if (!box) return
+      // Styled to match the Members list (Ryan, 2026-08-07): rows, then a
+      // single "+ Add source" control. Two always-visible input boxes made an
+      // empty list look like an unfilled form — most acts have no extra
+      // sources, so the resting state should be quiet.
       box.innerHTML =
         resources.map((r, i) => `
           <div class="pp-resource-row" data-i="${i}">
@@ -1950,125 +2181,506 @@ const App = (() => {
             <span class="pp-resource-url">${esc(r.url)}</span>
             <span class="pp-resource-x" data-i="${i}" title="Remove">×</span>
           </div>`).join('') +
-        `<div class="pp-resource-add">
-           <input type="text" class="pp-res-label" placeholder="Label (optional)" />
-           <input type="text" class="pp-res-url" placeholder="https://…" />
-           <button class="btn btn-ghost btn-xs pp-res-add-btn" type="button">Add</button>
+        `<div class="pp-member-add">
+           <button type="button" class="mg-add-btn" id="pp-res-add-btn" title="Add source">+</button>
+           <span class="pp-member-add-lbl" id="pp-res-add-lbl">Add source</span>
+           <span class="pp-res-entry" id="pp-res-entry" style="display:none">
+             <input type="text" class="pp-res-input" id="pp-res-input" autocomplete="off" spellcheck="false" />
+             <span class="pp-res-hint" id="pp-res-hint"></span>
+           </span>
          </div>`
+
       box.querySelectorAll('.pp-resource-x').forEach(x =>
-        x.addEventListener('click', async () => { resources.splice(parseInt(x.dataset.i), 1); await persistResources(); renderResources() }))
-      const urlEl = box.querySelector('.pp-res-url')
-      const labelEl = box.querySelector('.pp-res-label')
-      const add = async () => {
-        let url = urlEl.value.trim()
-        if (!url) return
-        if (!/^https?:\/\//i.test(url)) url = 'https://' + url
-        resources.push({ label: labelEl.value.trim() || null, url })
-        await persistResources(); renderResources()
+        x.addEventListener('click', async () => {
+          resources.splice(parseInt(x.dataset.i), 1)
+          await persistResources(); renderResources()
+        }))
+
+      // Two-step entry: URL first, then an optional label. Sequential rather
+      // than side-by-side because the URL is the only required part — asking
+      // for both at once implies both matter, and the label is usually left
+      // blank.
+      const entry = document.getElementById('pp-res-entry')
+      const input = document.getElementById('pp-res-input')
+      const hint  = document.getElementById('pp-res-hint')
+      let pendingUrl = null
+
+      const reset = () => {
+        pendingUrl = null
+        input.value = ''
+        input.placeholder = 'https://…'
+        hint.textContent = 'Enter to continue · Esc to cancel'
+        entry.style.display = 'none'
       }
-      box.querySelector('.pp-res-add-btn').addEventListener('click', add)
-      urlEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add() } })
+      reset()
+
+      const open = () => {
+        entry.style.display = 'inline-flex'
+        input.focus()
+      }
+      document.getElementById('pp-res-add-btn').addEventListener('click', open)
+      document.getElementById('pp-res-add-lbl').addEventListener('click', open)
+
+      input.addEventListener('keydown', async e => {
+        if (e.key === 'Escape') { e.preventDefault(); reset(); return }
+        if (e.key !== 'Enter') return
+        e.preventDefault()
+        const val = input.value.trim()
+
+        if (pendingUrl === null) {
+          if (!val) return
+          pendingUrl = /^https?:\/\//i.test(val) ? val : 'https://' + val
+          input.value = ''
+          input.placeholder = 'Label (optional) — Enter to save'
+          hint.textContent = pendingUrl
+          return
+        }
+        // Second Enter saves, with or without a label.
+        resources.push({ label: val || null, url: pendingUrl })
+        await persistResources()
+        renderResources()
+      })
     }
     renderResources()
 
-    // ── Profile picture (2026-07-22) — one image slot, top-right ─────────────
-    function renderProfileImage() {
-      const box = document.getElementById('pp-head-image')
+    // ── Profile pictures (2026-07-22; MULTI-IMAGE 2026-08-07) ───────────────
+    //
+    // A performer holds many images with exactly one primary — the primary is
+    // the face on Browse cards, the rest are simply available. The big frame
+    // shows the primary; thumbnails below switch which one that is.
+    //
+    // Drag-and-drop accepts a whole selection at once and posts it in a single
+    // request. Uploading is the ONLY population route today; the AI/Commons
+    // fetch job (Ryan, 2026-08-07) will land images here as non-primary
+    // candidates, which is why `origin` exists on the row from day one.
+    let ppImages = performer.images || []
+
+    // Small round portrait in the hero. Read-only — all management lives in the
+    // Photos tab, so the hero never grows buttons and stays a header.
+    function renderHeroPortrait() {
+      const box = document.getElementById('pp-hero-portrait')
       if (!box) return
+      const primary = ppImages[0] || null    // server orders primary-first
+      const ring = performer.genre && performer.genre.color
+        ? performer.genre.color : 'var(--bd-1)'
+      box.innerHTML = primary
+        ? `<img class="pp-portrait-img" style="--ring:${esc(ring)}"
+                src="${API.performers.imageUrl(primary.id)}" alt="${esc(performer.name)}">`
+        // Initials rather than a silhouette icon: with 1 of 164 performers
+        // photographed, the no-photo state IS the page's normal appearance and
+        // should look intentional, not like a broken image.
+        : `<div class="pp-portrait-blank" style="--ring:${esc(ring)}">${esc(
+             performer.name.split(/\s+/).filter(Boolean).slice(0, 2)
+               .map(w => w[0]).join('').toUpperCase())}</div>`
+    }
+
+    // Full gallery — the Photos tab. Every image is manageable here: make
+    // primary, delete, or drop new ones.
+    function renderPhotosPane() {
+      const box = document.getElementById('pp-photos')
+      if (!box) return
+      // Read fresh each render — `performer` is REASSIGNED when a MusicBrainz
+      // match lands, and this pane has to reflect that (it previously kept
+      // saying "match this act first" after a successful match, because it was
+      // only ever rendered at page load).
+      const hasMbid = !!(performer.musicbrainz && performer.musicbrainz.mbid)
       box.innerHTML = `
-        <div class="pp-image-frame">
-          ${performer.has_image
-            ? `<img class="pp-image-img" id="pp-image-img" src="${API.performers.imageUrl(performerId)}" alt="${esc(performer.name)}" />`
-            : `<div class="pp-image-placeholder">No photo</div>`}
-        </div>
-        <input type="file" id="pp-image-input" accept="image/png,image/jpeg,image/webp" style="display:none" />
-        <div class="pp-image-actions">
-          <button type="button" class="btn btn-ghost btn-xs" id="pp-image-upload-btn">${performer.has_image ? 'Replace photo' : 'Add photo'}</button>
-          ${performer.has_image ? `<button type="button" class="btn btn-ghost btn-xs" id="pp-image-remove-btn">Remove</button>` : ''}
-        </div>`
-      document.getElementById('pp-image-upload-btn').addEventListener('click', () =>
-        document.getElementById('pp-image-input').click())
-      document.getElementById('pp-image-input').addEventListener('change', async e => {
-        const file = e.target.files[0]
-        if (!file) return
-        try { await API.performers.uploadImage(performerId, file); performer.has_image = true; renderProfileImage() }
-        catch (err) { alert('Upload failed: ' + err.message) }
-      })
-      document.getElementById('pp-image-remove-btn')?.addEventListener('click', async () => {
-        if (!confirm('Remove this photo?')) return
-        try { await API.performers.removeImage(performerId); performer.has_image = false; renderProfileImage() }
-        catch (err) { alert('Failed: ' + err.message) }
-      })
-    }
-    renderProfileImage()
-
-    // ── Dossier — AI-drafted biography + suggested resource links ────────────
-    // "AI suggests, human approves": nothing here writes to `bio` or
-    // `resources` on its own — Copy to Description and + Add are both
-    // explicit clicks (same rule as the ingest-side AI Assist auto-apply
-    // fix earlier this session — see performer_research.py's module doc).
-    let dossier = performer.dossier || null
-    function renderDossier() {
-      const box = document.getElementById('pp-dossier')
-      if (!box) return
-      const runLabel = dossier ? '↻ Run again' : '✨ Run Dossier'
-      if (!dossier) {
-        box.innerHTML = `<div class="pp-dossier-empty">No research run yet.</div>
-          <button type="button" class="btn btn-ghost btn-xs" id="pp-dossier-run">${runLabel}</button>`
-      } else {
-        const cost = dossier.usage ? formatAiCost(dossier.usage) : ''
-        const bioParas = (dossier.biography || '').split('\n').map(s => s.trim()).filter(Boolean)
-        box.innerHTML = `
-          <div class="ai-res-title">Biography draft ${cost} <button type="button" class="btn btn-ghost btn-xs" id="pp-dossier-run">${runLabel}</button></div>
-          ${dossier.thinking ? `<p class="ai-summary">${esc(formatAiThinking(dossier.thinking))}</p>` : ''}
-          <div class="pp-dossier-bio">
-            ${bioParas.map(p => `<p>${esc(p)}</p>`).join('')}
+        <div class="pp-gal" id="pp-gal">
+          ${ppImages.map(img => `
+            <div class="pp-ph${img.is_primary ? ' is-primary' : ''}" data-img-id="${img.id}"
+                 title="${img.credit ? esc(img.credit) : ''}">
+              <img src="${API.performers.imageUrl(img.id)}" alt="" loading="lazy">
+              ${img.is_primary ? '<span class="pp-ph-tag">Primary</span>' : ''}
+              <!-- CC BY / BY-SA both require credit, so a fetched photo always
+                   carries its attribution visibly, not just in the DB. -->
+              ${img.credit ? `<span class="pp-ph-credit">${esc(img.credit)}</span>` : ''}
+              <div class="pp-ph-acts">
+                ${img.is_primary ? '' : `<button type="button" class="pp-ph-btn" data-act="primary">Make primary</button>`}
+                <button type="button" class="pp-ph-btn" data-act="delete">Delete</button>
+              </div>
+            </div>`).join('')}
+          <div class="pp-drop" id="pp-image-drop">
+            <span class="pp-drop-plus">＋</span>
+            <span>Drop photos here<br>or click to browse</span>
+            <div class="pp-drop-veil">Drop to upload</div>
           </div>
-          <button type="button" class="btn btn-ghost btn-xs" id="pp-dossier-copy-bio">Copy to Description</button>
-          ${(dossier.resources || []).length ? `
-            <div class="ai-res-section">
-              <div class="ai-res-title">Suggested resources</div>
-              ${dossier.resources.map((r, i) => `
-                <div class="ai-res-row">
-                  <span class="ai-res-value"><a class="ai-link" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.url)}</a></span>
-                  <button type="button" class="btn btn-ghost btn-xs pp-dossier-add-res" data-i="${i}">+ Add</button>
-                </div>`).join('')}
-            </div>` : ''}
-          ${(dossier.sources || []).length ? `
-            <div class="ai-res-section"><div class="ai-res-title">Sources</div>${dossier.sources.map(s =>
-              `<p class="ai-res-note"><a class="ai-link" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.url)}</a></p>`).join('')}</div>` : ''}`
-      }
-      document.getElementById('pp-dossier-run').addEventListener('click', runDossier)
-      document.getElementById('pp-dossier-copy-bio')?.addEventListener('click', async () => {
-        const bio = dossier.biography || ''
-        performer.bio = bio
-        await saveField({ bio: bio || null })
-        const descEl = document.getElementById('pp-desc')
-        if (descEl) { descEl.textContent = bio || 'Add a description…'; descEl.classList.toggle('pp-empty', !bio.trim()) }
+          <!-- Wikimedia lookup sits as a TILE beside the drop zone (Ryan,
+               2026-08-07): both are ways of getting a photo in, so they belong
+               side by side rather than one being a footnote below the gallery.
+               Disabled rather than hidden when there's no MusicBrainz match —
+               the Wikidata link comes from there, and a tile that explains why
+               it's unavailable teaches the dependency where hiding it wouldn't. -->
+          <div class="pp-drop pp-fetch-tile${hasMbid ? '' : ' is-disabled'}"
+               id="pp-fetch-photo" ${hasMbid ? '' : 'aria-disabled="true"'}>
+            <span class="pp-drop-plus">☁</span>
+            ${hasMbid
+              ? `<span>Find a free photo<br><span class="pp-drop-sub">Wikimedia Commons</span></span>`
+              : `<span class="pp-drop-sub">Match on MusicBrainz first<br>(Overview tab)</span>`}
+          </div>
+        </div>
+        <input type="file" id="pp-image-input" multiple
+               accept="image/png,image/jpeg,image/webp" style="display:none" />
+        <div id="pp-fetch-msg" class="pp-fetch-msg"></div>
+        <div class="pp-gal-note">${
+          ppImages.length
+            ? 'The primary photo is the one shown on this page and on Browse cards.'
+            : 'No photos yet. The primary photo appears on this page and on Browse cards.'
+        }</div>`
+
+      const input = document.getElementById('pp-image-input')
+      input.addEventListener('change', e => { upload(e.target.files); input.value = '' })
+
+      // Delegated so the handler survives every re-render without rebinding.
+      // Re-fetches after each mutation rather than patching the local array:
+      // the server owns the one-primary rule (set_primary clears siblings in
+      // the same transaction, and deleting a primary promotes a survivor), so
+      // mirroring that here would be a second implementation waiting to
+      // disagree with the first.
+      box.querySelector('#pp-gal').addEventListener('click', async e => {
+        const btn = e.target.closest('.pp-ph-btn')
+        if (!btn) return
+        e.preventDefault()
+        const id = Number(btn.closest('.pp-ph').dataset.imgId)
+        try {
+          if (btn.dataset.act === 'primary') {
+            await API.performers.setPrimaryImage(id)
+          } else {
+            if (!confirm('Delete this photo?')) return
+            await API.performers.removeImage(id)
+          }
+          await refreshImages()
+        } catch (err) { alert('Failed: ' + err.message) }
       })
-      box.querySelectorAll('.pp-dossier-add-res').forEach(btn =>
-        btn.addEventListener('click', async () => {
-          const r = dossier.resources[parseInt(btn.dataset.i)]
-          if (!r || resources.some(x => x.url === r.url)) return
-          resources.push({ label: r.label || null, url: r.url })
-          await persistResources(); renderResources()
-          btn.disabled = true; btn.textContent = 'Added ✓'
-        }))
+
+      document.getElementById('pp-fetch-photo')?.addEventListener('click', async e => {
+        const btn = e.currentTarget
+        if (!hasMbid || btn.classList.contains('is-busy')) return
+        const msg = document.getElementById('pp-fetch-msg')
+        btn.classList.add('is-busy')
+        msg.textContent = 'Searching Wikimedia Commons…'
+        msg.className = 'pp-fetch-msg'
+        try {
+          const res = await API.performers.fetchImage(performerId)
+          if (!res.found) {
+            // Not an error. Most acts genuinely have no freely-licensed photo,
+            // and the long tail of this library especially so — saying
+            // "failed" would misrepresent an ordinary outcome.
+            msg.textContent = 'No freely-licensed photo found for this act.'
+            btn.classList.remove('is-busy')
+            return
+          }
+          // refreshImages() re-renders this pane, so the message has to be
+          // written AFTER it — otherwise it's wiped by the redraw.
+          await refreshImages()
+          const m = document.getElementById('pp-fetch-msg')
+          m.textContent = 'Added: ' + (res.image.credit || 'Wikimedia Commons')
+          m.className = 'pp-fetch-msg is-ok'
+        } catch (err) {
+          msg.textContent = err.message
+          msg.className = 'pp-fetch-msg is-err'
+          btn.classList.remove('is-busy')
+        }
+      })
+
+      const drop = document.getElementById('pp-image-drop')
+      drop.addEventListener('click', () => input.click())
+      // Counter, not a boolean — dragenter/dragleave fire for every child
+      // element crossed, so a flag flickers off halfway through the tile.
+      let depth = 0
+      drop.addEventListener('dragover', e => { e.preventDefault() })
+      drop.addEventListener('dragenter', e => {
+        e.preventDefault(); depth++; drop.classList.add('is-dropping')
+      })
+      drop.addEventListener('dragleave', () => {
+        if (--depth <= 0) { depth = 0; drop.classList.remove('is-dropping') }
+      })
+      drop.addEventListener('drop', e => {
+        e.preventDefault(); depth = 0; drop.classList.remove('is-dropping')
+        const files = Array.from(e.dataTransfer.files || [])
+          .filter(f => f.type.startsWith('image/'))
+        if (files.length) upload(files)
+      })
     }
 
+    async function refreshImages() {
+      ppImages = await API.performers.listImages(performerId)
+      performer.images = ppImages
+      renderHeroPortrait()
+      renderPhotosPane()
+      // Keep the tab's count badge honest after an add or delete.
+      const tab = mainContent.querySelector('.pp-tab[data-pane="photos"]')
+      if (tab) {
+        tab.innerHTML = 'Photos' + (ppImages.length ? `<span class="pp-tab-n">${ppImages.length}</span>` : '')
+      }
+    }
+
+    async function upload(files) {
+      if (!files || !files.length) return
+      try {
+        const res = await API.performers.uploadImages(performerId, files)
+        await refreshImages()
+        // Partial success is a 200 with an `errors` list — 4 of 5 photos
+        // landing should not read as a failure, but the rejected one must say
+        // why rather than vanishing.
+        if (res.errors && res.errors.length) alert('Some files were skipped:\n' + res.errors.join('\n'))
+      } catch (err) { alert('Upload failed: ' + err.message) }
+    }
+
+    renderHeroPortrait()
+    renderPhotosPane()
+
+    // ── MusicBrainz block (Overview tab) ────────────────────────────────────
+    // Four states, and they must look different: matched (facts + links),
+    // ambiguous (needs you to pick), none (looked, found nothing), and null
+    // (never looked up — pre-existing rows, or created while offline).
+    function renderMusicBrainz() {
+      const box = document.getElementById('pp-mb')
+      if (!box) return
+      const mb = performer.musicbrainz || {}
+      // 'matched' = the confidence gate chose it, no human involved.
+      // 'linked'  = a human picked it from the candidate list.
+      // Saying "Matched automatically" for the second is a small lie that makes
+      // every other automatic claim in the app less believable (Ryan,
+      // 2026-08-07).
+      if (mb.status === 'matched' || mb.status === 'linked') {
+        const how = mb.status === 'matched' ? 'Matched automatically' : 'Linked by you'
+        // WHAT we linked to, and just enough to confirm it's the right act
+        // (Ryan, 2026-08-07). This panel is a CONNECTION, not a data display:
+        // the link list it used to show is still fetched and stored — future
+        // ingest and enrichment jobs need to know where to look — but nobody
+        // needs to read it, so it isn't rendered.
+        // Active years sit right beside the type — the single most useful
+        // check that a match is the right act, since two same-named bands
+        // almost always differ by era (Ryan, 2026-08-07).
+        //
+        // When MusicBrainz has no dates, SAY SO rather than omitting the
+        // field: silence reads as "we didn't bother", where "no dates" is
+        // itself a fact about the entry — and a common one for ad-hoc
+        // billings like Acoustic All-Stars.
+        const years = mb.begin
+          ? `${mb.begin}${mb.end ? '–' + mb.end : '–present'}`
+          : 'no dates on record'
+        const facts = [mb.type, years, mb.area, mb.disambiguation]
+          .filter(Boolean).join(' · ')
+        box.innerHTML = `
+          <div class="pp-mb-linked">
+            <a class="pp-mb-name" href="${esc(mbArtistUrl(mb.mbid))}"
+               target="_blank" rel="noopener"
+               title="View this entry on musicbrainz.org">${esc(mb.name || performer.name)} ↗</a>
+            ${facts ? `<span class="pp-mb-facts">${esc(facts)}</span>` : ''}
+          </div>
+          <div class="pp-mb-foot">
+            <span class="pp-mb-dot"></span>${how}
+            <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-change">Change match</button>
+          </div>`
+      } else {
+        const msg = mb.status === 'ambiguous'
+          ? 'More than one act goes by this name — pick the right one.'
+          : mb.status === 'none'
+            ? 'Nothing found for this name.'
+            : 'Not looked up yet.'
+        box.innerHTML = `
+          <div class="pp-mb-empty">${msg}
+            <button type="button" class="btn btn-primary btn-xs" id="pp-mb-lookup">
+              ${mb.status === 'ambiguous' ? 'Choose a match' : 'Look up'}</button>
+          </div>`
+      }
+      document.getElementById('pp-mb-change')?.addEventListener('click', openMbPicker)
+      document.getElementById('pp-mb-lookup')?.addEventListener('click', runMbLookup)
+    }
+
+    // Look up, and LINK IT IF THE ANSWER IS OBVIOUS (Ryan, 2026-08-07).
+    // Clicking through a candidate list to confirm a single 100-scoring result
+    // is busywork. The server applies the same confidence gate the creation-time
+    // pass uses; only a genuinely unclear result comes back as candidates.
+    async function runMbLookup() {
+      const box = document.getElementById('pp-mb')
+      box.innerHTML = `<div class="pp-mb-empty">Searching MusicBrainz…</div>`
+      try {
+        const res = await API.performers.mbLookup(performerId)
+        if (res.status === 'matched') {
+          performer = await API.performers.get(performerId)
+          renderMusicBrainz()
+          // The Photos tab gates its Wikimedia lookup on performer.musicbrainz
+          // .mbid. That pane was rendered ONCE at page load, so without this it
+          // kept saying "match this act first" after the match succeeded.
+          renderPhotosPane()
+          return
+        }
+        renderMbCandidates(res.query, res.candidates || [])
+      } catch (e) {
+        box.innerHTML = `<div class="pp-mb-empty">Lookup failed: ${esc(e.message)}
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-lookup">Try again</button></div>`
+        document.getElementById('pp-mb-lookup').addEventListener('click', runMbLookup)
+      }
+    }
+
+    // Candidate picker. Deliberately a manual step: automatic matching either
+    // wins outright or defers to a human — it never guesses (Ryan, 2026-08-07),
+    // because a wrong entity attaches wrong facts to a page nobody re-checks.
+    async function openMbPicker() {
+      const box = document.getElementById('pp-mb')
+      box.innerHTML = `<div class="pp-mb-empty">Searching MusicBrainz…</div>`
+      let res
+      try { res = await API.performers.mbCandidates(performerId) }
+      catch (e) {
+        box.innerHTML = `<div class="pp-mb-empty">Lookup failed: ${esc(e.message)}
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-change">Try again</button></div>`
+        document.getElementById('pp-mb-change').addEventListener('click', openMbPicker)
+        return
+      }
+      renderMbCandidates(res.query, res.candidates || [])
+    }
+
+    // Shared candidate list — used by both the explicit "Look up" (when the
+    // result wasn't clear-cut) and "Change match".
+    function renderMbCandidates(query, cands) {
+      const box = document.getElementById('pp-mb')
+      if (!cands.length) {
+        box.innerHTML = `<div class="pp-mb-empty">Nothing found for “${esc(query || performer.name)}”.
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-lookup">Try again</button></div>`
+        document.getElementById('pp-mb-lookup').addEventListener('click', runMbLookup)
+        return
+      }
+      box.innerHTML = `
+        <!-- Explicit instruction (Ryan, 2026-08-07): the list looked like
+             results to read, not a choice to make, so people didn't realise a
+             click was required to actually link the act. -->
+        <div class="pp-mb-prompt">Click the right act to link it${
+          cands.length === 1 ? '' : ' — more than one goes by this name'}.</div>
+        <div class="pp-mb-cands">
+          ${cands.map(c => `
+            <div class="pp-mb-cand" data-mbid="${esc(c.mbid)}" role="button" tabindex="0">
+              <span class="pp-mb-cand-name">${esc(c.name)}</span>
+              <span class="pp-mb-cand-meta">${[
+                c.type, c.area,
+                c.begin ? `${c.begin}${c.end ? '–' + c.end : ''}` : '',
+                c.disambiguation,
+              ].filter(Boolean).map(esc).join(' · ')}</span>
+              <span class="pp-mb-cand-score" title="MusicBrainz match score">${c.score ?? ''}</span>
+              <!-- Verify BEFORE committing. For a vague name like "Acoustic
+                   All-Stars" the summary line rarely settles it, and the real
+                   entry (with its releases and relationships) usually does. -->
+              <a class="pp-mb-cand-view" href="${esc(mbArtistUrl(c.mbid))}"
+                 target="_blank" rel="noopener"
+                 title="Open on musicbrainz.org">View ↗</a>
+            </div>`).join('')}
+        </div>
+        <div class="pp-mb-foot">
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-cancel">Cancel</button>
+          ${performer.musicbrainz?.mbid
+            ? `<button type="button" class="btn btn-ghost btn-xs" id="pp-mb-clear">Clear match</button>` : ''}
+        </div>`
+
+      box.querySelectorAll('.pp-mb-cand').forEach(btn => {
+        btn.addEventListener('click', async e => {
+          // The View link lives inside the clickable row — following it must
+          // not also select the candidate.
+          if (e.target.closest('.pp-mb-cand-view')) return
+          box.innerHTML = `<div class="pp-mb-empty">Fetching…</div>`
+          try {
+            await API.performers.mbResolve(performerId, btn.dataset.mbid)
+            performer = await API.performers.get(performerId)
+            renderMusicBrainz()
+            renderPhotosPane()      // see note in runMbLookup
+          } catch (e) {
+            alert('Failed: ' + e.message); renderMusicBrainz()
+          }
+        })
+        // The row is a div (a <button> can't legally contain the View link),
+        // so keyboard activation has to be wired by hand.
+        btn.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click() }
+        })
+      })
+      document.getElementById('pp-mb-cancel').addEventListener('click', renderMusicBrainz)
+      document.getElementById('pp-mb-clear')?.addEventListener('click', async () => {
+        try {
+          await API.performers.mbResolve(performerId, null)
+          performer = await API.performers.get(performerId)
+          renderMusicBrainz()
+          renderPhotosPane()        // clearing a match disables the lookup again
+        } catch (e) { alert('Failed: ' + e.message) }
+      })
+    }
+    renderMusicBrainz()
+
+    // ── AI Assist — biography enrichment, colocated with Description ─────────
+    //
+    // Reduced 2026-08-07 from a full results panel to a single button beside
+    // the Description header. The suggested-resources and pages-consulted
+    // lists are gone: they were interesting once and noise thereafter, and the
+    // act's own Trusted sources list is where curated links belong.
+    //
+    // THIS OVERWRITES THE DESCRIPTION — a deliberate, Ryan-approved exception
+    // to the project's "AI suggests, human approves" rule (see
+    // performer_research.py). That rule exists because a wrong-but-confident
+    // date silently overwrote a recording; a biography is a different risk
+    // class — visible on screen the moment it lands, freely re-editable, and
+    // not a field anything else computes from. The copy-into-place step was
+    // pure friction for the only outcome anyone wanted.
     async function runDossier() {
-      const box = document.getElementById('pp-dossier')
-      box.innerHTML = `<div class="ai-loading"><div class="loading-spinner"></div><div>Researching the web — this can take a minute or two… <span id="pp-dossier-elapsed">0s</span></div></div>`
+      const btn = document.getElementById('pp-dossier-run')
+      const msg = document.getElementById('pp-dossier-msg')
+      const descEl = document.getElementById('pp-desc')
+      if (!btn || btn.disabled) return
+      btn.disabled = true
       const t0 = Date.now()
+      msg.className = 'pp-sec-msg'
+      msg.textContent = 'Researching the web… this takes a minute or two'
+      const tick = setInterval(() => {
+        msg.textContent = `Researching the web… ${Math.round((Date.now() - t0) / 1000)}s`
+      }, 1000)
       try {
         const { job_id } = await API.performers.startDossier(performerId)
-        dossier = await pollDossierJob(performerId, job_id, t0)
-        renderDossier()
+        const result = await pollDossierJob(performerId, job_id, t0)
+        clearInterval(tick)
+
+        const bio = stripCitations(result.biography || '')
+        if (!bio) {
+          msg.textContent = 'No biography could be written for this act.'
+          btn.disabled = false
+          return
+        }
+        performer.bio = bio
+        await saveField({ bio })
+        if (descEl) {
+          descEl.textContent = bio
+          descEl.classList.remove('pp-empty')
+        }
+        msg.className = 'pp-sec-msg is-ok'
+        // formatAiCost returns an HTML badge, so this must be innerHTML —
+        // textContent rendered the literal <span …> markup on the page.
+        msg.innerHTML = 'Description updated' +
+          (result.usage ? ' · ' + formatAiCost(result.usage) : '')
+        btn.textContent = '↻ AI Assist'
+        btn.disabled = false
       } catch (e) {
-        box.innerHTML = `<div class="empty-state" style="color:var(--red)">Dossier failed: ${esc(e.message)}</div>`
+        clearInterval(tick)
+        msg.className = 'pp-sec-msg is-err'
+        msg.textContent = 'AI Assist failed: ' + e.message
+        btn.disabled = false
       }
     }
-    renderDossier()
+    document.getElementById('pp-dossier-run')?.addEventListener('click', runDossier)
+
+    // Cost range on the button's tooltip. Fetched rather than hardcoded so it
+    // follows the model chosen in Settings, and fire-and-forget because a
+    // failed estimate must never stop the button working.
+    API.performers.aiEstimate().then(est => {
+      const b = document.getElementById('pp-dossier-run')
+      if (!b || est.low_cents == null) return
+      b.title = `Researches the web and rewrites the description. `
+              + `Roughly ${est.low_cents}–${est.high_cents}¢ per run, `
+              + `depending on how many searches it needs.`
+    }).catch(() => {})
+
+    if (performer.dossier) {
+      // A previous run exists on the record. Nothing is rendered from it any
+      // more — the description it produced is already saved — but the label
+      // should say this isn't the first pass.
+      document.getElementById('pp-dossier-run').textContent = '↻ AI Assist'
+    }
 
     document.getElementById('pp-delete').addEventListener('click', async () => {
       if (!confirm(`Delete performer "${performer.name}"? This can't be undone.`)) return
@@ -5646,23 +6258,22 @@ const App = (() => {
     })()
   }
 
-  // Same polling pattern as pollAiJob, for the Performer page's Dossier
+  // Same polling pattern as pollAiJob, for the Performer page's AI Assist
   // research job (2026-07-22) — kept separate rather than parameterizing
-  // pollAiJob, since the endpoint shape (performerId + jobId) and the
-  // elapsed-timer element id differ.
+  // pollAiJob, since the endpoint shape (performerId + jobId) differs.
+  // The elapsed timer now lives with the caller (runDossier owns its own
+  // interval against #pp-dossier-msg), so this only polls.
   function pollDossierJob(performerId, jobId, t0) {
     const sleep = ms => new Promise(r => setTimeout(r, ms))
     return (async function loop() {
       while (true) {
         await sleep(2000)
-        const el = document.getElementById('pp-dossier-elapsed')
-        if (el) el.textContent = `${Math.round((Date.now() - t0) / 1000)}s`
         let s
         try { s = await API.performers.dossierStatus(performerId, jobId) }
         catch (e) { if (/unknown job/.test(e.message)) throw new Error('Job was lost (did the app restart?)'); throw e }
         if (s.status === 'done')  return s.result
         if (s.status === 'error') throw new Error(s.error)
-        if (Date.now() - t0 > 5 * 60 * 1000) throw new Error('Dossier research timed out after 5 minutes')
+        if (Date.now() - t0 > 5 * 60 * 1000) throw new Error('AI Assist timed out after 5 minutes')
       }
     })()
   }
@@ -7469,8 +8080,12 @@ const App = (() => {
         scroll.innerHTML = '<div style="padding:16px 14px; font-size:12px; color:var(--t2)">No genres found</div>'
         return
       }
+      // Swatch in the list, not just the editor — picking colours is a
+      // comparative job (is Reggae too close to Bluegrass?), and that's
+      // impossible one detail pane at a time.
       scroll.innerHTML = list.map(g => `
-        <div class="venue-list-row ${g.id === activeId ? 'active' : ''}" data-id="${g.id}">
+        <div class="venue-list-row has-swatch ${g.id === activeId ? 'active' : ''}" data-id="${g.id}">
+          <span class="genre-row-swatch" style="--genre-fg:${esc(g.color || 'var(--t2)')}"></span>
           <div class="venue-row-name">${esc(g.name)}</div>
           <div class="venue-row-count">${g.performer_count || 0}p</div>
         </div>`).join('')
@@ -7509,6 +8124,23 @@ const App = (() => {
             <textarea id="gd-desc" style="min-height:80px">${esc(g.description||'')}</textarea>
           </div>
 
+          <!-- Colour (2026-08-07) — drives the Browse cards' colour flair.
+               Clearable, because NULL is a real state: an uncoloured genre
+               renders the same neutral grey as an unassigned performer. -->
+          <div class="ingest-field" style="margin-bottom:18px">
+            <label>Card colour</label>
+            <div class="genre-color-row">
+              <input type="color" id="gd-color" class="genre-color-input"
+                     value="${esc(g.color || '#7a6e64')}" />
+              <input type="text" id="gd-color-hex" class="genre-color-hex"
+                     value="${esc(g.color || '')}" placeholder="none — neutral grey"
+                     spellcheck="false" maxlength="7" />
+              <button type="button" class="btn btn-ghost btn-xs" id="gd-color-clear">Clear</button>
+              <span class="genre-color-preview" id="gd-color-preview"
+                    style="--genre-fg:${esc(g.color || 'var(--t2)')}"></span>
+            </div>
+          </div>
+
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:28px">
             <button class="btn btn-primary btn-sm" id="gd-save">Save</button>
             <span id="gd-msg" style="font-size:11px; color:var(--t2)"></span>
@@ -7526,15 +8158,49 @@ const App = (() => {
           </div>` : `<div style="font-size:12px; color:var(--t2)">No performers assigned yet</div>`}
         </div>`
 
+      // Colour picker ↔ hex field stay in sync in both directions, and the
+      // swatch previews live. The hex field exists so a colour can be pasted
+      // or typed exactly — <input type="color"> alone can't express "none",
+      // and clearing must remain possible (see the model's note on NULL).
+      const colorEl   = document.getElementById('gd-color')
+      const hexEl     = document.getElementById('gd-color-hex')
+      const previewEl = document.getElementById('gd-color-preview')
+      const HEX_RE    = /^#[0-9a-fA-F]{6}$/
+
+      function syncPreview() {
+        const v = hexEl.value.trim()
+        previewEl.style.setProperty('--genre-fg', HEX_RE.test(v) ? v : 'var(--t2)')
+      }
+      colorEl.addEventListener('input', () => {
+        hexEl.value = colorEl.value.toLowerCase()
+        syncPreview()
+      })
+      hexEl.addEventListener('input', () => {
+        const v = hexEl.value.trim()
+        if (HEX_RE.test(v)) colorEl.value = v
+        syncPreview()
+      })
+      document.getElementById('gd-color-clear').addEventListener('click', () => {
+        hexEl.value = ''
+        syncPreview()
+      })
+
       document.getElementById('gd-save').addEventListener('click', async () => {
         const saveBtn = document.getElementById('gd-save')
         const msgEl   = document.getElementById('gd-msg')
+        const hexVal  = hexEl.value.trim()
+        if (hexVal && !HEX_RE.test(hexVal)) {
+          msgEl.style.color = 'var(--red)'
+          msgEl.textContent = 'Colour must be #rrggbb'
+          return
+        }
         saveBtn.disabled = true
         saveBtn.textContent = 'Saving…'
         try {
           await API.genres.update(id, {
             name:        document.getElementById('gd-name').value.trim(),
             description: document.getElementById('gd-desc').value.trim() || null,
+            color:       hexVal || null,
           })
           allGenres = await API.genres.list()
           renderList(allGenres)

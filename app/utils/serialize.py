@@ -39,7 +39,7 @@ def recording_summary(rec):
     }
 
 
-def recording_row(rec, waveform=False):
+def recording_row(rec, waveform=False, card=False):
     """
     Self-contained recording row for flat catalog/collection displays — includes
     the performer, date, and venue so a single row fully describes the show.
@@ -47,9 +47,17 @@ def recording_row(rec, waveform=False):
     `waveform` (default False, opt-in) adds a downsampled card waveform strip.
     Left off by default: this same serializer backs the flat List views
     (recent, collection, venue) — decoding TrackAnalysis JSON for every one of
-    those rows would tax List to benefit the Browse card modules. Only the
-    card-bearing endpoints pass waveform=True. See the Library Browse View
-    design spec, 2026-08-02.
+    those rows would tax List to benefit the Browse card modules. Currently
+    requested by nothing (the Browse card became a handbill on 2026-08-07);
+    kept because the capability is real and tested.
+
+    `card` (default False, opt-in) adds the Browse cards' visual fields:
+    `genre`, `genre_color`, and `image_id` for the performer's primary photo.
+    Same reasoning as `waveform` and the same design-spec rule: each field walks
+    Recording → Performance → Performer → (Genre | PerformerImage), so on the
+    544-row flat List that is three extra joins per row to benefit a 3-card and
+    a 12-card module. Callers passing card=True MUST eager-load those
+    relationships or they buy an N+1 — see api/recordings.py.
     """
     from app.utils.format import format_partial_date
     p = rec.performance
@@ -88,7 +96,33 @@ def recording_row(rec, waveform=False):
     }
     if waveform:
         row["waveform"] = _card_waveform(rec)
+    if card:
+        performer = p.performer if (p and p.performer) else None
+        g = performer.genre if performer else None
+        row["genre"]       = g.name  if g else None
+        # May be None even when a genre exists — colour is nullable and NULL is
+        # a supported state (the frontend renders neutral grey). Never
+        # substitute a default here; the fallback belongs in one place.
+        row["genre_color"] = g.color if g else None
+        row["image_id"]    = _primary_image_id(performer)
     return row
+
+
+def _primary_image_id(performer):
+    """
+    Id of the performer's primary image, for the card's circular thumbnail.
+
+    Reads through the `images` relationship (ordered primary-first) rather than
+    querying, so an eager-loading caller pays nothing extra. Falls back to the
+    first image when none is flagged primary — deleting the primary must not
+    leave a performer with photos but no face on the card. Mirrors
+    performer_image.primary_for(); both exist because one serves loaded objects
+    and the other a bare id.
+    """
+    if performer is None:
+        return None
+    imgs = performer.images
+    return imgs[0].id if imgs else None
 
 
 def _card_waveform(rec, n=100):

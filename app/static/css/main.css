@@ -449,20 +449,312 @@ body {
   padding: 28px 28px 18px;
   border-bottom: 1px solid var(--bd-0);
 }
-/* Two-column head: name/desc/members on the left, profile picture top-right
-   (2026-07-22). */
-.pp-head-row { display: flex; align-items: flex-start; gap: 24px; }
-.pp-head-main { flex: 1; min-width: 0; }
-.pp-head-image { flex: 0 0 160px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.pp-image-frame {
-  width: 160px; height: 160px; border-radius: var(--r-sm);
-  background: var(--bg-1); border: 1px solid var(--bd-1);
-  display: flex; align-items: center; justify-content: center;
-  overflow: hidden;
+/* ── Performer page: hero + tabs (rebuilt 2026-08-07) ─────────────────────────
+   Replaced a single stacked column that put members, genre, the recordings
+   table, resources and AI research on one scroll. Everything is now behind
+   four tabs with a hero header carrying the page's identity — the page has to
+   read as a music page to a general listener, not as a form.               */
+/* Page gutter. The old layout got this from .performer-head's 28px padding,
+   which went away with the rebuild — hence the flush-left first pass. Applied
+   on the wrapper so hero, tabs and panes share one gutter and can never drift
+   apart. */
+.performer-page { padding: 22px 28px 32px; }
+.performer-page .pp-back-row { margin-bottom: 10px; }
+
+.pp-hero { display: flex; align-items: flex-start; gap: 20px; padding: 0 0 18px; }
+.pp-hero-main { flex: 1; min-width: 0; }
+.pp-hero-portrait { flex: 0 0 104px; }
+
+/* Ring is the genre colour, tying the page to its Browse card. */
+.pp-portrait-img, .pp-portrait-blank {
+  width: 104px; height: 104px; border-radius: 50%;
+  border: 3px solid var(--ring, var(--bd-1)); background: var(--bg-3);
+  display: block; object-fit: cover;
 }
-.pp-image-img { width: 100%; height: 100%; object-fit: cover; }
-.pp-image-placeholder { color: var(--t3); font-size: 11px; font-style: italic; }
-.pp-image-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+/* Initials, not a silhouette icon: with photos on ~1 of 164 performers the
+   no-photo state IS this page's normal appearance, and it should look
+   intentional rather than like a failed image load. */
+.pp-portrait-blank {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px; font-weight: 500; color: var(--t3); letter-spacing: .02em;
+}
+
+/* .pp-name is shared with the person/venue/collection pages at 22px; the
+   performer hero wants more presence without changing those. */
+.pp-hero .pp-name { font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
+
+.pp-hero-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
+/* .pp-genre-chip removed 2026-08-07 — the hero shows ONE genre element and it
+   is the editable field (.pp-hero .pp-genre-field below), which wears this
+   pill styling itself. Two elements for one value meant only one of them
+   responded to a click. */
+.pp-hero-fact { font-size: 11.5px; color: var(--t2); }
+.pp-hero-fact b { color: var(--t1); font-weight: 500; }
+
+.pp-hero-stats { display: flex; gap: 24px; margin-top: 14px; }
+.pp-stat-n {
+  font-size: 17px; font-weight: 600; color: var(--t0);
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.pp-stat-l {
+  font-size: 9px; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--t3); margin-top: 2px;
+}
+
+/* Horizontal page-level tabs. The app's other two tab patterns (.slide-tabs,
+   .hm-tabs) are narrow vertical rails for side panels — a different job — so
+   this borrows their visual language (uppercase, letterspaced, accent when
+   active) without reusing their layout. */
+.pp-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--bd-1); margin-bottom: 20px; }
+.pp-tab {
+  background: none; border: none; cursor: pointer; font-family: var(--font);
+  font-size: 10.5px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--t3); padding: 9px 14px;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color .12s, background .12s;
+}
+.pp-tab:hover { color: var(--t1); background: var(--bg-2); }
+.pp-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.pp-tab-n { color: var(--t3); font-weight: 500; margin-left: 5px; }
+
+.pp-pane { display: none; }
+.pp-pane.active { display: block; }
+.pp-sec {
+  font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--t3); font-weight: 650; margin: 0 0 8px;
+}
+.pp-sec:not(:first-child) { margin-top: 24px; }
+
+/* The recordings table brings its own 20px row padding, which would sit inside
+   the page gutter and look indented against every other section. Pulled back
+   to the gutter line, keeping 8px so the hover highlight still has some bleed
+   around the text rather than clipping it. */
+.pp-pane .rec-row--flat,
+.pp-pane .rec-table-head { padding-left: 8px; padding-right: 8px; }
+.pp-pane .rec-row--flat,
+.pp-pane .rec-table-head { margin-left: -8px; margin-right: -8px; }
+.pp-pane .rec-table { padding-top: 0; }
+
+/* Distinct reference blocks on Overview — Resources, MusicBrainz, AI Assist
+   (Ryan, 2026-08-07). Boxed and separated because they're three different
+   things that were previously an undifferentiated stack: one is links you
+   curate, one is fetched facts, one is generated drafts. */
+.pp-block {
+  margin-top: 26px; padding: 16px 18px;
+  background: var(--bg-3); border: 1px solid var(--bd-0); border-radius: var(--r-md);
+}
+.pp-block .pp-sec { margin-top: 0; }
+/* Real headings, not the dim 9.5px section labels used elsewhere on the page
+   (Ryan, 2026-08-07): these three blocks are the page's working tools, and a
+   micro-label made them read as fine print. */
+.pp-block-title {
+  font-size: 14px; font-weight: 600; color: var(--t0);
+  margin: 0 0 4px; letter-spacing: -.005em;
+}
+.pp-block-hint { font-size: 11px; color: var(--t3); line-height: 1.55; margin: 0 0 14px; max-width: 640px; }
+
+/* Sub-headings inside a block (Also known as / Tags / Links / …). */
+/* .pp-sub-note and the .pp-chip* set removed 2026-08-07 with the alias / tag /
+   related-act displays they styled. */
+
+/* The shared .pp-srclist/.pp-srcrow link rows were removed 2026-08-07 — the
+   MusicBrainz panel shows only the matched name now, and AI Assist no longer
+   renders suggestion or source lists at all. */
+
+/* ── Members: one per row, tenure visible ────────────────────────────────────
+   Replaced a run of chips whose stint editor only opened if you guessed a name
+   was clickable — the entire tenure feature was invisible. Each row now shows
+   its dates permanently, or says "Tenure not set", which reads as a prompt
+   rather than as empty space.                                              */
+.pp-member-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center; gap: 12px;
+  padding: 7px 8px; margin: 0 -8px;
+  border-bottom: 1px solid var(--bd-0); cursor: pointer;
+}
+.pp-member-row:hover { background: var(--bg-1); }
+.pp-member-row.is-open { background: var(--bg-1); }
+.pp-member-name {
+  background: none; border: none; padding: 0; text-align: left; cursor: pointer;
+  font-family: var(--font); font-size: 13px; color: var(--t0); min-width: 0;
+}
+.pp-member-row:hover .pp-member-name { color: var(--accent-lit); }
+.pp-member-tenure { font-size: 11.5px; color: var(--t1); font-variant-numeric: tabular-nums; }
+.pp-member-tenure.is-unset { color: var(--t3); font-style: italic; }
+/* Edit label stays dim until hover — visible enough to teach the interaction,
+   quiet enough not to clutter a roster of eight people. */
+.pp-member-edit {
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--t3); opacity: 0; transition: opacity .12s;
+}
+.pp-member-row:hover .pp-member-edit, .pp-member-row.is-open .pp-member-edit { opacity: 1; }
+.pp-member-x { color: var(--t3); cursor: pointer; font-size: 14px; line-height: 1; }
+.pp-member-x:hover { color: var(--red); }
+.pp-member-add { display: flex; align-items: center; gap: 8px; padding: 10px 0 0; }
+.pp-member-add-lbl { font-size: 11.5px; color: var(--t3); cursor: pointer; }
+.pp-member-add-lbl:hover { color: var(--t1); }
+
+/* Trusted-sources entry — one field that asks for the URL, then the optional
+   label. Sequential rather than two boxes side by side: only the URL is
+   required, and showing both implied both mattered. */
+.pp-res-entry { display: inline-flex; align-items: center; gap: 8px; }
+.pp-res-input {
+  width: 300px; font-size: 11.5px; padding: 4px 8px;
+  background: var(--bg-1); border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm); color: var(--t0); font-family: var(--font);
+}
+.pp-res-input:focus { outline: none; border-color: var(--accent); }
+.pp-res-hint { font-size: 10px; color: var(--t3); }
+
+/* Genre in the hero — the editable field wearing the colour pill, since there
+   is now only one genre element and it must both show and edit. */
+.pp-hero .pp-genre-field {
+  font-size: 9.5px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--genre-fg); border: 1px solid var(--genre-fg); border-radius: 10px;
+  padding: 2px 9px; background: color-mix(in srgb, var(--genre-fg) 14%, transparent);
+  cursor: pointer;
+}
+.pp-hero .pp-genre-field:hover { background: color-mix(in srgb, var(--genre-fg) 26%, transparent); }
+
+/* ── MusicBrainz block ───────────────────────────────────────────────────── */
+/* .pp-mb-grid/-row/-k/-v removed 2026-08-07 — the MusicBrainz panel shows
+   links only now, so the facts grid renders nowhere. */
+/* .pp-mb-links also removed — the horizontal link row was replaced by the
+   shared .pp-srclist row layout used by AI Assist. */
+.pp-mb-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 10.5px; color: var(--t3); }
+.pp-mb-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+.pp-mb-empty { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--t3); font-style: italic; }
+
+/* A matched entry shows only WHAT we linked to plus enough to confirm it's the
+   right act. The link list this panel used to render is still fetched and
+   stored — future ingest jobs need it — but nobody needs to read it. */
+.pp-mb-linked { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+/* Links out to musicbrainz.org/artist/<mbid> — the only way to actually verify
+   a match on a vague act name. */
+.pp-mb-name {
+  font-size: 13.5px; color: var(--t0); font-weight: 550; text-decoration: none;
+}
+.pp-mb-name:hover { color: var(--accent-lit); text-decoration: underline; }
+.pp-mb-facts { font-size: 11px; color: var(--t2); }
+
+/* Section header with an action beside it — Description + AI Assist. */
+.pp-sec-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.pp-sec-row:not(:first-child) { margin-top: 24px; }
+.pp-sec-row .pp-sec { margin: 0; }
+.pp-sec-msg { font-size: 10.5px; color: var(--t3); }
+.pp-sec-msg.is-ok  { color: var(--green); }
+.pp-sec-msg.is-err { color: var(--red); }
+
+/* The candidate list read as results to skim rather than a choice to make, so
+   people didn't realise a click was what actually linked the act. */
+.pp-mb-prompt { font-size: 11.5px; color: var(--t1); margin: 0 0 9px; }
+
+.pp-mb-cands { display: flex; flex-direction: column; gap: 4px; max-width: 620px; }
+.pp-mb-cand {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px 12px;
+  text-align: left; background: var(--bg-3); border: 1px solid var(--bd-0);
+  border-radius: var(--r-sm); padding: 8px 12px; cursor: pointer; font-family: var(--font);
+}
+.pp-mb-cand:hover { border-color: var(--accent); background: var(--bg-2); }
+.pp-mb-cand:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Sits inside the clickable row, so its own handler stops the row from
+   selecting the candidate — opening the page to check is not the same as
+   choosing it. */
+.pp-mb-cand-view {
+  grid-row: 1 / span 2; align-self: center;
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--t3); text-decoration: none; white-space: nowrap;
+  border: 1px solid var(--bd-1); border-radius: 3px; padding: 3px 7px;
+}
+.pp-mb-cand-view:hover { color: var(--accent-lit); border-color: var(--accent); }
+.pp-mb-cand-name { font-size: 12.5px; color: var(--t0); font-weight: 550; }
+.pp-mb-cand-meta { font-size: 10.5px; color: var(--t2); grid-column: 1; }
+/* Score is shown, not hidden: when two candidates are 3 points apart the user
+   is seeing exactly why the automatic pass refused to choose. */
+.pp-mb-cand-score {
+  grid-row: 1 / span 2; align-self: center; font-size: 11px; color: var(--t3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Photos tab gallery ──────────────────────────────────────────────────── */
+.pp-gal {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 12px; max-width: 720px;
+}
+.pp-ph {
+  position: relative; aspect-ratio: 1; border-radius: var(--r-sm); overflow: hidden;
+  border: 1px solid var(--bd-1); background: var(--bg-3);
+}
+.pp-ph.is-primary { border: 2px solid var(--accent); }
+.pp-ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pp-ph-tag {
+  position: absolute; top: 6px; left: 6px; font-size: 8px; font-weight: 700;
+  letter-spacing: .09em; text-transform: uppercase;
+  background: var(--accent); color: var(--bg-0); border-radius: 3px; padding: 1px 5px;
+}
+/* Actions appear on hover — a wall of thumbnails each wearing two buttons is
+   noisier than the photos themselves. */
+.pp-ph-acts {
+  position: absolute; inset: auto 0 0 0; display: flex; gap: 4px; padding: 6px;
+  background: linear-gradient(transparent, rgba(0,0,0,.78));
+  opacity: 0; transition: opacity .12s;
+}
+.pp-ph:hover .pp-ph-acts { opacity: 1; }
+.pp-ph-btn {
+  font-size: 9px; color: #e8e2da; background: rgba(0,0,0,.55);
+  border: 1px solid rgba(255,255,255,.22); border-radius: 3px;
+  padding: 2px 6px; cursor: pointer; font-family: var(--font);
+}
+.pp-ph-btn:hover { background: rgba(0,0,0,.8); border-color: var(--accent); }
+
+.pp-drop {
+  position: relative; aspect-ratio: 1; border: 1px dashed var(--bd-2);
+  border-radius: var(--r-sm); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px; text-align: center;
+  color: var(--t3); font-size: 10.5px; line-height: 1.5; cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.pp-drop:hover { border-color: var(--accent); color: var(--t2); }
+.pp-drop-plus { font-size: 19px; line-height: 1; }
+.pp-drop-veil {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--accent-dim2); color: var(--t0);
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  opacity: 0; pointer-events: none; transition: opacity .12s;
+}
+.pp-drop.is-dropping { border-color: var(--accent); }
+.pp-drop.is-dropping .pp-drop-veil { opacity: 1; }
+.pp-gal-note { font-size: 10.5px; color: var(--t3); margin-top: 12px; }
+
+/* Attribution strip. CC BY and CC BY-SA both REQUIRE credit, so a fetched
+   photo carries its licence line on the tile — visible, not just recorded in
+   the database where nobody would see it. */
+.pp-ph-credit {
+  position: absolute; top: 0; left: 0; right: 0;
+  font-size: 8px; line-height: 1.3; color: #d8d2ca;
+  background: linear-gradient(rgba(0,0,0,.72), transparent);
+  padding: 4px 6px 10px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pp-ph.is-primary .pp-ph-credit { padding-top: 20px; }   /* clear the Primary tag */
+
+/* Wikimedia lookup as a tile beside the drop zone — both are ways of getting a
+   photo in, so they sit together in the grid rather than one being a footnote
+   under the gallery. */
+.pp-drop-sub { font-size: 10px; color: var(--t3); }
+.pp-fetch-tile.is-disabled {
+  cursor: default; opacity: .55; border-style: dotted;
+}
+.pp-fetch-tile.is-disabled:hover { border-color: var(--bd-2); color: var(--t3); }
+.pp-fetch-tile.is-busy { border-color: var(--accent); color: var(--accent); cursor: progress; }
+
+.pp-fetch-msg { font-size: 11px; color: var(--t2); margin-top: 12px; min-height: 14px; }
+.pp-fetch-msg.is-ok  { color: var(--green); }
+.pp-fetch-msg.is-err { color: var(--red); }
+/* The single-slot .pp-image-* styles were removed 2026-08-07 when the Performer
+   page gained a Photos tab: the gallery (.pp-gal / .pp-ph) and the hero
+   portrait (.pp-portrait-*) above replace them entirely, and nothing in the
+   JS referenced them any more. */
 
 .pp-name-row { display: flex; align-items: center; gap: 12px; }
 .pp-name {
@@ -478,7 +770,10 @@ body {
 
 .pp-desc {
   font-size: 13px; color: var(--t1); line-height: 1.5;
-  margin-top: 8px; max-width: 640px; white-space: pre-wrap;
+  margin-top: 8px; white-space: pre-wrap;
+  /* Full width (Ryan, 2026-08-07) — the 640px cap made an AI-written
+     three-paragraph biography sit in a narrow column with the rest of the
+     pane empty beside it. */
 }
 .pp-desc.pp-empty { color: var(--t3); font-style: italic; }
 
@@ -521,13 +816,6 @@ body {
 .pp-resource-url { color: var(--t3); font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
 .pp-resource-x { color: var(--t3); cursor: pointer; font-size: 13px; line-height: 1; }
 .pp-resource-x:hover { color: var(--red); }
-.pp-resource-add { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-.pp-res-label, .pp-res-url {
-  font-size: 11px; padding: 3px 7px;
-  background: var(--bg-2); border: 1px solid var(--bd-1); color: var(--t0); border-radius: var(--r-sm);
-}
-.pp-res-label { width: 140px; }
-.pp-res-url { width: 240px; }
 
 /* Recording count, now between the head and the recordings table rather than
    inside .performer-head (2026-07-22 — was "N recordings · N performances"
@@ -541,8 +829,6 @@ body {
   display: flex; flex-direction: column; gap: 22px;
 }
 .pp-dossier-empty { font-size: 12px; color: var(--t3); font-style: italic; margin-bottom: 8px; }
-.pp-dossier-bio { font-size: 12.5px; color: var(--t1); line-height: 1.6; max-width: 640px; margin: 6px 0 8px; }
-.pp-dossier-bio p { margin: 0 0 8px; }
 
 /* Venue page: editable location fields + performance list */
 .vn-loc { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 12px; }
@@ -5015,30 +5301,196 @@ input[type="range"].progress-bar {
 }
 .lib-module-grid--tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
-/* ── Recording card (Recommended / Recently Added) ────────────────────────── */
+/* ── Recording card — handbill (RECOMMENDED MODULE ONLY) ──────────────────────
+   Replaced the waveform-strip card 2026-08-07. The Internet Archive's Live
+   Music Archive already leads with waveforms, so that reads as derivative;
+   this treats the show's own metadata as the artwork, gig-poster style.
+   Centred, ruled, uppercase act.
+
+   `--genre-fg` is set inline per card by recCardHtml() from the performer's
+   GENRE colour (falling back to neutral --t2 for the 70 of 164 performers with
+   no genre). Genre rather than source: source is a technical attribute and
+   makes a poor identity; genre groups the library the way a listener browses.
+
+   Scoped to Recommended on purpose — tall and showy suits three hero picks and
+   would be exhausting down a twelve-row list. Recently Added has .rec-row.   */
 .rec-card {
-  display: block; text-decoration: none; color: inherit;
+  /* Flex column + margin-top:auto on the footer is what pins the meta row to
+     the bottom edge (Ryan, 2026-08-07). Grid's default align-items:stretch
+     already gives the three cards equal height, so without this the footer
+     floats mid-card on the short ones and the row of cards looks ragged. */
+  display: flex; flex-direction: column;
+  position: relative; overflow: hidden;
+  text-decoration: none; color: inherit;
   background: var(--bg-3); border: 1px solid var(--bd-0); border-radius: var(--r-md);
-  overflow: hidden; transition: border-color .12s;
+  padding: 18px 14px 13px; text-align: center;
+  transition: border-color .12s, background .12s;
 }
-.rec-card:hover { border-color: var(--bd-2); }
+.rec-card:hover { border-color: var(--genre-fg, var(--bd-2)); background: var(--bg-2); }
 
-.rec-card-strip { position: relative; height: 56px; background: var(--bg-2); }
-.rec-card-waveform { display: block; width: 100%; height: 100%; }
-.rec-card-waveform rect { fill: var(--wf-color); }
-.rec-card-waveform--flat {
-  background: var(--wf-color); opacity: .35;
-  height: 2px; margin-top: 27px;
+/* Genre colour bar across the top — the card's main "pop". A solid edge reads
+   as deliberate at a glance where a tinted wash just looks like a rendering
+   artefact on the warm background. */
+.rec-card-spine {
+  position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--genre-fg, var(--t2));
 }
-.rec-card-badge { position: absolute; top: 8px; right: 8px; }
 
-.rec-card-body { padding: 10px 12px 12px; }
-.rec-card-performer { font-size: 13px; font-weight: 500; color: var(--t0); }
-.rec-card-date       { font-size: 11.5px; color: var(--t2); margin-top: 3px; }
-.rec-card-venue       { font-size: 11.5px; color: var(--t2); }
-.rec-card-meta {
-  font-size: 11px; color: var(--t3); margin-top: 6px;
-  display: flex; gap: 6px; align-items: center;
+/* Circular performer photo. Only 1 of 164 performers has one today, so the
+   card is designed to look finished WITHOUT it — the element is simply absent,
+   never a placeholder silhouette. */
+.rec-card-photo {
+  width: 52px; height: 52px; border-radius: 50%; object-fit: cover;
+  margin: 2px auto 10px; display: block;
+  border: 2px solid var(--genre-fg, var(--bd-1));
+  background: var(--bg-2);
+}
+
+/* The date is deliberately full-strength --t0, not a muted meta colour: for a
+   live recording the date IS the identity — it's how collectors name, trade
+   and search for shows. Tabular numerals so stacked cards align. */
+.rec-card-date {
+  font-size: 12.5px; font-weight: 600; color: var(--t0);
+  letter-spacing: .14em; font-variant-numeric: tabular-nums;
+}
+
+.rec-card-rule {
+  height: 1px; background: var(--genre-fg, var(--bd-1)); opacity: .45; margin: 9px 0;
+}
+
+.rec-card-performer {
+  font-size: 15px; font-weight: 700; line-height: 1.15; color: var(--t0);
+  text-transform: uppercase; letter-spacing: -.005em;
+  /* Act names run long ("Alison Brown and Her Fairweather Friends"), so clamp
+     to three lines rather than truncate — a poster wraps, it doesn't ellipsis. */
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.rec-card-venue {
+  font-size: 11.5px; font-style: italic; color: var(--t1); line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rec-card-loc {
+  font-size: 10.5px; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--t2); margin-top: 5px;
+}
+.rec-card-genre {
+  display: inline-block; margin: 9px auto 0; padding: 2px 8px; border-radius: 10px;
+  font-size: 9.5px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--genre-fg); border: 1px solid var(--genre-fg);
+  /* color-mix keeps one colour source: the chip fill is the genre colour at low
+     alpha, so adding a genre never means also picking a background. */
+  background: color-mix(in srgb, var(--genre-fg) 14%, transparent);
+}
+
+.rec-card-foot {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 5px;
+  font-size: 10.5px; color: var(--t2);
+  margin-top: auto; padding-top: 12px;   /* auto = pinned to the card bottom */
+}
+.rec-card-dot { opacity: .5; }
+.rec-card-src {
+  border: 1px solid var(--genre-fg, var(--t2)); color: var(--genre-fg, var(--t2));
+  border-radius: 3px; padding: 1px 5px;
+  font-size: 9px; font-weight: 700; letter-spacing: .12em;
+}
+
+/* ── Genre colour picker (2026-08-07) ────────────────────────────────────────
+   A native <input type="color"> paired with a hex field. The hex field is not
+   redundant: the colour input cannot express "no colour", and NULL is a real
+   state here — an uncoloured genre renders the same neutral grey as a
+   performer with no genre at all.                                           */
+.genre-color-row { display: flex; align-items: center; gap: 8px; }
+.genre-color-input {
+  width: 38px; height: 30px; padding: 2px; cursor: pointer;
+  background: var(--bg-1); border: 1px solid var(--bd-1); border-radius: var(--r-sm);
+}
+.genre-color-hex {
+  width: 130px; font-family: var(--font-mono); font-size: 12px;
+}
+.genre-color-preview {
+  width: 26px; height: 26px; border-radius: 50%; display: inline-block;
+  background: var(--genre-fg); border: 1px solid var(--bd-1);
+}
+/* Swatch in the genre list — choosing colours is comparative work, so they
+   have to be visible side by side, not one detail pane at a time.
+   .venue-list-row is a 2-column grid (name | count); the swatch needs a third
+   column, so genre rows opt in rather than the shared row class changing for
+   every consumer of it. */
+.venue-list-row.has-swatch { grid-template-columns: auto 1fr auto; }
+.genre-row-swatch {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--genre-fg); margin-right: 9px;
+}
+
+/* ── Recording ROW card — RECENTLY ADDED MODULE ───────────────────────────────
+   Full-width rows with list-like density but card styling (Ryan, 2026-08-07):
+   a middle ground between the handbill and the flat table, carrying more
+   detail because a row has horizontal space a 3-up card doesn't. The ingest
+   date is the point — "what's new" is the question, and the show date says
+   nothing about that. Server orders newest-ingested first.                   */
+.rec-rowcard-list { display: flex; flex-direction: column; gap: 8px; }
+
+.rec-rowcard {
+  display: grid;
+  grid-template-columns: 4px auto 116px minmax(0, 1fr) auto auto;
+  align-items: center; gap: 14px;
+  text-decoration: none; color: inherit; overflow: hidden;
+  background: var(--bg-3); border: 1px solid var(--bd-0); border-radius: var(--r-md);
+  padding: 0 16px 0 0; min-height: 60px;
+  transition: border-color .12s, background .12s;
+}
+.rec-rowcard:hover { border-color: var(--genre-fg, var(--bd-2)); background: var(--bg-2); }
+
+/* Vertical genre bar down the leading edge — the row's equivalent of the
+   handbill's top spine. Full-bleed via the grid's 4px first column and the
+   container's zero left padding. */
+.rec-rowcard-spine { align-self: stretch; background: var(--genre-fg, var(--t2)); }
+
+.rec-rowcard-avatar { display: flex; align-items: center; }
+.rec-rowcard-photo {
+  width: 38px; height: 38px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--genre-fg, var(--bd-1)); background: var(--bg-2);
+  display: block;
+}
+/* Reserves the avatar's width when there's no photo so the columns of a
+   12-row list stay aligned — with photos on ~1 performer, a collapsing
+   column would make every row start at a different x. */
+.rec-rowcard-avatar-blank {
+  width: 38px; height: 38px; border-radius: 50%; display: block;
+  border: 1px dashed var(--bd-1); opacity: .5;
+}
+
+.rec-rowcard-date {
+  font-size: 12px; font-weight: 600; color: var(--t0);
+  letter-spacing: .08em; font-variant-numeric: tabular-nums;
+}
+.rec-rowcard-main { min-width: 0; }
+.rec-rowcard-performer { font-size: 13.5px; font-weight: 600; color: var(--t0); }
+.rec-rowcard-venue { font-size: 11.5px; color: var(--t2); font-style: italic; margin-top: 2px; }
+
+.rec-rowcard-meta {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--t2); justify-content: flex-end;
+}
+.rec-rowcard-added { text-align: right; min-width: 88px; }
+.rec-rowcard-added-lbl {
+  display: block; font-size: 8.5px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--t3);
+}
+.rec-rowcard-added-val {
+  display: block; font-size: 11.5px; color: var(--t1);
+  font-variant-numeric: tabular-nums; margin-top: 1px;
+}
+
+/* Below ~900px the meta and ingest-date columns are the first things worth
+   losing — performer, date and venue are the identifying fields. */
+@media (max-width: 900px) {
+  .rec-rowcard { grid-template-columns: 4px auto 100px minmax(0, 1fr) auto; }
+  .rec-rowcard-meta { display: none; }
 }
 
 /* ── Performer / Collection tiles ─────────────────────────────────────────── */

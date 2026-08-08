@@ -63,6 +63,47 @@ _PRICING = {
 _WEB_SEARCH_RATE_CENTS = 1.0   # $10 / 1,000 searches = $0.01 = 1 cent, flat per search used
 
 
+# ── Pre-flight cost estimate ────────────────────────────────────────────────
+# Measured from real Performer-page runs (2026-08-07): a 5-search pass billed
+# 74,737 input / 1,492 output tokens. INPUT DOMINATES, and it does so because
+# every web-search result is fed back into the context — so cost tracks the
+# number of searches almost linearly, and the search count is the only variable
+# worth modelling.
+#
+# ~15k input tokens per search is the observed slope (74.7k / 5). The floor
+# assumes the model answers after one search; the ceiling is max_uses=6, which
+# is a hard cap set on the tool, so the high end is a real bound rather than a
+# guess.
+_EST_TOKENS_PER_SEARCH = 15_000
+_EST_OUTPUT_TOKENS = 1_500
+_EST_MIN_SEARCHES = 1
+_EST_MAX_SEARCHES = 6
+
+
+def estimate_cost_cents(model, min_searches=_EST_MIN_SEARCHES,
+                        max_searches=_EST_MAX_SEARCHES):
+    """
+    (low, high) cents for one research pass, or None if the model has no rates.
+
+    Deliberately a RANGE, not a point: the actual figure depends on how many
+    searches the model decides it needs, which is not knowable in advance. A
+    single number here would be a false promise, and the spread between one
+    search and six is the whole story.
+    """
+    rates = _PRICING.get(model)
+    if rates is None:
+        return None
+
+    def one(searches):
+        return (
+            searches * _EST_TOKENS_PER_SEARCH / 1_000_000 * rates["input"] * 100
+            + _EST_OUTPUT_TOKENS / 1_000_000 * rates["output"] * 100
+            + searches * _WEB_SEARCH_RATE_CENTS
+        )
+
+    return round(one(min_searches), 1), round(one(max_searches), 1)
+
+
 def _compute_cost(usage, model):
     """
     Turn an Anthropic Messages API `usage` object into a cost estimate, in

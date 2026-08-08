@@ -33,10 +33,15 @@ class Performer(db.Model):
     # behavior (new-performance default, case-5 auto-flip) are unchanged.
     default_personnel_mode = db.Column(db.String(16), nullable=False, default="inherit")
 
-    # Profile picture (2026-07-22). The file itself lives on disk, not in the
-    # DB — LIBRARY_ROOT/<sanitized name>/_images/profile<image_ext>, see
-    # app/api/performers.py's image upload/serve routes. image_ext is
-    # nullable — None means no picture uploaded. NOTE: the folder path is
+    # ⚠ LEGACY as of 2026-08-07 — NOTHING READS THIS. Superseded by the
+    # `performer_image` table (multiple images, one flagged primary); see
+    # app/models/performer_image.py. Kept only because SQLite cannot drop a
+    # column without a full table rebuild, and this project has already been
+    # bitten once by rebuild-adjacent DDL (the 07-22 stale-FK episode). The
+    # migration backfilled every populated value here into a PerformerImage
+    # row and left the file on disk untouched.
+    #
+    # Original note, still true of the replacement: the folder path is
     # derived from the Performer's CURRENT name at request time, not stored —
     # renaming an act without a corresponding folder rename would orphan an
     # already-uploaded picture. Matches how recording folders already behave
@@ -62,6 +67,52 @@ class Performer(db.Model):
     # from the existing table.
     genre_id = db.Column(db.Integer, db.ForeignKey("genre.id"), nullable=True)
 
+    # ── MusicBrainz (2026-08-07) ────────────────────────────────────────────
+    # Structured facts fetched once at Performer creation — see
+    # app/utils/musicbrainz.py. Stored as REAL COLUMNS rather than a JSON blob
+    # (Ryan's call) so they are queryable: "which acts formed in New Orleans"
+    # is a legitimate question and a blob cannot answer it.
+    #
+    # MusicBrainz is a curated database, not a model, so these land directly
+    # rather than going through AI Assist's approve-first rule. The risk here
+    # is wrong-ENTITY, not wrong-fact, which is what mb_status guards.
+    #
+    # NOTHING HERE OVERWRITES A HUMAN FIELD — not name, bio, genre, or members.
+    mbid = db.Column(db.String(36), nullable=True, index=True)
+
+    # Five distinct states, and the differences matter to the UI:
+    #   None         — never looked up (pre-existing rows, or offline at create)
+    #   'matched'    — the confidence gate chose it, no human involved
+    #   'linked'     — a human picked it from the candidate list
+    #   'ambiguous'  — real candidates exist but none clearly won; needs a human
+    #   'none'       — looked, found nothing
+    # Only 'ambiguous' and None surface a "Look up" prompt.
+    #
+    # 'matched' vs 'linked' exists purely so the page can say "Matched
+    # automatically" or "Linked by you" ACCURATELY. Claiming an automatic match
+    # for work a person did is a small lie that makes every other automatic
+    # claim in the app less believable (Ryan, 2026-08-07).
+    mb_status         = db.Column(db.String(16), nullable=True)
+    mb_type           = db.Column(db.String(32), nullable=True)   # Group / Person
+    mb_area           = db.Column(db.String(120), nullable=True)  # origin
+    # Partial ISO strings straight from MusicBrainz ("1965" or "1965-03-01").
+    # Deliberately NOT split into y/m/d integers like Performance dates: these
+    # are display facts we never sort or filter on, and splitting them would
+    # invent precision the source doesn't guarantee.
+    mb_begin          = db.Column(db.String(10), nullable=True)
+    mb_end            = db.Column(db.String(10), nullable=True)
+    mb_disambiguation = db.Column(db.String(255), nullable=True)
+    mb_links_json     = db.Column(db.Text, nullable=True)
+    # Aliases, community tags, related acts, gender. JSON rather than columns
+    # BECAUSE THEY ARE LISTS — the real-columns rule above applies to queryable
+    # scalars ("which acts formed in New Orleans"); a list in a column is the
+    # thing that rule exists to prevent, not an exception to it.
+    #
+    # Aliases matter more here than they look: taper info files spell act names
+    # every possible way, and this is ground truth for reconciling them.
+    mb_extra_json     = db.Column(db.Text, nullable=True)
+    mb_checked_at     = db.Column(db.DateTime, nullable=True)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
                            onupdate=lambda: datetime.now(timezone.utc))
@@ -71,6 +122,14 @@ class Performer(db.Model):
                                    cascade="all, delete-orphan",
                                    order_by="Membership.order")
     performances = db.relationship("Performance", back_populates="performer")
+    # Profile images (2026-08-07) — multiple, one flagged primary. Ordered so
+    # the primary is first and `images[0]` is always the card face; see
+    # performer_image.primary_for() for the same rule server-side.
+    images       = db.relationship("PerformerImage", back_populates="performer",
+                                   cascade="all, delete-orphan",
+                                   order_by="desc(PerformerImage.is_primary), "
+                                            "PerformerImage.sort_order, "
+                                            "PerformerImage.id")
     # External reference resources (databases, discographies) — see PerformerResource.
     resources    = db.relationship("PerformerResource", back_populates="performer",
                                    cascade="all, delete-orphan",

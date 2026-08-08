@@ -55,11 +55,35 @@ def list_genres():
             "id":              g.id,
             "name":            g.name,
             "description":     g.description,
+            "color":           g.color,
             "performer_count": performer_counts.get(g.id, 0),
             "recording_count": recording_counts.get(g.id, 0),
         }
         for g in genres
     ])
+
+
+# `#rrggbb` only — the colour picker emits exactly this, and accepting shorthand
+# or named colours would mean every consumer (card flair, chips, future exports)
+# needs its own normalisation. One canonical form, validated at the door.
+_HEX_RE = __import__("re").compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _clean_color(raw):
+    """
+    Normalise a submitted colour to lowercase `#rrggbb`, or None to clear it.
+
+    Returns (value, error). Clearing is explicitly supported: NULL is a real
+    state that renders neutral grey, not a validation failure.
+    """
+    if raw is None:
+        return None, None
+    s = str(raw).strip()
+    if not s:
+        return None, None
+    if not _HEX_RE.match(s):
+        return None, f"color must be #rrggbb hex, got {s!r}"
+    return s.lower(), None
 
 
 @bp.route("/<int:genre_id>")
@@ -118,6 +142,7 @@ def get_genre(genre_id):
         "id":              g.id,
         "name":            g.name,
         "description":     g.description,
+        "color":           g.color,
         "performer_count": len(perf_rows),
         "recording_count": total_recordings,
         "performers":      perf_rows,
@@ -133,10 +158,14 @@ def create_genre():
         return jsonify({"error": "name is required"}), 400
     if db.session.query(Genre).filter(func.lower(Genre.name) == name.lower()).first():
         return jsonify({"error": "Genre already exists"}), 409
-    g = Genre(name=name, description=(data.get("description") or "").strip() or None)
+    color, err = _clean_color(data.get("color"))
+    if err:
+        return jsonify({"error": err}), 400
+    g = Genre(name=name, description=(data.get("description") or "").strip() or None,
+              color=color)
     db.session.add(g)
     db.session.commit()
-    return jsonify({"id": g.id, "name": g.name}), 201
+    return jsonify({"id": g.id, "name": g.name, "color": g.color}), 201
 
 
 @bp.route("/<int:genre_id>", methods=["PUT"])
@@ -157,8 +186,13 @@ def update_genre(genre_id):
         g.name = name
     if "description" in data:
         g.description = (data["description"] or "").strip() or None
+    if "color" in data:
+        color, err = _clean_color(data["color"])
+        if err:
+            return jsonify({"error": err}), 400
+        g.color = color
     db.session.commit()
-    return jsonify({"id": g.id})
+    return jsonify({"id": g.id, "color": g.color})
 
 
 @bp.route("/<int:genre_id>", methods=["DELETE"])
