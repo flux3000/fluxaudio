@@ -75,9 +75,16 @@ const App = (() => {
    *  directly: first chip stays under the title, any rest go in a dedicated
    *  full-width row (Ryan, 2026-07-15 — stacking multiples under the title
    *  in that narrow input-constrained cell was pushing the title text up). */
-  function trackChipsArray(t) {
+  function trackChipsArray(t, opts) {
     const chips = []
-    if (t.is_official) chips.push(`<span class="track-official-badge" title="Officially released">©</span>`)
+    // Add Recording passes { hideOfficial: true } (Ryan, 2026-08-08): the
+    // form already has its own "Official release" checkbox right below the
+    // track table, so a © badge on every row it cascades to is redundant —
+    // View Recording (the only other caller) keeps showing it, since that's
+    // a read-only page with no checkbox in view.
+    if (t.is_official && !(opts && opts.hideOfficial)) {
+      chips.push(`<span class="track-official-badge" title="Officially released">©</span>`)
+    }
     ;(t.flags || []).forEach(f => chips.push(`<span class="track-flag-chip">${FLAG_LABELS[f] || f}</span>`))
     return chips
   }
@@ -384,13 +391,22 @@ const App = (() => {
   const _FLAG_INCOMPLETE  = /\(\s*x\s*\)\s*$/i
   const _FLAG_TRAILING_PAREN = /^(.*?)\s*\([^)]*\)\s*$/
   const _FLAG_SEGMENT_SPLIT  = /\s*(?:,|\/|&|\band\b)\s*/i
-  const _FLAG_SEGMENT_PATTERNS = [
-    ['tuning',       /^tunings?$/i],
-    ['banter',       /^(banter|dialogue)s?$/i],
-    ['audience',     /^(audience|crowd)s?$/i],
-    ['band_intros',  /^band intro(duction)?s?$/i],
-    ['introduction', /^intro(duction)?s?\.?$/i],
-  ]
+  // Whole-segment thesaurus — mirrors _FLAG_SEGMENT_SYNONYMS in
+  // app/utils/ingest.py::detect_track_flags exactly. Adding a synonym here
+  // MUST be added there too, or the two engines disagree.
+  const _FLAG_SEGMENT_SYNONYMS = {
+    tuning:       ['tuning'],
+    banter:       ['banter', 'dialogue', 'chatter', 'crosstalk'],
+    audience:     ['audience', 'crowd'],
+    band_intros:  ['band intro', 'band introduction'],
+    introduction: ['intro', 'introduction'],
+  }
+  function _segmentPattern(words) {
+    const alts = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+    return new RegExp(`^(?:${alts})s?\\.?$`, 'i')
+  }
+  const _FLAG_SEGMENT_PATTERNS = Object.entries(_FLAG_SEGMENT_SYNONYMS)
+    .map(([key, words]) => [key, _segmentPattern(words)])
   const _FLAG_WORD_PATTERNS = [
     ['announcement', /\bannouncements?\b/i],
     ['interview',    /\binterviews?\b/i],
@@ -984,6 +1000,9 @@ const App = (() => {
         <span class="rec-runtime">${runtime}</span>
         <span class="rec-tracks">${r.track_count}t${inc ? ' ' + inc : ''}</span>
         <span class="rec-date-added">${esc(fmtDateAdded(r.created_at))}</span>
+        <button class="rec-fav-star rec-fav-star--sm${r.is_favorite ? ' is-fav' : ''}" data-rec-id="${r.id}"
+                aria-pressed="${r.is_favorite ? 'true' : 'false'}"
+                title="${r.is_favorite ? 'Remove from favorites' : 'Mark as favorite'}">${r.is_favorite ? '★' : '☆'}</button>
         <button class="rec-play-btn" data-rec-id="${r.id}" title="Play">▶</button>
       </div>`
   }
@@ -997,7 +1016,7 @@ const App = (() => {
         ${showPerformer ? '<span></span>' : ''}
         <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
         <button class="rec-th-added" type="button" title="Sort by date added">Added <span class="rec-th-arrow"></span></button>
-        <span></span>
+        <span></span><span></span>
       </div>`
   }
 
@@ -1025,7 +1044,7 @@ const App = (() => {
   function wireRecordingRows(container) {
     container.querySelectorAll('.rec-row').forEach(el => {
       el.addEventListener('click', e => {
-        if (e.target.closest('.rec-play-btn')) return
+        if (e.target.closest('.rec-play-btn') || e.target.closest('.rec-fav-star')) return
         window.location.hash = `#/recording/${el.dataset.recId}`
       })
       el.addEventListener('contextmenu', e => {
@@ -1048,6 +1067,31 @@ const App = (() => {
       btn.addEventListener('click', e => {
         e.stopPropagation()
         playRecording(parseInt(btn.dataset.recId), 0, null)
+      })
+    })
+    // Favorite star, table row (2026-08-09) — same optimistic-toggle pattern
+    // as the recording page's own button (see renderRecordingView), just
+    // scoped per-row and reusing the icon-only .rec-fav-star instead of the
+    // text button (no room for text in a compact grid column).
+    container.querySelectorAll('.rec-fav-star--sm').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation()
+        const id = parseInt(btn.dataset.recId)
+        const on = btn.getAttribute('aria-pressed') !== 'true'
+        const paint = (isFav) => {
+          btn.classList.toggle('is-fav', isFav)
+          btn.textContent = isFav ? '★' : '☆'
+          btn.setAttribute('aria-pressed', isFav ? 'true' : 'false')
+          btn.title = isFav ? 'Remove from favorites' : 'Mark as favorite'
+        }
+        paint(on)
+        btn.disabled = true
+        try {
+          await API.recordings.update(id, { is_favorite: on })
+        } catch (err) {
+          paint(!on)
+          alert('Could not save favorite: ' + err.message)
+        } finally { btn.disabled = false }
       })
     })
   }
@@ -3018,6 +3062,19 @@ const App = (() => {
               ? `<span>Find a free photo<br><span class="pp-drop-sub">Wikimedia Commons</span></span>`
               : `<span class="pp-drop-sub">Match on MusicBrainz first<br>(Overview tab)</span>`}
           </div>
+          <!-- Google Images search tile (Ryan, 2026-08-08) — sits next to the
+               Commons tile as a second way IN, for the acts Commons doesn't
+               cover. No fetch, no licence check, nothing lands in the gallery
+               automatically: it just opens a search tab and Ryan drags/saves
+               into the drop zone by hand. Needs no MusicBrainz match, so it's
+               never disabled. -->
+          <a class="pp-drop pp-google-tile" id="pp-google-photo"
+             href="${esc(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(performer.name)}`)}"
+             target="_blank" rel="noopener noreferrer"
+             title="Open a Google Images search for this performer in a new tab">
+            <span class="pp-drop-plus">🔍</span>
+            <span>Search the web<br><span class="pp-drop-sub">Google Images</span></span>
+          </a>
         </div>
         <input type="file" id="pp-image-input" multiple
                accept="image/png,image/jpeg,image/webp" style="display:none" />
@@ -3180,14 +3237,36 @@ const App = (() => {
           : mb.status === 'none'
             ? 'Nothing found for this name.'
             : 'Not looked up yet.'
+        // Editable search term (Ryan, 2026-08-08): a billing variant like
+        // "Aaron Parks Trio" is the act's real name but often not what
+        // MusicBrainz indexed it under, so the string actually sent to the API
+        // needs to be adjustable without renaming the Performer. Pre-filled
+        // with the Performer's name; edits here are one-shot — nothing saved.
         box.innerHTML = `
-          <div class="pp-mb-empty">${msg}
+          <div class="pp-mb-empty">${msg}</div>
+          <div class="pp-mb-searchrow">
+            <input type="text" class="pp-mb-input" id="pp-mb-term"
+                   value="${esc(performer.name)}" placeholder="Search term"
+                   title="Sent to MusicBrainz as the artist name — edit if a billing variant (e.g. “Trio”, “Quartet”) is causing a miss">
             <button type="button" class="btn btn-primary btn-xs" id="pp-mb-lookup">
               ${mb.status === 'ambiguous' ? 'Choose a match' : 'Look up'}</button>
           </div>`
+        document.getElementById('pp-mb-term').addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); runMbLookup() }
+        })
       }
       document.getElementById('pp-mb-change')?.addEventListener('click', openMbPicker)
       document.getElementById('pp-mb-lookup')?.addEventListener('click', runMbLookup)
+    }
+
+    // Reads the editable search-term box when present, else falls back to the
+    // Performer's own name (the "Change match" entry point has no box — it
+    // starts from an already-matched state). Must be called BEFORE the panel
+    // is overwritten with "Searching…", since that swap removes the input.
+    function currentMbTerm() {
+      const el = document.getElementById('pp-mb-term')
+      const v = el && el.value.trim()
+      return v || performer.name
     }
 
     // Look up, and LINK IT IF THE ANSWER IS OBVIOUS (Ryan, 2026-08-07).
@@ -3196,9 +3275,10 @@ const App = (() => {
     // pass uses; only a genuinely unclear result comes back as candidates.
     async function runMbLookup() {
       const box = document.getElementById('pp-mb')
+      const term = currentMbTerm()
       box.innerHTML = `<div class="pp-mb-empty">Searching MusicBrainz…</div>`
       try {
-        const res = await API.performers.mbLookup(performerId)
+        const res = await API.performers.mbLookup(performerId, term)
         if (res.status === 'matched') {
           performer = await API.performers.get(performerId)
           renderMusicBrainz()
@@ -3221,9 +3301,10 @@ const App = (() => {
     // because a wrong entity attaches wrong facts to a page nobody re-checks.
     async function openMbPicker() {
       const box = document.getElementById('pp-mb')
+      const term = currentMbTerm()
       box.innerHTML = `<div class="pp-mb-empty">Searching MusicBrainz…</div>`
       let res
-      try { res = await API.performers.mbCandidates(performerId) }
+      try { res = await API.performers.mbCandidates(performerId, term) }
       catch (e) {
         box.innerHTML = `<div class="pp-mb-empty">Lookup failed: ${esc(e.message)}
           <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-change">Try again</button></div>`
@@ -3238,9 +3319,18 @@ const App = (() => {
     function renderMbCandidates(query, cands) {
       const box = document.getElementById('pp-mb')
       if (!cands.length) {
-        box.innerHTML = `<div class="pp-mb-empty">Nothing found for “${esc(query || performer.name)}”.
-          <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-lookup">Try again</button></div>`
+        box.innerHTML = `
+          <div class="pp-mb-empty">Nothing found for “${esc(query || performer.name)}”.</div>
+          <div class="pp-mb-searchrow">
+            <input type="text" class="pp-mb-input" id="pp-mb-term"
+                   value="${esc(query || performer.name)}" placeholder="Search term"
+                   title="Sent to MusicBrainz as the artist name — edit if a billing variant (e.g. “Trio”, “Quartet”) is causing a miss">
+            <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-lookup">Try again</button>
+          </div>`
         document.getElementById('pp-mb-lookup').addEventListener('click', runMbLookup)
+        document.getElementById('pp-mb-term').addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); runMbLookup() }
+        })
         return
       }
       box.innerHTML = `
@@ -3249,6 +3339,16 @@ const App = (() => {
              click was required to actually link the act. -->
         <div class="pp-mb-prompt">Click the right act to link it${
           cands.length === 1 ? '' : ' — more than one goes by this name'}.</div>
+        <!-- Same editable term as the empty state (Ryan, 2026-08-08) — if none
+             of these candidates are right, revise and re-search without
+             leaving the panel. "Search" only re-lists candidates (no
+             auto-link); "Look up" is the gated path that can commit outright. -->
+        <div class="pp-mb-searchrow pp-mb-searchrow-sm">
+          <input type="text" class="pp-mb-input" id="pp-mb-term"
+                 value="${esc(query || performer.name)}" placeholder="Search term"
+                 title="Sent to MusicBrainz as the artist name — edit and search again if none of these are right">
+          <button type="button" class="btn btn-ghost btn-xs" id="pp-mb-research">Search</button>
+        </div>
         <div class="pp-mb-cands">
           ${cands.map(c => `
             <div class="pp-mb-cand" data-mbid="${esc(c.mbid)}" role="button" tabindex="0">
@@ -3293,6 +3393,10 @@ const App = (() => {
         btn.addEventListener('keydown', e => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click() }
         })
+      })
+      document.getElementById('pp-mb-research').addEventListener('click', openMbPicker)
+      document.getElementById('pp-mb-term').addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); openMbPicker() }
       })
       document.getElementById('pp-mb-cancel').addEventListener('click', renderMusicBrainz)
       document.getElementById('pp-mb-clear')?.addEventListener('click', async () => {
@@ -3949,6 +4053,15 @@ const App = (() => {
       <div class="rec-collections" id="rec-collections">
         ${(rec.collections || []).map(collectionTagHtml).join('')}
         <button class="collection-add-btn" id="btn-add-collection">+ Add to Collection</button>
+        <!-- Favorite toggle (moved here 2026-08-09 — was a star icon beside
+             the title). Sits next to Add to Collection since both are "mark
+             this recording" actions: one files it into a set, the other is a
+             single personal flag. Text-led rather than icon-only, per Ryan —
+             visible to everyone including listeners, since a highlight is a
+             personal reaction, not a library edit. -->
+        <button class="fav-toggle-btn${rec.is_favorite ? ' is-fav' : ''}" id="btn-favorite"
+                aria-pressed="${rec.is_favorite ? 'true' : 'false'}">${
+          rec.is_favorite ? '★ Favorited' : '☆ Mark as Favorite'}</button>
       </div>`
 
     setMainHTML(`
@@ -3973,14 +4086,6 @@ const App = (() => {
           <div class="rec-name-row">
             <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
             ${perfNavLink}
-            <!-- Favourite star (2026-07-31). Sits in the header rather than the
-                 action bar because it is a reaction, not an admin action, and
-                 wants to be one click from anywhere on the page. Visible to
-                 everyone including listeners — a highlight is a personal mark,
-                 not a library edit. -->
-            <button class="rec-fav-star${rec.is_favorite ? ' is-fav' : ''}" id="btn-favorite"
-                    aria-pressed="${rec.is_favorite ? 'true' : 'false'}"
-                    title="${rec.is_favorite ? 'Remove from favourites' : 'Mark as a favourite'}">${rec.is_favorite ? '★' : '☆'}</button>
           </div>
           <div class="rec-date-line" id="rec-date-line">
             <span class="rec-f rec-f-date${canEdit ? ' pp-editable' : ''}" id="rec-f-date">${dateStr ? esc(dateStr) : (canEdit ? '<span class="pp-empty">Add date</span>' : '')}</span>
@@ -4082,6 +4187,7 @@ const App = (() => {
       </div>
       ${canEdit ? `
       <div class="rec-bottom-actions">
+        <button class="btn btn-sm btn-ghost" id="btn-reveal-folder" title="Open this recording's folder in Finder">Open in Containing Folder</button>
         <button class="btn btn-sm ${stagedCount > 0 ? 'btn-staged' : 'btn-ghost'}" id="btn-write-tags">Write Tags to Files</button>
         <button class="btn btn-sm ${rec.is_official ? 'btn-staged' : 'btn-ghost'}" id="btn-official" title="Mark this recording (and its tracks) as an official release">${rec.is_official ? '✓ Official Release' : 'Mark as Official Release'}</button>
         <button class="btn btn-danger btn-sm" id="btn-delete-rec" title="Delete this recording from the database (files are not removed)">Delete Recording</button>
@@ -4651,6 +4757,23 @@ const App = (() => {
     // Apply filter to current view immediately (in case state was already on)
     applySkipFilter()
 
+    // Open in Containing Folder (2026-08-09). File paths never reach the
+    // frontend (see the module's File obfuscation note) — the path is
+    // resolved server-side and Finder is opened from there, since this is a
+    // single-machine PyWebView desktop app and Flask is already running on
+    // Ryan's own Mac. Fails soft: no folder on disk (a Move-ingested show
+    // whose staging row outlived it, same story as the Triage list) just
+    // shows an alert rather than anything blocking.
+    document.getElementById('btn-reveal-folder')?.addEventListener('click', async () => {
+      const btn = document.getElementById('btn-reveal-folder')
+      btn.disabled = true
+      try {
+        await API.recordings.revealFolder(recordingId)
+      } catch (e) {
+        alert('Could not open folder: ' + e.message)
+      } finally { btn.disabled = false }
+    })
+
     // Write FLAC tags
     document.getElementById('btn-write-tags')?.addEventListener('click', async () => {
       const ok = confirm('Write current metadata as FLAC tags to all tracks in this recording?\n\nThis replaces all existing Vorbis comments in the files.')
@@ -4697,18 +4820,17 @@ const App = (() => {
       finally { btn.disabled = false }
     })
 
-    // Favourite star. Optimistic: the star flips immediately and reverts if the
-    // request fails. A highlight is a low-stakes personal mark and should feel
-    // instant — unlike the official/delete actions above, nothing downstream
-    // depends on it, so there is no markStaged() and no change_note.
+    // Favorite toggle. Optimistic: the button flips immediately and reverts if
+    // the request fails. A highlight is a low-stakes personal mark and should
+    // feel instant — unlike the official/delete actions above, nothing
+    // downstream depends on it, so there is no markStaged() and no change_note.
     document.getElementById('btn-favorite')?.addEventListener('click', async () => {
       const btn = document.getElementById('btn-favorite')
       const next = !rec.is_favorite
       const paint = (on) => {
         btn.classList.toggle('is-fav', on)
-        btn.textContent = on ? '★' : '☆'
+        btn.textContent = on ? '★ Favorited' : '☆ Mark as Favorite'
         btn.setAttribute('aria-pressed', on ? 'true' : 'false')
-        btn.title = on ? 'Remove from favourites' : 'Mark as a favourite'
       }
       rec.is_favorite = next
       paint(next)
@@ -4718,7 +4840,7 @@ const App = (() => {
       } catch (e) {
         rec.is_favorite = !next
         paint(!next)
-        alert('Could not save favourite: ' + e.message)
+        alert('Could not save favorite: ' + e.message)
       } finally { btn.disabled = false }
     })
 
@@ -6045,8 +6167,8 @@ const App = (() => {
       // (Ryan, 2026-08-02) — one glyph doing both jobs rather than a dot that
       // only coloured and a button that only informed, at opposite ends.
       return `
-      <div class="lq-mrow lq-tip${m.scored ? '' : ' lq-mrow--unscored'}">
-        <span class="lq-minfo" style="${hasScale
+      <div class="lq-mrow${m.scored ? '' : ' lq-mrow--unscored'}">
+        <span class="lq-minfo lq-tip" style="${hasScale
           ? `color:${col};border-color:${col}` : ''}">i</span>
         <span class="lq-mlabel">${esc(m.label)}${
           m.scored ? '' : '<span class="lq-star">*</span>'}</span>
@@ -6144,13 +6266,14 @@ const App = (() => {
           <div class="lq-samp lq-samp--lead">
             <div class="lq-samp-head">
               <h4>Track Preview</h4>
+              <span class="lq-samp-hint">Timestamps mark where each sample was taken</span>
               <div class="lq-trk-player" data-slot-for="${esc(row.folder_path)}"></div>
             </div>
             ${tracks}
           </div>
+          ${issues}
           ${groups}
           ${otherMetrics}
-          ${issues}
           ${flags}
           <div class="lq-footnote">* Measured and shown, but carries no weight in the
             score — see each row's tooltip for why.</div>
@@ -6173,16 +6296,20 @@ const App = (() => {
   // against 113 graded recordings — informative, not definitive. The subtitle
   // says so on the face of the control rather than hiding it in a tooltip.
   function _lqTabs(row, open, health) {
+    // Chevron moved to the LEAD position (2026-08-09, was trailing after the
+    // value) — Ryan: sitting at the far right after a coloured verdict badge
+    // read as decoration, not a control; on the left it's the first thing
+    // read, ahead of the label it's expanding. Enlarged for the same reason.
     const tab = (key, label, sub, valueHtml) => `
       <button class="lq-tab ${open === key ? 'on' : ''}" type="button"
               data-path="${esc(row.folder_path)}" data-tab="${key}"
               aria-expanded="${open === key}">
+        <span class="chev">${open === key ? '▴' : '▾'}</span>
         <span class="lq-tab-txt">
           <span class="lq-tab-k">${label}</span>
           <span class="lq-tab-sub">${sub}</span>
         </span>
         ${valueHtml}
-        <span class="chev">${open === key ? '▴' : '▾'}</span>
       </button>`
 
     return `<div class="lq-tabs">
@@ -6709,14 +6836,6 @@ const App = (() => {
     </div>`
   }
 
-  // Band-based generic message — the specific factors live in the Info Quality
-  // Review panel, not here (many are just parse noise).
-  const HEALTH_MSG = {
-    green:  'Looks complete',
-    yellow: 'Minor data discrepancies — recommend manual review',
-    red:    'Significant gaps — manual review needed',
-  }
-
   // Paula's purple-border threshold — a starting point, meant to be tuned
   // once this has run against more real folders (Ryan, 2026-07-16: "let's
   // give it a try and see how it plays out"). The raw per-field subscore is
@@ -6792,13 +6911,11 @@ const App = (() => {
       case 'state':   set('f-state', value);       ingest.form.state       = value; break
       case 'country': set('f-country', value);     ingest.form.country     = value; break
       case 'event':   set('f-event-name', value);  ingest.form.event_name  = value; break
-      case 'source': {
-        const el = document.getElementById('f-source')
-        if (el && [...el.options].some(o => o.value === value)) {
-          el.value = value; el.classList.add('ai-applied')
-        }
-        ingest.form.source = value; break
-      }
+      // Source is free text now (2026-08-08 — was a fixed SBD/AUD/MTX/FM/
+      // DVB-S/Other <select>, same as every other field it lives beside), so
+      // it no longer needs the old "only accept a value that's one of the
+      // <select>'s options" guard.
+      case 'source':  set('f-source', value);      ingest.form.source      = value; break
       case 'date': {
         const p = String(value).split('-')
         set('f-year', p[0] || '')
@@ -7027,12 +7144,10 @@ const App = (() => {
       const h = await API.ingest.health(clone)
       ingest.scan.health = h
       const scoreEl = document.getElementById('iq-score')
-      const msgEl   = document.getElementById('iq-msg')
       if (scoreEl) {
         scoreEl.textContent = h.score
         scoreEl.className = 'iq-score iq-score--' + h.band
       }
-      if (msgEl) msgEl.textContent = HEALTH_MSG[h.band] || ''
     } catch (_) {}
   }
 
@@ -7240,7 +7355,13 @@ const App = (() => {
       f.source          = pick(tags, info, 'source') || ''
       f.quality         = ''
       f.rating          = ''
-      f.lineage         = tags?.lineage || ''
+      // Bug (Ryan, 2026-08-09): lineage almost always comes from the info
+      // file's "Source:"/"Lineage:" text, not a FLAC tag, but this only ever
+      // read tags.lineage — every other field here already falls back to the
+      // info file via pick(). The Review & Ingest card shows the inferred
+      // lineage correctly (it reads row.extracted, a separate server-side
+      // merge); this was Add Recording's own re-scan losing it on the way in.
+      f.lineage         = pick(tags, info, 'lineage')
       f.notes           = ''
       f.end_year        = ''
       f.end_month       = ''
@@ -7374,12 +7495,20 @@ const App = (() => {
       // both build off a Set, which can't hold a duplicate key) — purely a
       // rendering double-count.
       return `<tr class="track-review-chiprow" data-idx="${i}">
-          <td colspan="6"><div class="track-chip-expand-row">${chips.slice(1).join('')}</div></td>
+          <td colspan="7"><div class="track-chip-expand-row">${chips.slice(1).join('')}</div></td>
         </tr>`
     }
 
+    // Official-release mark for the dedicated column (Ryan, 2026-08-09) —
+    // separate from trackChipsArray's badge, which Add Recording hides
+    // (hideOfficial) to keep it out of the title cell/chip row entirely.
+    function _officialBadgeHtml(t) {
+      return t.is_official
+        ? `<span class="track-official-badge" title="Officially released">©</span>` : ''
+    }
+
     const trackRows = ingest.tracks.map((t, i) => {
-      const chips = trackChipsArray(t)
+      const chips = trackChipsArray(t, { hideOfficial: true })
       const expandRow = chips.length > 1 ? _trackChipExpandRowHtml(i, chips) : ''
       return `
         <tr class="track-review-row" data-idx="${i}" title="Right-click for flags">
@@ -7394,6 +7523,7 @@ const App = (() => {
           <td class="note-cell truncate pp-editable${t.notes ? '' : ' pp-empty'}" id="t-note-${i}" title="${esc(t.notes || 'Click to add a note')}">${esc(t.notes || '—')}</td>
           <td class="sw-cell truncate pp-editable${t.songwriter ? '' : ' pp-empty'}" id="t-sw-${i}" title="${esc(t.songwriter || 'Click to add a songwriter')}">${esc(t.songwriter || '—')}</td>
           <td class="dur">${fmtDur(t.duration)}</td>
+          <td class="official-cell" id="t-off-${i}">${_officialBadgeHtml(t)}</td>
         </tr>${expandRow}`
     }).join('')
 
@@ -7480,15 +7610,10 @@ const App = (() => {
             <div class="ingest-field-grid" style="grid-template-columns:76px minmax(160px,2fr) 58px 72px; gap:10px; margin-top:8px">
               <div class="ingest-field">
                 <label>Source</label>
-                <select id="f-source">
-                  <option value="">—</option>
-                  ${['SBD','AUD','MTX','FM','DVB-S','Other'].map(s =>
-                    `<option value="${s}" ${f.source === s ? 'selected' : ''}>${s}</option>`
-                  ).join('')}
-                </select>
+                <input type="text" id="f-source" value="${esc(f.source)}" placeholder="SBD, AUD, MTX…" />
               </div>
               <div class="ingest-field">
-                <label>Lineage <span style="color:var(--t3); font-weight:400">— transfer chain, taper, or anything distinguishing this tape</span></label>
+                <label>Lineage</label>
                 <input type="text" id="f-lineage" value="${esc(f.lineage)}" />
               </div>
               <div class="ingest-field">
@@ -7503,23 +7628,38 @@ const App = (() => {
             </div>
 
             <!-- Track table -->
-            <div class="rev-section-title" style="margin-top:16px; padding-top:12px; border-top:1px solid var(--bd-1)">
-              Tracks <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t2)">(${ingest.tracks.length})</span>
-              <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t3); font-size:10px">— right-click track to add flags</span>
+            <!-- Preview player moved into this header row (Ryan, 2026-08-08),
+                 right-aligned opposite the "Tracks (N)" title — same idea as
+                 the Bulk Update preview layout, rather than pinned to the
+                 bottom action bar where it competed with Add & Return/View. -->
+            <div class="rev-tracks-header" style="margin-top:16px; padding-top:12px; border-top:1px solid var(--bd-1)">
+              <div class="rev-section-title" style="margin-bottom:0">
+                Tracks <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t2)">(${ingest.tracks.length})</span>
+                <span style="font-weight:400; text-transform:none; letter-spacing:0; color:var(--t3); font-size:10px">— right-click track to add flags</span>
+              </div>
+              <div id="ingest-audio-bar" class="ingest-audio-inline">
+                <span id="ingest-audio-label">Preview Track:</span>
+                <audio id="ingest-preview-audio" preload="metadata" controls></audio>
+              </div>
             </div>
             <div style="overflow:auto; margin-bottom:4px">
               <table class="track-review-table">
                 <thead>
                   <tr>
-                    <th style="width:24px">#</th>
+                    <th style="width:20px; text-align:center">#</th>
                     <th style="width:28px"></th>
-                    <th style="width:30%">Title</th>
-                    <th style="width:26%; text-align:right">Notes</th>
-                    <th style="width:20%">Songwriter</th>
+                    <th style="width:36%">Title</th>
+                    <th style="width:22%">Notes</th>
+                    <th style="width:18%">Songwriter</th>
                     <th style="width:44px">Time</th>
+                    <!-- Official-release mark — otherwise-blank column, far
+                         right (Ryan, 2026-08-09). Reinstated the © badge but
+                         out of the title cell, where it risked wrapping the
+                         row; a dedicated fixed-width column can't. -->
+                    <th style="width:20px"></th>
                   </tr>
                 </thead>
-                <tbody>${trackRows || '<tr><td colspan="6" style="color:var(--t2);padding:12px">No tracks found</td></tr>'}</tbody>
+                <tbody>${trackRows || '<tr><td colspan="7" style="color:var(--t2);padding:12px">No tracks found</td></tr>'}</tbody>
               </table>
             </div>
 
@@ -7536,23 +7676,21 @@ const App = (() => {
 
           </div>
           <div class="ingest-actions">
-            <!-- Audio preview player lives here so it's always visible above the fold —
-                 shown by default (previewing the first track), not just after a play
-                 click (Ryan, 2026-07-15). Centered between the (now-empty) left column
-                 and the Add Recording button on the right. -->
-            <div id="ingest-audio-bar" class="ingest-audio-footer">
-              <span id="ingest-audio-label">Preview Track:</span>
-              <audio id="ingest-preview-audio" preload="metadata" controls></audio>
+            <!-- Audio preview player moved up into the Tracks header row
+                 (Ryan, 2026-08-08) — this bar is action-only now: both exits,
+                 right-aligned. Two exits because a reviewer working a queue
+                 and a reviewer adding one show want opposite things.
+                 "Add & Return" is primary: mid-queue is the common case, and
+                 it goes straight back to the ingest list with this row marked
+                 done. "Add & View" (farthest right) opens the finished record
+                 instead — a lighter fill than the primary button so the pair
+                 doesn't read as primary+disabled-looking-ghost. -->
+            <div class="ingest-actions-right">
+              <button class="btn btn-primary" id="btn-confirm"
+                      data-after="return" title="Add to library and return to the list">Add &amp; Return ↵</button>
+              <button class="btn btn-ingest-secondary" id="btn-confirm-view"
+                      data-after="view" title="Add to library and open the finished record">Add &amp; View →</button>
             </div>
-            <!-- Two exits, because a reviewer working a queue and a reviewer
-                 adding one show want opposite things. "Add & Return" is primary:
-                 mid-queue is the common case, and it goes straight back to the
-                 ingest list with this row marked done. "Add & View" opens the
-                 finished record instead. -->
-            <button class="btn btn-primary" id="btn-confirm"
-                    data-after="return">Add &amp; Return →</button>
-            <button class="btn btn-ghost" id="btn-confirm-view"
-                    data-after="view">Add &amp; View</button>
           </div>
           <div id="review-submit-error" class="review-submit-error" style="display:none"></div>
         </div>
@@ -7563,9 +7701,8 @@ const App = (() => {
         <!-- Right: Quality bar (score + blurb + AI Assist) over vertical-tab panel -->
         <div class="ingest-review-raw">
           <div class="ingest-quality-bar">
-            <span class="iq-label">Completeness score</span>
             <span class="iq-score iq-score--${ingest.scan.health?.band || 'yellow'}" id="iq-score">${ingest.scan.health?.score ?? '—'}</span>
-            <span class="iq-msg" id="iq-msg">${esc(HEALTH_MSG[ingest.scan.health?.band || 'yellow'] || '')}</span>
+            <span class="iq-label">Metadata Completeness</span>
             <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
           </div>
           <div class="ingest-tabs">
@@ -7720,7 +7857,7 @@ const App = (() => {
     function refreshIngestTrackRow(i) {
       const t = ingest.tracks[i]
       if (!t) return
-      const chips = trackChipsArray(t)
+      const chips = trackChipsArray(t, { hideOfficial: true })
       const chipsEl = document.getElementById(`t-chips-${i}`)
       if (chipsEl) chipsEl.innerHTML = chips[0] || ''
 
@@ -7750,6 +7887,11 @@ const App = (() => {
         swEl.textContent = t.songwriter || '—'; swEl.title = t.songwriter || 'Click to add a songwriter'
         swEl.classList.toggle('pp-empty', !t.songwriter)
       }
+      // Official mark — its own column (Ryan, 2026-08-09), covers both the
+      // master checkbox's cascade and a per-track right-click toggle, since
+      // both funnel through this one function.
+      const offEl = document.getElementById(`t-off-${i}`)
+      if (offEl) offEl.innerHTML = _officialBadgeHtml(t)
     }
     mainContent.querySelectorAll('.track-review-row[data-idx]').forEach(row => {
       const idx = parseInt(row.dataset.idx)
@@ -7869,9 +8011,11 @@ const App = (() => {
     // note/songwriter/official all live on ingest.tracks now; right-click a
     // row — via openTrackMenu — to edit an individual track).
     document.getElementById('f-is-official')?.addEventListener('change', function () {
-      if (this.checked) {
-        ingest.tracks.forEach((t, i) => { t.is_official = true; refreshIngestTrackRow(i) })
-      }
+      // Cascades both ways (Ryan, 2026-08-09) — it used to only ever set
+      // tracks TO official; unchecking left every track stuck official with
+      // no way back short of clearing each one individually by hand.
+      const official = this.checked
+      ingest.tracks.forEach((t, i) => { t.is_official = official; refreshIngestTrackRow(i) })
     })
 
     // Parsed tracks toggle — expand/collapse the track list

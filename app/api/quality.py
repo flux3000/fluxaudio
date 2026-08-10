@@ -257,6 +257,28 @@ def _proposed_track_titles(scan, tags, info):
     return out
 
 
+def _tag_date_parts(concert_date):
+    """
+    Split a FLAC CONCERTDATE-style tag ("YYYY-MM-DD", "YYYY-MM", or "YYYY")
+    into (year, month, day) ints, any of which may be None.
+
+    Mirrors the ingest wizard's own tags.concert_date.split('-') in app.js
+    exactly (2026-08-09) — Triage and Add Recording must read the same tag
+    the same way, or they can silently disagree about a recording's date.
+    """
+    if not concert_date:
+        return None, None, None
+    parts = str(concert_date).split('-')
+
+    def _int(i):
+        try:
+            return int(parts[i]) if i < len(parts) and parts[i] else None
+        except (ValueError, TypeError):
+            return None
+
+    return _int(0), _int(1), _int(2)
+
+
 def _scan_metadata(folder_path):
     """
     Metadata suggestions + completeness score for one folder, cached.
@@ -284,15 +306,27 @@ def _scan_metadata(folder_path):
     else:
         sug = (scan.get("suggestions") or {}).get("from_info_file") or {}
         tags = (scan.get("suggestions") or {}).get("from_tags") or {}
+        # Bug (Ryan, 2026-08-09): from_tags has no "year"/"month"/"day" keys —
+        # the FLAC date tag lands in "concert_date" ("YYYY-MM-DD"), same as the
+        # ingest wizard reads (see app.js's own tags.concert_date.split('-')).
+        # tags.get("year") was therefore always None, so triage silently fell
+        # through to from_info_file's parsed date on EVERY recording, with no
+        # tag-date fallback at all — the ingest wizard prefers the tag date and
+        # only falls back to the info file, so the two could disagree whenever
+        # the info file's own date line parsed differently (Art Blakey and the
+        # Jazz Messengers 1981-07-11 showing as 2026-07-11 in Triage but
+        # correctly in Review). _tag_date_parts() mirrors the wizard's split so
+        # both read the same date the same way.
+        tag_year, tag_month, tag_day = _tag_date_parts(tags.get("concert_date"))
         payload = {
             # build_scan_payload already computed this; recomputing would just
             # risk the two disagreeing.
             "health": scan.get("health"),
             "extracted": {
                 "artist":  tags.get("artist") or sug.get("artist"),
-                "year":    tags.get("year")   or sug.get("year"),
-                "month":   tags.get("month")  or sug.get("month"),
-                "day":     tags.get("day")    or sug.get("day"),
+                "year":    tag_year  or sug.get("year"),
+                "month":   tag_month or sug.get("month"),
+                "day":     tag_day   or sug.get("day"),
                 "venue":   tags.get("venue")  or sug.get("venue"),
                 "city":    tags.get("city")   or sug.get("city"),
                 "state":   tags.get("state")  or sug.get("state"),
@@ -445,7 +479,19 @@ def _attach_concerns(results):
         h = r.get("health") or {}
         fp = r.get("fingerprints") or {}
 
-        if r.get("exists") is False:
+        # A promoted row (already ingested — see qs.promote_to_recording) is
+        # EXPECTED to have a dead folder_path once ingest used Move: that's
+        # what a successful move-and-triage-a-folder-again looks like, not a
+        # problem. Staging rows outlive the folder on purpose (list_staging
+        # matches on the scanned source_dir, so re-triaging the same parent
+        # folder later resurfaces old, already-ingested rows right alongside
+        # new ones) — this used to flag that expected state as a red error
+        # (Ryan, 2026-08-09: "Source folder no longer exists on disk" showing
+        # on a recording already marked Ingested, reproduced on Danny Gatton
+        # and Charles Mingus folders). Only warn when the folder is ACTUALLY
+        # missing for a row nothing has ingested yet — that's the case where
+        # someone renamed/deleted a folder out from under a pending triage.
+        if r.get("exists") is False and not r.get("recording_id"):
             concerns.append({"level": "error", "kind": "missing",
                              "text": "Source folder no longer exists on disk"})
 

@@ -168,6 +168,12 @@ def test_flags_keyword_segments():
     assert detect_track_flags("Band Intros") == ["band_intros"]
     assert detect_track_flags("Announcement") == ["announcement"]
 
+def test_flags_banter_synonyms():
+    # 2026-08-08: "Chatter" wasn't recognized as Banter — added to the
+    # segment thesaurus (_FLAG_SEGMENT_SYNONYMS) alongside "dialogue".
+    assert detect_track_flags("Chatter") == ["banter"]
+    assert detect_track_flags("Crosstalk") == ["banter"]
+
 def test_flags_no_false_positives_on_real_titles():
     # Musical segues / real songs must NOT be flagged
     for title in ["Speak Low", "Don't Talk (Put Your Head On My Shoulder)",

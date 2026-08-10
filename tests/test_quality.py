@@ -406,7 +406,7 @@ def test_favorite_defaults_off_and_is_independent(app, recording):
 def test_favorite_can_contradict_both_other_signals(app, recording):
     """
     The whole point of the star: a rough tape of an unrepeatable night is a
-    favourite AND a poor grade. Nothing may prevent that combination.
+    favorite AND a poor grade. Nothing may prevent that combination.
     """
     recording.quality = "C"
     recording.is_favorite = True

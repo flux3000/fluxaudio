@@ -741,15 +741,29 @@ _FLAG_INCOMPLETE  = re.compile(r'\(\s*x\s*\)\s*$', re.IGNORECASE)
 _FLAG_TRAILING_PAREN = re.compile(r'^(.*?)\s*\([^)]*\)\s*$')
 _FLAG_SEGMENT_SPLIT  = re.compile(r'\s*(?:,|/|&|\band\b)\s*', re.IGNORECASE)
 
-# Whole-segment patterns — the ENTIRE segment must match (not a substring),
-# so a musical segue like "Piano Intro >" or "Dark Star Intro -> Fields of
-# Gray" is never mistaken for a spoken "Intro" track.
+# Whole-segment thesaurus — canonical flag key -> synonym words/phrases that
+# should match the ENTIRE segment (not a substring), so a musical segue like
+# "Piano Intro >" or "Dark Star Intro -> Fields of Gray" is never mistaken for
+# a spoken "Intro" track. Adding a synonym (Ryan, 2026-08-08: "Chatter" wasn't
+# recognized as "Banter") is a one-line edit here rather than a new regex —
+# _segment_pattern() below handles the optional trailing "s"/"." tolerance
+# every entry already had.
+_FLAG_SEGMENT_SYNONYMS = {
+    'tuning':       ['tuning'],
+    'banter':       ['banter', 'dialogue', 'chatter', 'crosstalk'],
+    'audience':     ['audience', 'crowd'],
+    'band_intros':  ['band intro', 'band introduction'],
+    'introduction': ['intro', 'introduction'],
+}
+
+
+def _segment_pattern(words):
+    alts = '|'.join(re.escape(w) for w in words)
+    return re.compile(rf'^(?:{alts})s?\.?$', re.IGNORECASE)
+
+
 _FLAG_SEGMENT_PATTERNS = [
-    ('tuning',       re.compile(r'^tunings?$', re.IGNORECASE)),
-    ('banter',       re.compile(r'^(banter|dialogue)s?$', re.IGNORECASE)),
-    ('audience',     re.compile(r'^(audience|crowd)s?$', re.IGNORECASE)),
-    ('band_intros',  re.compile(r'^band intro(duction)?s?$', re.IGNORECASE)),
-    ('introduction', re.compile(r'^intro(duction)?s?\.?$', re.IGNORECASE)),
+    (key, _segment_pattern(words)) for key, words in _FLAG_SEGMENT_SYNONYMS.items()
 ]
 
 # Whole-word/anywhere-in-segment patterns — safe as substrings because these

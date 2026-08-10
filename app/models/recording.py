@@ -57,7 +57,7 @@ class Recording(db.Model):
     # Distinct from `quality` (technical recording grade).
     rating     = db.Column(db.Integer, nullable=True)
 
-    # Favourite / highlight star (2026-07-31). A purely human marker, and
+    # Favorite / highlight star (2026-07-31). A purely human marker, and
     # deliberately the THIRD independent quality signal on a recording:
     #
     #   quality        letter grade — a considered judgement, needs thought
@@ -67,7 +67,7 @@ class Recording(db.Model):
     # It exists because neither of the other two can express it. The letter
     # grade rates the artefact and the engine measures the audio; a highlight is
     # about the listener's relationship to the show and may well contradict both
-    # — a rough audience tape of a once-in-a-lifetime night is a favourite and a
+    # — a rough audience tape of a once-in-a-lifetime night is a favorite and a
     # C. Kept boolean rather than a 1-5 star scale on purpose: this project
     # already has two graded scales that need deliberation, and the gap they
     # leave is a zero-effort one.

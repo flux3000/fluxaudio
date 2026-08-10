@@ -8,7 +8,7 @@ unfiltered act roster. See app/utils/personnel.py::resolve_performance_personnel
 The act roster itself is only ever edited via PUT /api/performers/<id>.
 """
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_login import login_required
 
 from app.extensions import db
@@ -23,6 +23,7 @@ from app.utils.personnel import (
     set_performance_personnel_mode,
 )
 from app.utils.pruning import prune_performer_if_orphaned
+from app.utils.folder_naming import rename_recording_folder
 
 bp = Blueprint("performances", __name__)
 
@@ -179,8 +180,25 @@ def update_performance(performance_id):
               "city", "state", "country", "notes"]:
         if f in data:
             setattr(p, f, data[f])
+
+    # Folder name follows the metadata (decided 2026-07-25, built 2026-08-09)
+    # — date, venue, location and a performer reassignment all feed
+    # build_folder_name(), and a Performance can hold several Recordings
+    # (SBD + AUD of the same show), each with its own folder to keep in sync.
+    # Non-fatal per-recording: one folder rename failing (e.g. its directory
+    # already moved out from under it) must not stop the others or block the
+    # metadata commit below.
+    library_root   = current_app.config.get("LIBRARY_ROOT", "")
+    rename_errors  = [err for err in
+                       (rename_recording_folder(r, library_root) for r in p.recordings)
+                       if err]
+
     db.session.commit()
-    return jsonify({"id": p.id, "reassigned_to": reassigned})
+
+    resp = {"id": p.id, "reassigned_to": reassigned}
+    if rename_errors:
+        resp["folder_rename_errors"] = rename_errors
+    return jsonify(resp)
 
 
 @bp.route("/<int:performance_id>/personnel/<int:personnel_id>", methods=["PUT"])

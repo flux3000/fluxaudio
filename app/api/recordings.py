@@ -13,6 +13,7 @@ Routes:
 import json as _json
 import os
 import random
+import subprocess
 from datetime import datetime, timezone, date as _date
 from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
@@ -28,6 +29,7 @@ from app.models.performer import Performer
 from app.models.play_log import PlayLog
 from app.models.venue import Venue
 from app.utils.ingest import (build_scan_payload, write_flac_tags, read_recording_tags)
+from app.utils.folder_naming import rename_recording_folder
 from app.utils.analysis import analyse_recording
 from app.utils.pruning import prune_after_recording_delete
 from app.utils.serialize import recording_row
@@ -423,9 +425,23 @@ def update_recording(recording_id):
         note         = data.get("change_note"),
     )
     db.session.add(event)
+
+    # Folder name follows the metadata (decided 2026-07-25, built 2026-08-09)
+    # — only Source lives on Recording and feeds the folder name, but this
+    # runs on every save rather than gating on "source" in data: it's a cheap
+    # no-op comparison when nothing folder-relevant changed, and staying
+    # unconditional means one fewer place this can drift out of sync with
+    # build_folder_name() later growing a new input field. Non-fatal: a
+    # rename failure never blocks the metadata commit below.
+    library_root  = current_app.config.get("LIBRARY_ROOT", "")
+    rename_error  = rename_recording_folder(rec, library_root)
+
     db.session.commit()
 
-    return jsonify({"id": rec.id, "updated_at": rec.updated_at.isoformat()})
+    resp = {"id": rec.id, "updated_at": rec.updated_at.isoformat()}
+    if rename_error:
+        resp["folder_rename_error"] = rename_error
+    return jsonify(resp)
 
 
 # ── DELETE /api/recordings/<id> ──────────────────────────────────────────────
@@ -530,6 +546,38 @@ def write_tags(recording_id):
         return jsonify({"error": "No files written", "errors": errors}), 500
 
     return jsonify({"written": n_written, "errors": errors})
+
+
+# ── POST /api/recordings/<id>/reveal ─────────────────────────────────────────
+
+@bp.route("/<int:recording_id>/reveal", methods=["POST"])
+@login_required
+def reveal_folder(recording_id):
+    """
+    Open this recording's folder in Finder.
+
+    The path itself never reaches the frontend — same File obfuscation rule
+    as everything else in this module — so this resolves it server-side and
+    shells out to `open`. Only makes sense on the single Mac this app already
+    runs on (PyWebView, one machine, one library root); nothing here is
+    reachable through the peer door.
+    """
+    rec = db.session.get(Recording, recording_id)
+    if not rec:
+        return jsonify({"error": "Not found"}), 404
+
+    library_root = current_app.config.get("LIBRARY_ROOT", "")
+    folder_abs   = os.path.join(str(library_root), rec.folder_path)
+
+    if not os.path.isdir(folder_abs):
+        return jsonify({"error": "This recording's folder no longer exists on disk."}), 404
+
+    try:
+        subprocess.Popen(["open", folder_abs])
+    except OSError as e:
+        return jsonify({"error": f"Could not open Finder: {e}"}), 500
+
+    return jsonify({"opened": True})
 
 
 # ── GET /api/recordings/<id>/tags ─────────────────────────────────────────────

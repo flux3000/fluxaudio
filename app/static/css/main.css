@@ -723,6 +723,20 @@ body {
 .pp-mb-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
 .pp-mb-empty { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--t3); font-style: italic; }
 
+/* Editable MusicBrainz search term (Ryan, 2026-08-08) — a billing variant
+   like "Aaron Parks Trio" is a real act name but often not what MusicBrainz
+   indexed it under, so the term sent to the API needs to be adjustable
+   without renaming the Performer. Sits under the status line/prompt in every
+   unresolved state (never-looked-up, ambiguous, no-results, candidate list). */
+.pp-mb-searchrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.pp-mb-searchrow-sm { margin: 0 0 10px; }
+.pp-mb-input {
+  width: 260px; font-size: 11.5px; padding: 4px 8px;
+  background: var(--bg-1); border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm); color: var(--t0); font-family: var(--font);
+}
+.pp-mb-input:focus { outline: none; border-color: var(--accent); }
+
 /* A matched entry shows only WHAT we linked to plus enough to confirm it's the
    right act. The link list this panel used to render is still fetched and
    stored — future ingest jobs need it — but nobody needs to read it. */
@@ -845,6 +859,11 @@ body {
 }
 .pp-fetch-tile.is-disabled:hover { border-color: var(--bd-2); color: var(--t3); }
 .pp-fetch-tile.is-busy { border-color: var(--accent); color: var(--accent); cursor: progress; }
+
+/* Google Images tile — a plain external link wearing the same .pp-drop face
+   as the upload/Commons tiles, so all three read as one row of "ways to get a
+   photo in" rather than a fetch tool plus an odd link stuck on the end. */
+.pp-google-tile { text-decoration: none; }
 
 .pp-fetch-msg { font-size: 11px; color: var(--t2); margin-top: 12px; min-height: 14px; }
 .pp-fetch-msg.is-ok  { color: var(--green); }
@@ -1372,9 +1391,12 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 /* Inline-editable recording header bits */
 .rec-name-row { display: flex; align-items: baseline; gap: 4px; }
 
-/* Favourite star (2026-07-31). Deliberately quiet until set: an unset star is
-   an invitation, not a control demanding attention. Uses --warn rather than
-   --accent so a favourite never reads as the same kind of signal as the
+/* Favorite star (2026-07-31; moved off the title row 2026-08-09 — the header
+   variant is now .fav-toggle-btn, see the Collections rule block below). This
+   icon-only version lives on now as the compact per-row toggle in the Library
+   table (.rec-fav-star--sm). Deliberately quiet until set: an unset star is an
+   invitation, not a control demanding attention. Uses --amber rather than
+   --accent so a favorite never reads as the same kind of signal as the
    automated quality colours in the Fidelity panel — a highlight is a human
    mark and should not be confusable with a measurement. --amber is also the
    only warm token in the palette, which is what a star wants to be. */
@@ -1389,6 +1411,10 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .rec-fav-star.is-fav       { color: var(--amber); }
 .rec-fav-star:disabled     { opacity: 0.5; cursor: default; transform: none; }
 .rec-fav-star:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+/* Compact per-row variant — Library table (2026-08-09). Same colour/hover
+   language as the full-size star, just small enough for a 22px grid column. */
+.rec-fav-star--sm { font-size: 14px; padding: 0 2px; margin-left: 0; }
 .rec-perf-name.pp-editable { display: inline-block; padding: 1px 6px; margin-left: -6px; border-radius: var(--r-sm); cursor: text; }
 .rec-perf-name.pp-editable:hover { background: var(--bg-1); }
 .rec-date-line .rec-f { border-radius: 3px; }
@@ -3396,7 +3422,7 @@ input[type="range"].progress-bar {
 .rec-table { padding: 4px 0 20px; }
 .rec-row--flat {
   display: grid;
-  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 28px;
+  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 22px 28px;
   align-items: center;
   gap: 10px;
   padding: 5px 20px;
@@ -3405,7 +3431,7 @@ input[type="range"].progress-bar {
   font-size: 12px;
 }
 .rec-row--flat.with-performer {
-  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 28px;
+  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 22px 28px;
 }
 .rec-row--flat:hover { background: var(--bg-1); }
 .rec-performer-cell { color: var(--t0); font-weight: 450; }
@@ -3414,14 +3440,14 @@ input[type="range"].progress-bar {
 /* Header row paired with .rec-row--flat — same grid, mostly blank; "Added" sorts. */
 .rec-table-head {
   display: grid;
-  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 28px;
+  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 22px 28px;
   align-items: center;
   gap: 10px;
   padding: 0 20px 4px;
   font-size: 10px;
 }
 .rec-table-head.with-performer {
-  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 28px;
+  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 22px 28px;
 }
 .rec-th-added {
   background: none; border: none; padding: 0; margin: 0;
@@ -3455,6 +3481,24 @@ input[type="range"].progress-bar {
   padding: 3px 10px; font-size: 11px; color: var(--t2); cursor: pointer;
 }
 .collection-add-btn:hover { color: var(--t0); border-color: var(--bd-2); }
+
+/* Favorite toggle — top row, beside Add to Collection (Ryan, 2026-08-09; was
+   a star icon next to the title). Same pill shape/size as .collection-add-btn
+   so the two read as one cluster of "mark this recording" actions; the amber
+   fill on is-fav is the same accent language as the old star. */
+.fav-toggle-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px dashed var(--bd-1); border-radius: 12px;
+  padding: 3px 10px; font-size: 11px; color: var(--t2); cursor: pointer;
+  white-space: nowrap; transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.fav-toggle-btn:hover { color: var(--t0); border-color: var(--bd-2); }
+.fav-toggle-btn.is-fav {
+  border-style: solid; border-color: var(--amber); color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.fav-toggle-btn.is-fav:hover { background: color-mix(in srgb, var(--amber) 20%, transparent); }
+.fav-toggle-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* Performers index page */
 .artist-index-list { padding: 6px 0; }
@@ -3677,13 +3721,17 @@ input[type="range"].progress-bar {
 
 .track-review-table tr:last-child td { border-bottom: none; }
 
+/* Sits directly under the "#" header — centered and no wider than the
+   digits themselves — so the freed width goes to Title (Ryan, 2026-08-08:
+   the number column was wider than it needed to be). */
 .track-review-table td.num {
   color: var(--t2);
   font-family: var(--font-mono);
   font-size: 11px;
-  width: 32px;
-  text-align: right;
-  padding-right: 10px;
+  width: 20px;
+  text-align: center;
+  padding-left: 2px;
+  padding-right: 2px;
 }
 
 .track-review-table td.dur {
@@ -3779,7 +3827,8 @@ input[type="range"].progress-bar {
   color: var(--t2);
   cursor: text;
 }
-.track-review-table td.note-cell { text-align: right; }
+/* Was right-aligned while the "Notes" header stayed left — the mismatch is
+   what looked wrong, not either alignment on its own (Ryan, 2026-08-08). */
 .track-review-table td.note-cell.pp-empty,
 .track-review-table td.sw-cell.pp-empty {
   color: var(--t3);
@@ -3801,6 +3850,15 @@ input[type="range"].progress-bar {
   display: inline-block; font-size: 10px; color: var(--accent-lit);
   margin-left: 5px; vertical-align: middle; opacity: 0.85;
 }
+
+/* Add Recording's official-mark column (Ryan, 2026-08-09) — otherwise blank,
+   far right next to Time, so the © badge can never wrap the title cell the
+   way it did living inline under it. No left margin here; it's centered in
+   its own column, not trailing other text. */
+.track-review-table td.official-cell {
+  width: 20px; text-align: center; padding: 2px 0;
+}
+.track-review-table td.official-cell .track-official-badge { margin-left: 0; }
 
 /* Songwriter secondary line under title in detail view */
 .track-title-wrap { display: flex; flex-direction: column; min-width: 0; }
@@ -4064,8 +4122,7 @@ input[type="range"].progress-bar {
 .iq-score--green  { color: #5aa96a; }
 .iq-score--yellow { color: #c99040; }
 .iq-score--red    { color: #e06060; }
-.iq-msg { flex: 1; min-width: 0; font-size: 11px; color: var(--t1); line-height: 1.3; }
-.iq-ai-btn { flex-shrink: 0; white-space: nowrap; }
+.iq-ai-btn { flex-shrink: 0; white-space: nowrap; margin-left: auto; }
 .iq-label {
   font-size: 9px;
   font-weight: 600;
@@ -4461,30 +4518,38 @@ input[type="range"].progress-bar {
 
 /* ── Inline ingest audio preview bar ──────────────────────────────────────── */
 
-/* Ingest action row — three-zone grid so the preview player sits truly
-   centered with "Add Recording" pinned right (Ryan, 2026-07-15). Middle
-   column is auto-width (just the player), outer columns share the rest
-   equally so the player lands in the visual center rather than being
-   pushed by the button's width. A slightly warmer background than the
-   metadata editor above it sets this footer apart. */
+/* Ingest action row (Ryan, 2026-08-08: was a 3-col grid with the preview
+   player centered — the player has moved up into the Tracks header row, so
+   this is now action-only). A stray 3rd grid item with no explicit column
+   used to auto-flow onto its own row, which is why "Add & View" was landing
+   BELOW this bar instead of beside "Add & Return" — simple flex, both
+   buttons right-aligned, fixes that outright. Same warm background as
+   before sets this footer apart from the metadata editor above it. */
 .ingest-actions {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
+  justify-content: flex-end;
   align-items: center;
   padding: 10px 20px;
   border-top: 1px solid var(--bd-0);
   background: var(--accent-dim);
 }
 
-/* Audio preview bar — centered (grid col 2) */
-.ingest-audio-footer {
-  grid-column: 2;
-  justify-self: center;
+/* Tracks (N) header row + the relocated preview player, right-aligned
+   opposite the title (Ryan, 2026-08-08). */
+.rev-tracks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ingest-audio-inline {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 420px;
+  max-width: 320px;
   min-width: 0;
+  flex-shrink: 0;
 }
 #ingest-audio-label {
   font-size: 11px;
@@ -4494,16 +4559,24 @@ input[type="range"].progress-bar {
   flex-shrink: 0;
   white-space: nowrap;
 }
-.ingest-audio-footer audio,
+.ingest-audio-inline audio,
 #ingest-preview-audio {
   flex: 1;
-  min-width: 220px;
+  min-width: 200px;
   height: 28px;
 }
 
-#btn-confirm {
-  grid-column: 3;
-  justify-self: end;
+/* "Add & View" — same accent family as "Add & Return" (.btn-primary) but a
+   lighter, tinted fill rather than .btn-ghost's transparent-on-dark look,
+   which read as too dark against this bar (Ryan, 2026-08-08). Distinct
+   enough to tell the two apart at a glance, light enough to read as a pair. */
+.btn-ingest-secondary {
+  background: color-mix(in srgb, var(--accent) 24%, var(--bg-2));
+  border: 1px solid var(--accent);
+  color: var(--t0);
+}
+.btn-ingest-secondary:hover {
+  background: color-mix(in srgb, var(--accent) 38%, var(--bg-2));
 }
 
 .ingest-actions-right {
@@ -5090,7 +5163,7 @@ input[type="range"].progress-bar {
    against a taller neighbour. The title is the anchor — it pins to the top. */
 .lq-card-head { display: flex; align-items: flex-start; gap: 16px; }
 .lq-card-title { flex: 1; min-width: 0; }
-.lq-card-title h2 { font-size: 15.5px; font-weight: 600; margin: 0; word-break: break-word; line-height: 1.3; }
+.lq-card-title h2 { font-size: 13px; font-weight: 600; margin: 0; word-break: break-word; line-height: 1.3; }
 
 /* Quick-glance facts — Tracks | Format | Bitrate | Cutoff.
    Was a bordered four-cell strip in the top-right corner; now one pipe-
@@ -5156,7 +5229,11 @@ input[type="range"].progress-bar {
   font-family: var(--font-mono); font-size: 19px; font-weight: 600;
   line-height: 1; font-variant-numeric: tabular-nums; flex: none;
 }
-.lq-tab .chev { color: var(--t2); font-size: 12px; flex: none; }
+/* Leads the button now (2026-08-09, was trailing after the value) and sized
+   up — at 12px trailing a coloured badge it read as decoration; a plainer
+   task is to make it obviously the "expand this" control, which wants to be
+   both first and a little bigger than the text it sits beside. */
+.lq-tab .chev { color: var(--t2); font-size: 16px; flex: none; }
 .lq-tab:hover .chev { color: var(--accent-lit); }
 
 .lq-detail { display: none; }
@@ -5203,7 +5280,15 @@ input[type="range"].progress-bar {
 
 /* Hover tooltips */
 .lq-tip { position: relative; }
-.lq-tip .lq-tipbox {
+/* Base box styling is UNCONDITIONAL (2026-08-09 fix) — it used to be scoped
+   to ".lq-tip .lq-tipbox" (tipbox as a descendant of the hoverable element),
+   which broke the moment the metric-row fix below made .lq-tipbox a SIBLING
+   of .lq-minfo.lq-tip instead: the descendant selector no longer matched at
+   all, so .lq-tipbox got none of position/visibility/sizing and rendered as
+   a plain static block, permanently visible and overlapping the row below it
+   (Ryan, 2026-08-09 — Triage's Sound Quality tab). Keeping this rule
+   unconditional means which element carries `.lq-tip` no longer matters. */
+.lq-tipbox {
   visibility: hidden; opacity: 0; position: absolute; left: 0; top: calc(100% + 7px); z-index: 20;
   width: 300px; background: var(--bg-5); border: 1px solid var(--bd-2); border-radius: var(--r-md);
   padding: 11px 13px; font-size: 11.5px; line-height: 1.5; color: var(--t0); font-weight: 400;
@@ -5211,6 +5296,15 @@ input[type="range"].progress-bar {
   box-shadow: 0 8px 26px rgba(0,0,0,.42); transition: opacity .12s;
 }
 .lq-tip:hover .lq-tipbox { visibility: visible; opacity: 1; }
+/* Metric rows (2026-08-09): the tooltip used to fire on hovering the WHOLE
+   row (.lq-tip lived on .lq-mrow, with .lq-tipbox as its descendant). It now
+   lives only on the (i) icon, and .lq-tipbox stays a sibling within .lq-mrow
+   rather than the icon's child — so REVEALING it needs this sibling
+   combinator alongside the descendant rule above; the base styling above is
+   what makes it hidden/positioned regardless of which selector reveals it.
+   .lq-mrow itself keeps its own unconditional `position: relative`, so the
+   box still anchors to the row. */
+.lq-minfo.lq-tip:hover ~ .lq-tipbox { visibility: visible; opacity: 1; }
 .lq-tipbox .tt { font-weight: 600; margin-bottom: 5px; }
 .lq-tipbox .ab { color: var(--t1); }
 /* Cutoff tooltip in the quick line: anchor right so it never runs off the
@@ -5231,8 +5325,18 @@ input[type="range"].progress-bar {
 .lq-issue { font-size: 12.5px; margin-bottom: 6px; }
 .lq-issue b { color: var(--t0); }
 .lq-issue span { color: var(--t2); }
-.lq-clean { margin-top: 12px; font-size: 12px; color: var(--t3); display: flex; align-items: center; gap: 7px; }
-.lq-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; }
+/* Moved above the group meters and given the same visual weight as
+   .lq-issues' red card (Ryan, 2026-08-09: "it is important info" — a plain
+   grey line this small read as filler, easy to skip past on the way to the
+   meters). Green-tinted rather than neutral so it reads as a positive result,
+   not just an absence of the red card. */
+.lq-clean {
+  margin: 4px 0 14px; padding: 9px 13px; border-radius: var(--r-md);
+  background: rgba(90,169,106,.10); border: 1px solid rgba(90,169,106,.35);
+  font-size: 12.5px; font-weight: 500; color: var(--t0);
+  display: flex; align-items: center; gap: 8px;
+}
+.lq-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
 
 /* ── Track Preview ───────────────────────────────────────────────────────────
    Given its own surface (2026-08-02, Ryan: "cramped… could use some spacing to
@@ -5253,6 +5357,11 @@ input[type="range"].progress-bar {
   border-bottom: 1px solid var(--bd-0); min-height: 34px;
 }
 .lq-samp h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--t2); flex: none; }
+/* Persistent — unlike .lq-trk-player's placeholder text, which only shows
+   until the first click, this stays up (Ryan, 2026-08-09: the hint that the
+   timestamps ARE the sampled windows, not just seek points, is worth keeping
+   visible rather than trading it away after one play). */
+.lq-samp-hint { font-size: 10.5px; color: var(--t3); flex: none; }
 
 /* One player per CARD, parked here. A slot under each track pushed its row
    apart from its neighbours every time it opened, so the list jumped around as
@@ -5263,7 +5372,7 @@ input[type="range"].progress-bar {
   content: 'Play a track, or click a timestamp to hear the analyzed moment';
   font-size: 11px; color: var(--t3);
 }
-.lq-preview-audio { width: 100%; height: 30px; display: block; }
+.lq-preview-audio { width: 100%; height: 24px; display: block; }
 
 /* Rows are compact — the player left them, so there is nothing to make room
    for and the height was pure padding. */

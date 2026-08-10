@@ -97,14 +97,28 @@ def get_staging(folder_path):
 
 def list_staging(source_dir):
     """
-    Every staging row under one scanned directory, best score first.
+    Every NOT-YET-INGESTED staging row under one scanned directory, best
+    score first.
 
     Rows that failed to analyse sort last rather than being hidden — a folder
     that errored is something the user needs to see, not something to quietly
     drop from the list.
+
+    Excludes rows already promoted to a Recording (`recording_id` set) —
+    Ryan, 2026-08-09: staging rows are keyed by folder path and deliberately
+    outlive the folder (a Move ingest relocates the source out from under its
+    own row), so re-triaging the SAME parent directory later — e.g. after
+    ingesting one show from it and downloading three new ones — was
+    resurfacing every old, already-ingested show right alongside the new
+    ones, each showing "Source folder no longer exists on disk". Softening
+    that to just skip the concern (same day, earlier fix) wasn't enough —
+    an ingested row has nothing left to triage and should not be IN this
+    list at all. It is still reachable from the library itself; this table's
+    job ends the moment a folder becomes a Recording.
     """
     rows = (db.session.query(QualityAnalysis)
             .filter(QualityAnalysis.source_dir == norm_path(source_dir))
+            .filter(QualityAnalysis.recording_id.is_(None))
             .all())
     return sorted(
         rows,

@@ -43,7 +43,7 @@ def main():
             conn.commit()
             n = conn.execute(sa.text("SELECT COUNT(*) FROM recording")).scalar()
             print(f"Added 'is_favorite' (BOOLEAN NOT NULL DEFAULT 0); "
-                  f"{n} existing recordings set to not-favourite.")
+                  f"{n} existing recordings set to not-favorite.")
 
 
 if __name__ == "__main__":

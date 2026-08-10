@@ -187,7 +187,9 @@ METRICS = [
         "about": "How much the noise floor fluctuates. Tape hiss and mains hum "
                  "are steady and easy to ignore; a room full of people talking "
                  "is not. Two recordings can share a noise floor where one is "
-                 "benign and the other ruins the show.",
+                 "benign and the other ruins the show. Measured and shown, "
+                 "but not currently a scored input — crowd/room noise (above) "
+                 "is the scored audience-tape signal.",
         "scale": [(4,  "good", "Steady — hiss-like, easy to ignore"),
                   (6,  "ok",   "Mildly variable"),
                   (8,  "poor", "Fluctuating — live room audible"),
@@ -199,7 +201,8 @@ METRICS = [
                  "2–20 Hz. Reverberation and microphone distance fill those "
                  "gaps in, so a low value means a distant or washy capture. A "
                  "stand-in for direct-to-reverberant ratio, which needs an "
-                 "impulse response we will never have.",
+                 "impulse response we will never have. Measured and shown, "
+                 "but not currently a scored input.",
         "dp": 2,
         "scale": [(0.35, "bad",  "Very washy / distant"),
                   (0.50, "poor", "Reverberant"),
@@ -226,10 +229,21 @@ METRICS = [
                   (99,  "bad",  "Harsh, tinny")],
     }),
     ("midrange_scoop_db", {
+        # DEMOTED 2026-07-31 alongside presence balance — display only, zero
+        # weight. r = -0.016 against 113 graded recordings, essentially no
+        # signal. The "about" text below used to call this "the single
+        # strongest predictor of a poor grade in testing", which was true of
+        # the v1 fit it was written for and became actively false the day
+        # this was pulled from scoring — caught 2026-08-09 (Ryan: contradicted
+        # its own zero-weight marker, and the panel's footnote promises the
+        # tooltip explains why every unscored row is unscored).
         "label": "Midrange scoop", "unit": " dB",
         "about": "Whether the 250–800 Hz body sits below both its neighbours. "
-                 "A scoop makes a recording sound hollow and boxy — the "
-                 "single strongest predictor of a poor grade in testing.",
+                 "A scoop can make a recording sound hollow and boxy. NOTE: "
+                 "measured but NOT scored — against 113 graded recordings "
+                 "this correlates -0.02 with listening quality, essentially "
+                 "no signal, so it was removed from Tone in the 2026-07-31 "
+                 "rework alongside presence balance.",
         "scale": [(-6, "bad",  "Severely hollow"),
                   (-4, "poor", "Hollow"),
                   (-2, "poor", "Scooped"),
@@ -291,7 +305,8 @@ METRICS = [
         "label": "Mains hum", "unit": " dB",
         "about": "How far the 50/60 Hz hum line and its harmonics rise above "
                  "the surrounding spectrum. Caused by ground loops in the "
-                 "recording chain.",
+                 "recording chain. Measured and shown, but not currently a "
+                 "scored input.",
         "scale": [(6,  "good", "None"),
                   (12, "ok",   "Trace"),
                   (20, "poor", "Audible"),
@@ -312,7 +327,12 @@ METRICS = [
     ("hf_edge_hz", {
         "label": "Frequency cutoff", "unit": " Hz",
         "about": "The highest frequency still carrying real musical content, "
-                 "after subtracting the noise floor.",
+                 "after subtracting the noise floor. Measured and shown — it "
+                 "also drives the quick-glance cutoff badge at the top of the "
+                 "card — but not currently a scored input here; WHERE the "
+                 "signal stops is a different question from HF energy ratio "
+                 "(above), which is scored and asks whether there's any top "
+                 "end at all.",
         "scale": [(5000,  "bad",  "Very restricted"),
                   (8000,  "poor", "Restricted"),
                   (11000, "ok",   "Limited"),
@@ -323,7 +343,9 @@ METRICS = [
         "label": "Loudness", "unit": " LUFS",
         "about": "Perceived loudness on the broadcast standard scale. Only "
                  "extremes matter — very quiet wastes headroom, very loud "
-                 "means someone squashed it.",
+                 "means someone squashed it. Measured and shown, but not "
+                 "currently a scored input — crest factor (above) is the "
+                 "scored compression signal.",
         "scale": [(-26, "poor", "Very quiet"),
                   (-20, "ok",   "Quiet"),
                   (-10, "good", "Well-leveled"),

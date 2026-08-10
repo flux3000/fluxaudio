@@ -19,6 +19,7 @@ Examples:
   Unknown Artist - 1963 - Unknown Venue - Unknown Location
 """
 
+import os
 import re
 
 
@@ -151,3 +152,82 @@ def build_folder_name_from_recording(recording, performance, performer, venue):
         country         = country,
         source          = recording.source,
     )
+
+
+def _dedupe_name(canonical_name, n):
+    """
+    Append a disambiguating digit — inside the source parens if there is one
+    ("... (SBD)" -> "... (SBD 2)"), otherwise a bare "... (2)". Matches
+    Ryan's existing manual practice for colliding folder names.
+    """
+    m = re.match(r'^(.*)\(([^)]*)\)\s*$', canonical_name)
+    if m:
+        base, inner = m.group(1).rstrip(), m.group(2)
+        return f"{base} ({inner} {n})"
+    return f"{canonical_name} ({n})"
+
+
+def rename_recording_folder(recording, library_root):
+    """
+    Rename a recording's on-disk folder to match its CURRENT metadata, if it
+    has drifted from what's on disk (e.g. a date or venue correction after
+    ingest, when the folder was only ever named once, at ingest time).
+
+    Decided 2026-07-25 (Context Library — Ingest section): the folder name is
+    Flux's own construction from metadata, never the taper's artefact, so it
+    takes no preference and no button — it just follows the metadata whenever
+    a Performance or Recording field that feeds build_folder_name() changes.
+    Built 2026-08-09.
+
+    NON-FATAL BY DESIGN: a filesystem problem must never block a metadata
+    save. On any failure this leaves `recording.folder_path` exactly as it
+    was and returns an error string for the caller to surface; on success it
+    updates `recording.folder_path` (NOT committed — the caller owns the
+    transaction, same convention as every other mutation helper in this app)
+    and returns None. Collisions get a digit inside the parens, or a bare
+    "(2)" with no source segment — never a renumber of an existing suffix,
+    since this always computes fresh from the canonical name outward.
+
+    Only renames the FOLDER itself. Renaming the audio files inside it is the
+    separate, still-unbuilt "Update File Names" button (Context Library) —
+    deliberately kept apart because file renaming has to interact with
+    checksum matching (.ffp/.md5 files reference file NAMES) in a way a
+    folder rename never does.
+    """
+    performance = recording.performance
+    if not performance:
+        return None
+    performer = performance.performer
+    if not performer:
+        return None
+    venue = performance.venue
+
+    old_rel = (recording.folder_path or "").rstrip("/")
+    if not old_rel:
+        return None
+    old_name = os.path.basename(old_rel)
+    new_name = build_folder_name_from_recording(recording, performance, performer, venue)
+    if new_name == old_name:
+        return None  # already correct — the common case on every save
+
+    parent_rel = os.path.dirname(old_rel)
+    old_abs    = os.path.join(str(library_root), old_rel)
+    if not os.path.isdir(old_abs):
+        return f"Folder not found on disk, could not rename: {old_rel}"
+
+    target_name = new_name
+    target_abs  = os.path.join(str(library_root), parent_rel, target_name)
+    n = 2
+    while (os.path.exists(target_abs)
+           and os.path.normpath(target_abs) != os.path.normpath(old_abs)):
+        target_name = _dedupe_name(new_name, n)
+        target_abs  = os.path.join(str(library_root), parent_rel, target_name)
+        n += 1
+
+    try:
+        os.rename(old_abs, target_abs)
+    except OSError as e:
+        return str(e)
+
+    recording.folder_path = os.path.join(parent_rel, target_name) if parent_rel else target_name
+    return None

@@ -19,6 +19,22 @@ const API = (() => {
 
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+
+    // Folder-rename-on-metadata-edit (app/utils/folder_naming.py) is
+    // deliberately non-fatal — a filesystem problem must never block a
+    // metadata save — so it never throws. It rides along as
+    // folder_rename_error/-s on whichever PUT triggered it (recordings,
+    // performances) instead. Checked centrally here rather than at each of
+    // the dozen call sites that can cause a rename (quick edits, AI Assist
+    // apply, members edits...) so it can't be missed at a call site nobody
+    // remembered to check.
+    if (data && (data.folder_rename_error || data.folder_rename_errors)) {
+      const msgs = data.folder_rename_error ? [data.folder_rename_error] : data.folder_rename_errors
+      console.warn('Folder rename failed:', msgs)
+      setTimeout(() => alert(
+        'Metadata saved, but the folder could not be renamed to match:\n' + msgs.join('\n')), 0)
+    }
+
     return data
   }
 
@@ -176,6 +192,7 @@ const API = (() => {
       update:     (id, data) => put(`/api/recordings/${id}`, data),
       delete:     (id)       => request('DELETE', `/api/recordings/${id}`),
       writeTags:  (id)       => post(`/api/recordings/${id}/write-tags`),
+      revealFolder: (id)     => post(`/api/recordings/${id}/reveal`),
       fileTags:   (id)       => get(`/api/recordings/${id}/tags`),
       reprocess:  (id)       => post(`/api/recordings/${id}/reprocess`),
       verifyChecksums: (id)  => post(`/api/recordings/${id}/verify-checksums`),
