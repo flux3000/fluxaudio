@@ -38,7 +38,10 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", DEV_SECRET_DEFAULT)
 
     # ── Database ──────────────────────────────────────────────
-    DB_PATH = BASE_DIR / "db" / "fluxaudio.db"
+    # FLUX_DB_PATH exists for the two-node peer-sharing dev rig (2026-08-08):
+    # a second instance needs its own database, and the path was hardcoded.
+    # Prefixed (unlike LIBRARY_ROOT / IMPORT_DIR) on purpose — see FLUX_PORT.
+    DB_PATH = Path(os.environ.get("FLUX_DB_PATH") or (BASE_DIR / "db" / "fluxaudio.db"))
     SQLALCHEMY_DATABASE_URI = f"sqlite:///{DB_PATH}"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # SQLite: increase timeout for long-running analysis writes (default 5s is too short)
@@ -90,8 +93,20 @@ class Config:
     # ── App ───────────────────────────────────────────────────
     # Note: Flask's own debug reloader is always forced off under PyWebView
     # (see run.py), so no DEBUG flag is carried here.
+    # Cookies are scoped by HOST, not by port — 127.0.0.1:5757 and
+    # 127.0.0.1:5758 share one cookie jar. With both nodes of the peer-sharing
+    # rig naming their cookie `session`, each node's Set-Cookie overwrites the
+    # other's, and (since both DBs carry the same admin user id) a session
+    # minted by one node authenticates against the other. Give each node its
+    # own cookie name — and its own SECRET_KEY — and the two stop colliding.
+    # Irrelevant in production, where nodes are distinct hosts.
+    SESSION_COOKIE_NAME = os.environ.get("FLUX_COOKIE_NAME") or "session"
+
     HOST  = "127.0.0.1"
-    PORT  = 5757        # internal Flask port used by PyWebView
+    # FLUX_PORT, not PORT: a bare PORT is set by all sorts of tooling and
+    # shells, and a node silently binding somewhere other than 5757 is a
+    # miserable thing to debug. The prefix costs nothing and can't collide.
+    PORT  = int(os.environ.get("FLUX_PORT") or 5757)   # internal Flask port used by PyWebView
 
     # ── Dev mode ──────────────────────────────────────────────
     # When True, skips login entirely — auto-logs in the first admin user.

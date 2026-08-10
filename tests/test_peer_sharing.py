@@ -67,10 +67,45 @@ def _auth(raw):
 
 
 def _login_as(client, username="admin"):
+    """
+    Put `username` into the client's session, then PROVE it authenticated.
+
+    The proof matters (2026-08-08). This helper previously just wrote session
+    keys and returned; if flask_login declined to load the user, the next
+    assertion saw an unauthenticated response and — because the accepted status
+    sets included the unauthenticated code — read it as an authorization
+    result. test_admin_peer_management_requires_admin passed for two weeks
+    without ever reaching the role gate it exists to test.
+
+    So: assert the precondition. A broken login now fails HERE, saying so,
+    instead of impersonating a passing authorization test downstream.
+    """
+    from app.extensions import login_manager
+
     user = _db.session.query(User).filter_by(username=username).first()
+    assert user is not None, f"no such user to log in as: {username!r}"
+
     with client.session_transaction() as sess:
         sess["_user_id"] = str(user.id)
         sess["_fresh"] = True
+        # Flask-Login's session protection compares a per-request identifier
+        # against session["_id"]. Absent, "basic" mode marks the session stale
+        # and "strong" mode clears it outright. Setting it makes this helper
+        # independent of which mode is configured.
+        gen = getattr(login_manager, "_session_identifier_generator", None)
+        if callable(gen):
+            try:
+                sess["_id"] = gen()
+            except Exception:
+                pass   # best effort — the assertion below is the real gate
+
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200, (
+        f"session login as {username!r} did not authenticate: "
+        f"/api/auth/me returned {me.status_code}. The test harness is broken, "
+        f"not the endpoint under test."
+    )
+    return user
 
 
 # ── token resolution ──────────────────────────────────────────────────────────
@@ -255,20 +290,22 @@ def test_peer_token_cannot_reach_editing_endpoint(app, seeded_ids):
 
 
 def test_admin_peer_management_requires_admin(app):
-    # No session at all → login_required blocks (401, or 302-redirect to login).
-    assert app.test_client().get("/api/peers/").status_code in (401, 302)
+    # No session at all → login_required blocks. Since 2026-08-08 the local
+    # door answers JSON 401 rather than redirecting to a POST-only login route
+    # (see tests/test_unauthorized_responses.py), so this is exact now.
+    assert app.test_client().get("/api/peers/").status_code == 401
 
-    # A non-admin session → admin_required's role gate. Use a FRESH client so
-    # the login is its first action (a prior no-session request on the same
-    # client leaves an anonymous cookie that can shadow session_transaction).
+    # A non-admin session → admin_required's ROLE gate, which is the thing this
+    # test exists to prove. _login_as asserts the session really authenticated,
+    # so a 403 here can only mean "logged in, wrong role" — it can no longer be
+    # an unauthenticated response wearing a passing costume.
     listener = User(username="listener1", role="listener", is_active=True, password_hash="x")
     _db.session.add(listener)
     _db.session.commit()
     client = app.test_client()
     _login_as(client, username="listener1")
-    # Blocked: 403 if the role gate is reached, 302 if login redirects — either
-    # way a non-admin cannot reach peer management (never 200).
-    assert client.get("/api/peers/").status_code in (403, 302)
+
+    assert client.get("/api/peers/").status_code == 403
 
 
 def test_admin_end_to_end_peer_flow(app):

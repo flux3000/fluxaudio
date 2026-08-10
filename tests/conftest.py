@@ -42,6 +42,28 @@ def app():
         DEV_MODE = False
 
     application = create_app(config_class=TestConfig)
+
+    # ── Per-request identity, as in production (2026-08-08) ──────────────────
+    # This fixture holds ONE app context open for the whole test. Flask's
+    # RequestContext.push() reuses an already-pushed app context for the same
+    # app rather than creating a new one, so `g` — which lives on the app
+    # context — is shared by every request the test client makes.
+    #
+    # Flask-Login caches the resolved user at g._login_user and skips
+    # _load_user() when it is already set. So the FIRST request in a test
+    # decides current_user for all the rest: an opening unauthenticated call
+    # pins `anonymous`, and a later session login silently has no effect.
+    #
+    # That is how test_admin_peer_management_requires_admin ran for weeks
+    # without reaching the role gate it exists to test. Production is
+    # unaffected — a real request gets its own app context and a fresh `g`.
+    #
+    # Clearing the cache per request restores that invariant here.
+    @application.before_request
+    def _reset_flask_login_cache():
+        from flask import g
+        g.pop("_login_user", None)
+
     with application.app_context():
         _db.create_all()
         _seed()

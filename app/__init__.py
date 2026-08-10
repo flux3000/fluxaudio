@@ -48,6 +48,29 @@ def create_app(config_class=Config):
     login_manager.init_app(app)
     login_manager.login_view = "auth.login"
 
+    # ── Unauthenticated requests (2026-08-08) ──────────────────
+    # Without this, flask_login 302s an unauthenticated caller to `login_view`
+    # — which is auth.login, a POST-ONLY route. No rule matches GET there, so
+    # Flask falls through to serve_frontend's catch-all and returns index.html
+    # with status 200. An API call that failed authentication therefore
+    # answered "200 OK" with a page of HTML.
+    #
+    # That is not merely untidy:
+    #   * the frontend detects logged-out only because res.json() chokes on
+    #     the HTML — it works by accident, not by design
+    #   * the peer-door probe read it as a peer token reaching the admin API
+    #   * the milestone-2 consumer proxy has to distinguish "auth failed" from
+    #     "success" WITHOUT sniffing the body, which a 200 makes impossible
+    #
+    # So: JSON 401 for anything under /api/, and a redirect to the SPA root
+    # for everything else (the SPA shows its own login screen).
+    @login_manager.unauthorized_handler
+    def _unauthorized():
+        from flask import request as _req, jsonify as _jsonify, redirect as _redirect
+        if _req.path.startswith("/api/"):
+            return _jsonify({"error": "Authentication required"}), 401
+        return _redirect("/")
+
     # ── Register blueprints ────────────────────────────────────
     from app.api.auth         import bp as auth_bp
     from app.api.artists      import bp as artists_bp
