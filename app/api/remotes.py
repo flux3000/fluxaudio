@@ -47,7 +47,7 @@ bp = Blueprint("remotes", __name__)
 # First path segment must be one of these. Mirrors api/share.py's surface;
 # anything not listed is refused here rather than sent to the remote.
 _ALLOWED_PREFIXES = {
-    "me", "collections", "recordings", "performers",
+    "me", "collections", "recordings", "performances", "performers",
     "venues", "artists", "genres", "stream",
 }
 

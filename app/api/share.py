@@ -26,6 +26,11 @@ consumer's frontend can reuse its existing render functions:
   GET  /venues/<id>                  venue + its visible shows, visible counts
   GET  /artists/<id>                 person, visible acts + guest appearances
   GET  /genres/                      genres present in the visible set
+  GET  /genres/<id>                  one genre, its visible acts and shows
+
+All routes are strict_slashes=False (2026-08-08): the consumer proxies paths
+built by the LOCAL api.js, whose conventions differ on trailing slashes
+(/api/collections/ but /api/venues/12). A peer client should not have to guess.
 
 Every one of those is filtered through peer_visible_recording_ids(). Counts
 included — see the rule in the ENTITY PAGES banner below.
@@ -80,7 +85,7 @@ def _node_identity():
 # unguessable, single-use, expiring. TODO(server-mode): add rate limiting here
 # as defense-in-depth before this is internet-exposed.
 
-@bp.route("/enroll", methods=["POST"])
+@bp.route("/enroll", methods=["POST"], strict_slashes=False)
 def enroll():
     data = request.get_json(silent=True) or {}
     code = (data.get("invite_code") or "").strip()
@@ -118,7 +123,7 @@ def enroll():
 
 # ── GET /api/share/me ─────────────────────────────────────────────────────────
 
-@bp.route("/me")
+@bp.route("/me", strict_slashes=False)
 @peer_required
 def me():
     peer = current_peer()
@@ -133,7 +138,7 @@ def me():
 
 # ── GET /api/share/collections ────────────────────────────────────────────────
 
-@bp.route("/collections")
+@bp.route("/collections", strict_slashes=False)
 @peer_required
 def list_collections():
     peer = current_peer()
@@ -155,7 +160,7 @@ def list_collections():
 
 # ── GET /api/share/collections/<id> ───────────────────────────────────────────
 
-@bp.route("/collections/<int:collection_id>")
+@bp.route("/collections/<int:collection_id>", strict_slashes=False)
 @peer_required
 def collection_detail(collection_id):
     peer = current_peer()
@@ -181,7 +186,7 @@ def collection_detail(collection_id):
 # metadata. Track stream_urls point at the PEER stream endpoint (transcoded),
 # never the local FLAC endpoint (which a peer token can't reach anyway).
 
-@bp.route("/recordings/<int:recording_id>")
+@bp.route("/recordings/<int:recording_id>", strict_slashes=False)
 @peer_required
 def recording_detail(recording_id):
     peer = current_peer()
@@ -212,6 +217,14 @@ def recording_detail(recording_id):
 
     return jsonify({
         "id":               rec.id,
+        # The recording page's NEXT call: it fetches /performances/<id> for
+        # performer, date, venue and personnel. Omitting this (2026-08-08) left
+        # the page with nothing to look up, so it rendered its local empty
+        # state — "Set performer / Add date / Add venue" — as though the record
+        # were unfilled rather than the fetch never having happened.
+        "performance_id":   rec.performance_id,
+        "title":            rec.title,
+        "is_favorite":      bool(rec.is_favorite),
         # Show identity (self-contained, so the peer client needs no other call)
         "performer":        p.performer.name if (p and p.performer) else None,
         # Nav ids (2026-08-08). Milestone 1 sent names only, which was right
@@ -267,7 +280,7 @@ def recording_detail(recording_id):
 # The one enforcement point that matters: same access check as browse, then a
 # transcoded (never raw-FLAC) stream. Logs one access row per play-start.
 
-@bp.route("/stream/<int:track_id>")
+@bp.route("/stream/<int:track_id>", strict_slashes=False)
 @peer_required
 def stream(track_id):
     peer = current_peer()
@@ -344,7 +357,7 @@ def _visible_recordings(peer, recordings):
 # /recordings sub-route below. The only change from the local payload is the
 # image URL prefix, because a peer cannot reach /api/performers/images/<id>.
 
-@bp.route("/performers/<int:performer_id>")
+@bp.route("/performers/<int:performer_id>", strict_slashes=False)
 @peer_required
 def performer_detail(performer_id):
     from app.models.performer import Performer
@@ -391,7 +404,7 @@ def performer_detail(performer_id):
 # entirely, and a visible performance's recordings are themselves filtered —
 # two tapers of one night can land in different collections.
 
-@bp.route("/performers/<int:performer_id>/recordings")
+@bp.route("/performers/<int:performer_id>/recordings", strict_slashes=False)
 @peer_required
 def performer_recordings(performer_id):
     from app.models.performance import Performance
@@ -444,7 +457,7 @@ def performer_recordings(performer_id):
 # the image id — otherwise a peer could walk image ids and pull the face of
 # every act in a library they were never granted.
 
-@bp.route("/performers/images/<int:image_id>")
+@bp.route("/performers/images/<int:image_id>", strict_slashes=False)
 @peer_required
 def performer_image(image_id):
     from app.models.performer_image import PerformerImage
@@ -466,7 +479,7 @@ def performer_image(image_id):
 # that publishes exactly how much of that venue Ryan holds. Both counts here
 # are computed over the filtered lists.
 
-@bp.route("/venues/<int:venue_id>")
+@bp.route("/venues/<int:venue_id>", strict_slashes=False)
 @peer_required
 def venue_detail(venue_id):
     from app.models.venue import Venue
@@ -510,7 +523,7 @@ def venue_detail(venue_id):
 # page listing bands whose shows aren't shared would name acts by the back
 # door. Guest appearances are filtered to visible performances.
 
-@bp.route("/artists/<int:artist_id>")
+@bp.route("/artists/<int:artist_id>", strict_slashes=False)
 @peer_required
 def artist_detail(artist_id):
     from app.models.artist import Artist
@@ -578,7 +591,7 @@ def artist_detail(artist_id):
 # Genres with nothing visible are omitted entirely rather than shown as zero —
 # a zero row still names a genre the peer has no access to.
 
-@bp.route("/genres/")
+@bp.route("/genres/", strict_slashes=False)
 @peer_required
 def list_genres():
     from app.models.genre import Genre
@@ -619,4 +632,288 @@ def list_genres():
             "recording_count": len(recordings_by_genre.get(g.id, ())),
         }
         for g in genres
+    ])
+
+
+# ── GET /api/share/genres/<id> ────────────────────────────────────────────────
+# Mirrors local get_genre. Performers are narrowed to those with something
+# visible, their recording lists to the visible set, and BOTH counts are
+# recomputed from the filtered rows rather than carried over from the genre's
+# true totals. A genre whose every recording is ungranted 404s rather than
+# rendering as an empty page — an empty page still confirms the genre is here.
+
+@bp.route("/genres/<int:genre_id>", strict_slashes=False)
+@peer_required
+def genre_detail(genre_id):
+    from app.models.genre import Genre
+    from app.models.performance import Performance
+    from app.models.performer import Performer
+    from app.utils.serialize import recording_summary
+    from sqlalchemy import func
+
+    peer = current_peer()
+    g_row = db.session.get(Genre, genre_id)
+    if g_row is None:
+        abort(404)
+
+    visible_performer_ids = peer_visible_performer_ids(peer)
+    visible_perf_ids = peer_visible_performance_ids(peer)
+    if not visible_performer_ids:
+        abort(403)
+
+    performers = (
+        db.session.query(Performer)
+        .filter(Performer.genre_id == genre_id,
+                Performer.id.in_(visible_performer_ids))
+        .order_by(func.coalesce(Performer.sort_name, Performer.name))
+        .all()
+    )
+    if not performers:
+        abort(403)
+
+    perf_rows = []
+    total_recordings = 0
+    for p in performers:
+        performances = (
+            db.session.query(Performance)
+            .filter(Performance.performer_id == p.id,
+                    Performance.id.in_(visible_perf_ids))
+            .order_by(
+                Performance.start_year.desc().nullsfirst(),
+                Performance.start_month.desc().nullsfirst(),
+                Performance.start_day.desc().nullsfirst(),
+            ).all()
+        )
+        recordings = []
+        for perf in performances:
+            v = perf.venue
+            for r in _visible_recordings(peer, perf.recordings):
+                row = recording_summary(r)
+                row.update({
+                    "performer":   p.name,
+                    "start_year":  perf.start_year,
+                    "start_month": perf.start_month,
+                    "start_day":   perf.start_day,
+                    "venue":       v.name    if v else None,
+                    "city":        v.city    if v else perf.city,
+                    "state":       v.state   if v else perf.state,
+                    "country":     v.country if v else perf.country,
+                })
+                recordings.append(row)
+        if not recordings:
+            continue
+        total_recordings += len(recordings)
+        perf_rows.append({
+            "id":              p.id,
+            "name":            p.name,
+            "recording_count": len(recordings),
+            "recordings":      recordings,
+        })
+
+    return jsonify({
+        "id":              g_row.id,
+        "name":            g_row.name,
+        "description":     g_row.description,
+        "color":           g_row.color,
+        "performer_count": len(perf_rows),
+        "recording_count": total_recordings,
+        "performers":      perf_rows,
+    })
+
+
+# ── GET /api/share/performances/<id> ──────────────────────────────────────────
+# The recording page's second call. app.js fetches the RECORDING for tracks and
+# metadata, then the PERFORMANCE for who/when/where — performer, date, venue and
+# resolved personnel live here, not on the recording.
+#
+# Missing it (2026-08-08) is why a peer's View Recording page rendered "Set
+# performer / Add date / Add venue": the page had a recording with no
+# performance to describe it, so it fell back to its empty-state prompts and
+# looked like an unfilled local record rather than a failed remote fetch.
+
+@bp.route("/performances/<int:performance_id>", strict_slashes=False)
+@peer_required
+def performance_detail(performance_id):
+    from app.models.performance import Performance
+    from app.utils.personnel import resolve_performance_personnel
+    from app.utils.serialize import recording_summary
+
+    peer = current_peer()
+    if performance_id not in peer_visible_performance_ids(peer):
+        abort(403)
+    p = db.session.get(Performance, performance_id)
+    if p is None:
+        abort(404)
+
+    v = p.venue
+    resolved = resolve_performance_personnel(p)
+    return jsonify({
+        "id":             p.id,
+        "performer_id":   p.performer_id,
+        "performer":      p.performer.name if p.performer else None,
+        "members":        [{"id": r["artist_id"], "name": r["name"]} for r in resolved],
+        "personnel":      resolved,
+        "personnel_mode": p.personnel_mode,
+        "title":        p.title,
+        "stage":        p.stage,
+        "start_year":   p.start_year,
+        "start_month":  p.start_month,
+        "start_day":    p.start_day,
+        "end_year":     p.end_year,
+        "end_month":    p.end_month,
+        "end_day":      p.end_day,
+        "venue_id":     v.id      if v else None,
+        "venue_name":   v.name    if v else None,
+        "city":         v.city    if v else p.city,
+        "state":        v.state   if v else p.state,
+        "country":      v.country if v else p.country,
+        "event_id":     p.event_id,
+        "event_name":   p.event.name if p.event else None,
+        "notes":        p.notes,
+        # Only the recordings of this show that the peer was actually granted —
+        # two tapers of one night can sit in different collections.
+        "recordings":   [recording_summary(r) for r in _visible_recordings(peer, p.recordings)],
+    })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BROWSE MODULES  (2026-08-08)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Ryan's call: a peer gets a real Library page built from the granted set, not
+# just a list of collections. app.js composes Browse from five independent
+# fetches and hides any module whose fetch fails or comes back empty, so these
+# mirror the local paths one for one and the page assembles itself.
+#
+# The Recommended algorithm is NOT reimplemented here. Its diversity rules
+# (distinct performer as a hard rule, distinct genre as a soft preference,
+# unplayed weighting, date-stable seeding) are subtle enough that a second copy
+# would drift within a month. The helpers are imported and fed a filtered pool
+# instead — the same compromise made for _serialize_roster, and for the same
+# reason: they are pure functions that happen to live in a views module.
+
+@bp.route("/recordings/recent", strict_slashes=False)
+@peer_required
+def recent_recordings():
+    """Recently Added, scoped. Ingest order is the owner's, not the peer's —
+    a peer sees the owner's most recently added SHARED shows, which is the
+    only meaning available and a reasonable one."""
+    peer = current_peer()
+    visible = peer_visible_recording_ids(peer)
+    if not visible:
+        return jsonify([])
+
+    limit = request.args.get("limit", 50, type=int) or 50
+    limit = max(1, min(limit, 200))
+    card = request.args.get("card", "").lower() in ("1", "true", "yes")
+
+    from app.api.recordings import _card_eager
+    query = Recording.query.filter(Recording.id.in_(visible))
+    if card:
+        query = _card_eager(query)
+    recs = query.order_by(Recording.created_at.desc()).limit(limit).all()
+    return jsonify([recording_row(r, card=card) for r in recs])
+
+
+@bp.route("/recordings/recommended", strict_slashes=False)
+@peer_required
+def recommended_recordings():
+    import random
+    from datetime import date as _date
+    from app.api.recordings import (
+        _card_eager, _recommended_pool_query, _genre_by_performer, _select_diverse,
+    )
+
+    peer = current_peer()
+    visible = peer_visible_recording_ids(peer)
+    if not visible:
+        return jsonify([])
+
+    limit = request.args.get("limit", 3, type=int) or 3
+    limit = max(1, min(limit, 12))
+    reroll = request.args.get("reroll", 0, type=int) or 0
+
+    # The one change from local: the A/A+ pool is intersected with the visible
+    # set BEFORE selection, so diversity is computed over what the peer can
+    # actually play rather than over the whole library.
+    pool = (_card_eager(_recommended_pool_query())
+            .filter(Recording.id.in_(visible)).all())
+    if not pool:
+        return jsonify([])
+
+    # No play-history weighting: play_log records the OWNER's listening, which
+    # is none of the peer's business and no guide to what they have heard.
+    perf_by_rec = {r.id: (r.performance.performer_id if r.performance else None)
+                   for r in pool}
+    genre_by_performer = _genre_by_performer(
+        {pid for pid in perf_by_rec.values() if pid is not None})
+
+    rnd = random.Random(f"{_date.today().isoformat()}:{reroll}")
+    ordered = list(pool)
+    rnd.shuffle(ordered)
+
+    picks = _select_diverse(ordered, limit, perf_by_rec, genre_by_performer)
+    return jsonify([recording_row(r, card=True) for r in picks])
+
+
+@bp.route("/recordings/on-this-day", strict_slashes=False)
+@peer_required
+def on_this_day():
+    from app.models.performance import Performance
+
+    peer = current_peer()
+    visible = peer_visible_recording_ids(peer)
+    if not visible:
+        return jsonify([])
+
+    today = datetime.now(timezone.utc).date()
+    recs = (Recording.query
+            .join(Performance, Recording.performance_id == Performance.id)
+            .filter(Recording.id.in_(visible),
+                    Performance.start_month == today.month,
+                    Performance.start_day == today.day)
+            .order_by(Performance.start_year.asc().nullslast())
+            .all())
+    return jsonify([recording_row(r) for r in recs])
+
+
+@bp.route("/performers/", strict_slashes=False)
+@peer_required
+def list_performers():
+    """
+    Acts with something visible, and counts over the visible set only.
+
+    Note this is a list endpoint, which the entity-page design deliberately
+    avoided — a peer must not be able to enumerate a library. It is safe here
+    for the same reason the artist page is: it can only ever contain acts the
+    peer already reached through a granted recording. The dangerous version
+    would be an unfiltered index, and this is not that.
+    """
+    from app.models.performance import Performance
+    from app.models.performer import Performer
+    from sqlalchemy import func
+
+    peer = current_peer()
+    visible = peer_visible_recording_ids(peer)
+    if not visible:
+        return jsonify([])
+
+    rows = (db.session.query(Performer, func.count(Recording.id).label("rc"))
+            .join(Performance, Performance.performer_id == Performer.id)
+            .join(Recording, Recording.performance_id == Performance.id)
+            .filter(Recording.id.in_(visible))
+            .group_by(Performer.id)
+            .order_by(func.coalesce(Performer.sort_name, Performer.name))
+            .all())
+    return jsonify([
+        {
+            "id":              p.id,
+            "name":            p.name,
+            "sort_name":       p.sort_name,
+            "recording_count": rc,
+            "members":         [a.name for a in p.artists],
+            "genre_id":        p.genre_id,
+            "genre_name":      p.genre.name if p.genre else None,
+        }
+        for p, rc in rows
     ])

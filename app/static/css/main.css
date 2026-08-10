@@ -266,6 +266,22 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Pushes the reference dimensions (Venues, Performers, Artists, Genres) to the
+   foot of the sidebar, just above the user bar (Ryan, 2026-08-08). They are
+   indexes for re-finding something you know exists — useful, but not what the
+   top of the sidebar is for. Collections stays up top with Library and
+   Recently Added because it is working navigation, not a reference index.
+   Collapses to nothing when the nav is short enough not to need it. */
+.nav-spacer { flex: 1 1 auto; min-height: 12px; }
+
+.nav-dims-foot {
+  border-top: 1px solid var(--bd-0);
+  padding-top: 6px;
+  flex-shrink: 0;
 }
 .sidebar-nav::-webkit-scrollbar { width: 4px; }
 .sidebar-nav::-webkit-scrollbar-track { background: transparent; }

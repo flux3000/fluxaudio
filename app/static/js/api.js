@@ -6,7 +6,53 @@
 
 const API = (() => {
 
+  // ── Library context (peer sharing milestone 2, 2026-08-08) ─────────────────
+  //
+  // `null` = my own library. A number = the id of a joined remote_node, and
+  // every eligible request is rewritten to travel through the local proxy:
+  //
+  //     /api/performers/12  →  /api/remotes/3/performers/12
+  //
+  // Rewriting HERE, in one function, is what lets the existing Performer,
+  // Venue, Artist and Genre pages render a remote library with no changes of
+  // their own. The alternative — a parallel set of peer-only pages — was
+  // rejected in the Peer UX design session precisely because it would fall out
+  // of step with the local pages within a month.
+  //
+  // switchLibrary() in app.js is the only caller of setLibraryContext.
+  let _libraryContext = null
+
+  // Only these first path segments have a peer-facing equivalent in
+  // api/share.py. Everything else — auth, preferences, peers, remotes, ingest,
+  // quality — is LOCAL ONLY and must never be rewritten: asking someone else's
+  // node about my preferences is meaningless, and asking it about my peers
+  // would be a bug worth catching loudly rather than proxying politely.
+  const REMOTE_CAPABLE = new Set([
+    'collections', 'recordings', 'performances', 'performers', 'venues',
+    'artists', 'genres', 'stream',
+  ])
+
+  function contextualise(path) {
+    if (_libraryContext == null) return path
+    const m = path.match(/^\/api\/([^/?]+)/)
+    if (!m || !REMOTE_CAPABLE.has(m[1])) return path
+    return `/api/remotes/${_libraryContext}` + path.slice('/api'.length)
+  }
+
   async function request(method, path, body) {
+    // Backstop: nothing may be written to a library that isn't mine. The
+    // visible guard is the CSS gate that hides edit controls in peer mode, but
+    // a gate depends on every control being tagged, and one that isn't would
+    // otherwise send a PUT to a proxy that only speaks GET. Failing here means
+    // a missed tag is a console error in development, not a confusing 403 in
+    // front of a user.
+    // Scoped to paths that would actually be proxied — leaving a remote is a
+    // DELETE against MY database (/api/remotes/<id>) and must still work while
+    // that remote is the one on screen.
+    if (method !== 'GET' && contextualise(path) !== path) {
+      throw new Error('This library is read-only — you are viewing a shared library.')
+    }
+
     const opts = {
       method,
       headers: { 'Content-Type': 'application/json' },
@@ -14,7 +60,7 @@ const API = (() => {
     }
     if (body !== undefined) opts.body = JSON.stringify(body)
 
-    const res = await fetch(path, opts)
+    const res = await fetch(contextualise(path), opts)
     if (res.status === 204) return null
 
     const data = await res.json()
@@ -43,6 +89,22 @@ const API = (() => {
   const put  = (path, body)  => request('PUT',  path, body)
 
   return {
+    // ── Library context ─────────────────────────────────────────────────────
+    setLibraryContext: (nodeId) => { _libraryContext = nodeId },
+    getLibraryContext: ()       => _libraryContext,
+    // Non-fetch consumers (an <img src>, the audio element) need the same
+    // rewriting, since they never pass through request().
+    resolve:           (path)   => contextualise(path),
+
+    // ── Remotes (outbound sharing — libraries I consume) ─────────────────────
+    // Local-only by definition: this is how I manage MY list of remotes, so it
+    // is deliberately absent from REMOTE_CAPABLE above.
+    remotes: {
+      list:   ()        => get('/api/remotes/'),
+      enroll: (invite)  => post('/api/remotes/enroll', { invite }),
+      leave:  (id)      => request('DELETE', `/api/remotes/${id}`),
+    },
+
     // ── Auth ────────────────────────────────────────────────────────────────
     auth: {
       me:     ()             => get('/api/auth/me'),
@@ -97,7 +159,10 @@ const API = (() => {
       //
       // Images are addressed BY IMAGE ID, not by performer: a performer now has
       // several and "the performer's image" no longer identifies one.
-      imageUrl:     (imageId) => `/api/performers/images/${imageId}`,
+      // Contextualised: an <img src> never passes through request(), so it
+      // would otherwise resolve against localhost while viewing a remote
+      // library and 404 on every photo.
+      imageUrl:     (imageId) => contextualise(`/api/performers/images/${imageId}`),
       listImages:   (id)      => get(`/api/performers/${id}/images`),
       // Accepts a FileList or array — the whole drop goes in one request.
       uploadImages: async (id, files) => {

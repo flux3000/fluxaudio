@@ -771,7 +771,9 @@ const App = (() => {
           ${icon ? `<span class="nav-icon">${icon}</span>` : ''}
           <span class="nav-dim-label truncate">${label}</span>
           <span class="nav-dim-actions">
-            <span class="nav-action" data-act="new" title="Create new ${esc(singular)}">＋</span>
+            ${libraryState.activeId != null ? '' :
+              `<span class="nav-action" data-act="new" data-admin
+                     title="Create new ${esc(singular)}">＋</span>`}
             <span class="nav-action" data-act="refresh" title="Refresh list">↻</span>
           </span>
           <span class="nav-caret ${open ? 'open' : ''}">▸</span>
@@ -930,10 +932,25 @@ const App = (() => {
   function switchLibrary(id) {
     if (libraryState.activeId === id) return
     libraryState.activeId = id
+    // Tell api.js first — everything rendered after this line must resolve
+    // against the new library, and route() below re-renders immediately.
+    API.setLibraryContext(id)
     applyPeerTheme()
     window.location.hash = '#/'
     renderSidebar()
     route()
+  }
+
+  // Joined remote libraries. Failure is deliberately silent: a remote list that
+  // can't be fetched leaves `remotes` empty, the selector renders as a plain
+  // label, and the app behaves exactly as it did before remotes existed —
+  // rather than blocking startup over a feature the user may not be using.
+  async function loadRemotes() {
+    try {
+      libraryState.remotes = await API.remotes.list()
+    } catch (_) {
+      libraryState.remotes = []
+    }
   }
 
   // Peer mode retints the CHROME only — surfaces and accent. Genre colours are
@@ -947,17 +964,40 @@ const App = (() => {
     const nav = document.getElementById('sidebar-nav')
     if (!nav) return
     _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = _dimCache.genres = null
-    nav.innerHTML = `
+
+    // A shared library offers a deliberately narrower sidebar. This is not
+    // squeamishness about peer mode — it is that api/share.py has no LIST
+    // endpoint for venues, performers or artists, by design: a peer reaches
+    // those pages FROM a recording they were granted, never by browsing an
+    // index of everything the owner holds. Rendering sections that could only
+    // ever be empty would advertise a door that isn't there.
+    //
+    // Collections and Genres do have peer-facing lists (both scoped to the
+    // visible set), so both stay. Add Recordings and Sharing are local
+    // operations on my own library and are meaningless here.
+    // A shared library gets Library + Collections and nothing else (Ryan,
+    // 2026-08-08). The dimension indexes are dropped entirely rather than
+    // moved: a peer reaches a performer, venue or genre page FROM a recording
+    // they were granted, and an index listing three genres is noise pretending
+    // to be navigation. The pages themselves still exist and still work.
+    const remote = libraryState.activeId != null
+    nav.innerHTML = remote ? `
+      ${librarySelectorHtml()}
+      <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
+      ${_dimSection('collections', null, 'Collections', true)}` : `
       ${librarySelectorHtml()}
       <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recordings</a>
       <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
       <a class="nav-item nav-top" data-nav="recent" href="#/recent"><span class="nav-icon">◷</span> Recently Added</a>
       <a class="nav-item nav-top" data-nav="peers" href="#/peers"><span class="nav-icon">⇄</span> Sharing</a>
       ${_dimSection('collections', null, 'Collections', true)}
-      ${_dimSection('venues', '◎', 'Venues')}
-      ${_dimSection('performers', '✦', 'Performers')}
-      ${_dimSection('artists', '♪', 'Artists')}
-      ${_dimSection('genres', '♫', 'Genres')}`
+      <div class="nav-spacer"></div>
+      <div class="nav-dims-foot">
+        ${_dimSection('venues', '◎', 'Venues')}
+        ${_dimSection('performers', '✦', 'Performers')}
+        ${_dimSection('artists', '♪', 'Artists')}
+        ${_dimSection('genres', '♫', 'Genres')}
+      </div>`
     nav.querySelectorAll('.nav-expand').forEach(el => {
       el.addEventListener('click', e => {
         if (e.target.closest('.nav-action')) return
@@ -9576,6 +9616,7 @@ const App = (() => {
       state.user = user
       setUserUI(user)
       showApp()
+      await loadRemotes()
       await loadArtistList()
       route()
     } catch (e) {
@@ -9670,6 +9711,10 @@ const App = (() => {
       state.user = user
       setUserUI(user)
       showApp()
+      // Before the sidebar renders: the library selector reads
+      // libraryState.remotes, and a selector that appears as a plain label and
+      // then sprouts a dropdown a moment later reads as a glitch.
+      await loadRemotes()
       await loadArtistList()
       route()
     } catch (e) {

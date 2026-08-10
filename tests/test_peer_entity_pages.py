@@ -198,6 +198,43 @@ def test_genres_omit_those_with_nothing_visible(app, world):
     assert "Funk" not in names, "named a genre the peer has no access to"
 
 
+def test_genre_detail_is_reachable_and_scoped(app, world):
+    """The list endpoint existed without a detail endpoint, so clicking a genre
+    in the sidebar answered 404 and the UI said 'This genre no longer exists'.
+    A list whose items cannot be opened is worse than no list."""
+    c = app.test_client()
+    gid = world["shared"]["genre"]
+    r = c.get(f"/api/share/genres/{gid}", headers=_auth(world))
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["name"] == "Jazz"
+    assert body["performer_count"] == 1
+    assert body["recording_count"] == 1
+    names = {p["name"] for p in body["performers"]}
+    assert names == {"Shared Band"}
+
+
+def test_ungranted_genre_detail_is_refused(app, world):
+    c = app.test_client()
+    r = c.get(f"/api/share/genres/{world['secret']['genre']}", headers=_auth(world))
+    assert r.status_code in (403, 404)
+
+
+@pytest.mark.parametrize("path", [
+    "/api/share/collections",
+    "/api/share/collections/",
+    "/api/share/genres",
+    "/api/share/genres/",
+])
+def test_trailing_slash_is_tolerated(app, world, path):
+    """The consumer proxies paths built by the LOCAL api.js, which is
+    inconsistent about trailing slashes (/api/collections/ vs /api/venues/12).
+    A mismatch here 404s and renders as an empty library — which is exactly how
+    the granted collection went missing from the sidebar."""
+    c = app.test_client()
+    assert c.get(path, headers=_auth(world)).status_code == 200
+
+
 def test_genre_counts_are_scoped(app, world):
     c = app.test_client()
     r = c.get("/api/share/genres/", headers=_auth(world))
