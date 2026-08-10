@@ -62,5 +62,48 @@ def delete_api_key(user_id):
         pass
 
 
+# ── Remote-node tokens (OS keychain) ──────────────────────────────────────────
+# Outbound peer sharing (milestone 2, 2026-08-08). The token a remote Flux node
+# issued me at enrollment. Same reasoning as the BYOK key above: the DB records
+# that a remote exists, never the credential to reach it.
+#
+# Unlike the inbound peer_token, this CANNOT be hashed — it has to be replayed
+# verbatim on every proxied request. Keychain or plaintext were the only two
+# options, and fluxaudio.db gets copied to dev rigs and backed up.
+
+def _remote_account(node_id):
+    return "remote_token:%s" % node_id
+
+
+def get_remote_token(node_id):
+    """The token for a remote node, or None if the keychain is unavailable or
+    holds nothing. Callers must treat None as 'cannot connect', NOT as 'the
+    remote returned an empty library' — those look identical in a UI and only
+    one of them is the user's problem."""
+    if not _HAS_KEYRING:
+        return None
+    try:
+        return keyring.get_password(_SERVICE, _remote_account(node_id))
+    except Exception:
+        return None
+
+
+def set_remote_token(node_id, token):
+    if not _HAS_KEYRING:
+        raise RuntimeError("OS keychain unavailable")
+    keyring.set_password(_SERVICE, _remote_account(node_id), token)
+
+
+def delete_remote_token(node_id):
+    """Best effort — leaving a remote must succeed even if the keychain entry
+    is already gone."""
+    if not _HAS_KEYRING:
+        return
+    try:
+        keyring.delete_password(_SERVICE, _remote_account(node_id))
+    except Exception:
+        pass
+
+
 def has_api_key(user_id):
     return bool(get_api_key(user_id))

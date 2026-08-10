@@ -13,6 +13,7 @@ from .performance_personnel import PerformancePersonnel
 from .recording import Recording, RecordingFingerprint
 from .collection import Collection, CollectionRecording
 from .peer import Peer, CollectionGrant, PeerInvite, PeerToken, PeerAccessLog
+from .remote_node import RemoteNode
 from .recording_event import RecordingEvent
 from .track import Track
 from .play_log import PlayLog
