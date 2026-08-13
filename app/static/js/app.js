@@ -5671,7 +5671,7 @@ const App = (() => {
     setActiveNav('ingest')
     setNavCurrent('Add Recordings')
     const defaultDir = (await getPrefs()).import_dir
-                       || '/Volumes/music/Flux Workshop/Download'
+                       || '/Volumes/music/Flux Audio/Download'
 
     setMainHTML(`
       <div class="lq-wrap">
@@ -6423,7 +6423,7 @@ const App = (() => {
         <button class="lq-act lq-act--move" data-path="${esc(row.folder_path)}">Move ›</button>
         <div class="lq-move-menu" hidden>
           <button class="lq-move-opt" data-dest="backlog" data-path="${esc(row.folder_path)}">Backlog</button>
-          <button class="lq-move-opt" data-dest="working" data-path="${esc(row.folder_path)}">Working</button>
+          <button class="lq-move-opt" data-dest="workshop" data-path="${esc(row.folder_path)}">Workshop</button>
         </div>
       </div>
     </div>`

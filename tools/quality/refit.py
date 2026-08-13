@@ -64,7 +64,7 @@ def _engine():
 
 CACHE = os.path.join(_HERE, "labelled_corpus.json")
 DB = os.path.join(_REPO, "db", "fluxaudio.db")
-LIB = os.environ.get("LIBRARY_ROOT", "/Volumes/music/Flux Library")
+LIB = os.environ.get("LIBRARY_ROOT", "/Volumes/music/Flux Audio/Library")
 
 # Letter grade -> points. Mid-band of each letter; the exact spacing matters
 # less than the ordering, and this is the mapping every 2026-07-31 number was

@@ -794,7 +794,7 @@ def _shortcuts():
 def move_out_of_queue():
     """
     POST /api/quality/move
-      { "folder_path": "...", "destination": "backlog" | "working" }
+      { "folder_path": "...", "destination": "backlog" | "workshop" }
 
     Physically moves a show out of the ingest queue — the triage "not this one,
     not now" action.  Because the folder leaves the scanned directory it simply

@@ -709,6 +709,176 @@ def test_scan_folder_single_disc_subdir_not_flagged_as_set(tmp_path):
     assert result["sets_detected"] is False
 
 
+# ── Spelled-out disc folders + multi-disc show resolution (2026-08-12) ──────
+# Ryan's report: `del01-09-22` (disc one / disc two) came into the triage queue
+# as TWO recordings. Two causes, one folder: the set pattern required DIGITS so
+# "disc one" matched nothing, and resolve_shows() expanded any parent with 2+
+# audio-bearing subdirs into separate shows. A multi-disc show is one show.
+
+def test_parse_set_dir_word_and_digit_forms():
+    """Both spellings resolve to the same canonical label, and the two
+    deliberate exclusions hold: a bare 'd' prefix never takes a word number
+    (or the staging folder 'done' becomes 'Disc 1'), and a prefix with no
+    number at all is not a set."""
+    from app.utils.ingest import _parse_set_dir
+    assert _parse_set_dir("disc one")  == ("Disc 1", 1)
+    assert _parse_set_dir("Disc Two")  == ("Disc 2", 2)
+    assert _parse_set_dir("Set_Three") == ("Set 3", 3)
+    assert _parse_set_dir("vol two")   == ("Vol 2", 2)
+    assert _parse_set_dir("cd1")       == ("CD 1", 1)
+    assert _parse_set_dir("CD 02")     == ("CD 2", 2)   # zero-pad normalised
+    assert _parse_set_dir("d-3")       == ("Disc 3", 3)
+    for junk in ("done", "disc", "setlist", "Artwork", "dm1996-05-31d1", ""):
+        assert _parse_set_dir(junk) is None, junk
+
+
+def test_resolve_shows_treats_multi_disc_folder_as_one_show(tmp_path):
+    """A parent whose audio-bearing subdirs are named for discs resolves to
+    ITSELF — one show — while a genuine grouping folder (dated subdirs) still
+    expands. This is the triage-queue half of the bug."""
+    from app.utils.ingest import resolve_shows, resolve_shows_in_dir
+    imp = tmp_path / "import"; imp.mkdir()
+
+    show = imp / "del01-09-22"; show.mkdir()
+    d1 = show / "disc one"; d1.mkdir()
+    d2 = show / "disc two"; d2.mkdir()
+    for n in range(1, 19):
+        (d1 / f"del01-09-22d1t{n:02d}.flac").write_bytes(b"x")
+    for n in range(1, 9):
+        (d2 / f"del01-09-22d2t{n:02d}.flac").write_bytes(b"x")
+
+    grouping = imp / "Some Artist"; grouping.mkdir()
+    for day in ("1977-05-08", "1977-05-09"):
+        sub = grouping / day; sub.mkdir()
+        (sub / "01.flac").write_bytes(b"x")
+
+    assert resolve_shows(str(show)) == [str(show)]
+    resolved = resolve_shows_in_dir(str(imp))
+    assert resolved == [str(show), str(grouping / "1977-05-08"),
+                        str(grouping / "1977-05-09")]
+
+
+def test_scan_folder_spelled_out_disc_subdirs(tmp_path):
+    """The ingest-scanner half: 'disc one'/'disc two' are sets, so the 26
+    tracks land as ONE recording numbered 1..26 with disc two starting at 19,
+    and each disc's own .md5 is still picked up for per-disc scoping."""
+    show = tmp_path / "del01-09-22"; show.mkdir()
+    d1 = show / "disc one"; d1.mkdir()
+    d2 = show / "disc two"; d2.mkdir()
+    for n in range(1, 19):
+        (d1 / f"del01-09-22d1t{n:02d}.flac").write_bytes(b"x")
+    for n in range(1, 9):
+        (d2 / f"del01-09-22d2t{n:02d}.flac").write_bytes(b"x")
+    (d1 / "del01-09-22d1.md5").write_text("x\n")
+    (d2 / "del01-09-22d2.md5").write_text("x\n")
+
+    result = scan_folder(str(show))
+
+    assert result["sets_detected"] is True
+    assert len(result["audio_files"]) == 26
+    assert [f["index"] for f in result["audio_files"]] == list(range(1, 27))
+    assert [f["set_number"] for f in result["audio_files"]] == ["Disc 1"] * 18 + ["Disc 2"] * 8
+    d2_first = next(f for f in result["audio_files"] if "d2t01" in f["filename"])
+    assert d2_first["index"] == 19
+    assert sorted(f["filename"] for f in result["fingerprints"]) == [
+        "del01-09-22d1.md5", "del01-09-22d2.md5"]
+
+
+# ── Filename-encoded discs (2026-08-12) ─────────────────────────────────────
+# Ryan's report: Pat Metheny 1979-06-14 ingested with duplicate track numbers
+# (01,01,02,02...). Source was FLAT — no CD1/CD2 subdirs — with the disc in the
+# FILENAME (D01T01..D01T09, D02T01..D02T07). Subdir-only set detection saw one
+# folder, sets_detected stayed False, and the wizard fell back to trusting each
+# file's TRACKNUMBER tag, which resets per disc. Same bug as 2026-07-14, with
+# the disc number carried by the filename instead of a directory.
+
+def test_scan_folder_detects_disc_prefix_in_filenames(tmp_path):
+    """Flat folder, disc encoded as 'D01T01.' — sets_detected True, labels
+    stamped, and index continuous across discs in (disc, track) order rather
+    than in whatever order the filesystem listed them."""
+    root = tmp_path / "flat_dtprefix"; root.mkdir()
+    for n in range(1, 10):
+        (root / f"D01T{n:02d}. Band - Song {n}.flac").write_bytes(b"x")
+    for n in range(1, 8):
+        (root / f"D02T{n:02d}. Band - Other {n}.flac").write_bytes(b"x")
+    (root / "info.txt").write_text("Some show notes\n")
+
+    result = scan_folder(str(root))
+
+    assert result["sets_detected"] is True
+    assert len(result["audio_files"]) == 16
+    assert [f["index"] for f in result["audio_files"]] == list(range(1, 17))
+    assert [f["set_number"] for f in result["audio_files"]] == ["Disc 1"] * 9 + ["Disc 2"] * 7
+    # Disc 2 track 1 must land at index 10, not interleaved with disc 1's track 1
+    assert result["audio_files"][9]["filename"].startswith("D02T01")
+    assert [t["filename"] for t in result["text_files"]] == ["info.txt"]
+
+
+def test_scan_folder_filename_disc_variants_and_ordering(tmp_path):
+    """cd1t05 / CD2-03 style prefixes resolve to the same label vocabulary as
+    subdir detection ('CD 1'), and numeric ordering beats lexical ordering
+    (t10 after t2, which a plain filename sort would get wrong)."""
+    root = tmp_path / "flat_cd"; root.mkdir()
+    for n in (1, 2, 10):
+        (root / f"cd1t{n}.flac").write_bytes(b"x")
+    (root / "CD2-03.flac").write_bytes(b"x")
+
+    result = scan_folder(str(root))
+
+    assert result["sets_detected"] is True
+    assert [f["filename"] for f in result["audio_files"]] == [
+        "cd1t1.flac", "cd1t2.flac", "cd1t10.flac", "CD2-03.flac"]
+    assert [f["set_number"] for f in result["audio_files"]] == ["CD 1"] * 3 + ["CD 2"]
+
+
+def test_scan_folder_filename_disc_requires_all_files_and_two_discs(tmp_path):
+    """Two guards, both no-ops rather than half-labelled sets: a single disc
+    isn't multi-anything, and one unprefixed file means the convention isn't
+    really in use (a bonus track shouldn't turn the rest into 'Disc 1')."""
+    single = tmp_path / "one_disc"; single.mkdir()
+    for n in (1, 2, 3):
+        (single / f"d01t{n:02d}.flac").write_bytes(b"x")
+    r1 = scan_folder(str(single))
+    assert r1["sets_detected"] is False
+    assert all(f["set_number"] is None for f in r1["audio_files"])
+
+    mixed = tmp_path / "mixed"; mixed.mkdir()
+    (mixed / "d01t01.flac").write_bytes(b"x")
+    (mixed / "d02t01.flac").write_bytes(b"x")
+    (mixed / "bonus encore.flac").write_bytes(b"x")
+    r2 = scan_folder(str(mixed))
+    assert r2["sets_detected"] is False
+
+
+def test_scan_folder_ordinary_filenames_are_not_disc_prefixes(tmp_path):
+    """Regression guard on the regex: a normal single-disc show numbered
+    01/02/03 must not be read as disc-prefixed, or every flat recording in
+    the library would sprout set labels."""
+    root = tmp_path / "normal"; root.mkdir()
+    for n in (1, 2, 3):
+        (root / f"{n:02d} - Song {n}.flac").write_bytes(b"x")
+    result = scan_folder(str(root))
+    assert result["sets_detected"] is False
+    assert [f["index"] for f in result["audio_files"]] == [1, 2, 3]
+
+
+def test_scan_folder_subdirs_win_over_filename_prefixes(tmp_path):
+    """When BOTH signals are present, the subdir pass owns the result — the
+    filename pass is explicitly a fallback and must not renumber a list that
+    subdir detection already ordered."""
+    root = tmp_path / "both"; root.mkdir()
+    cd1 = root / "CD1"; cd1.mkdir()
+    cd2 = root / "CD2"; cd2.mkdir()
+    (cd1 / "d01t01.flac").write_bytes(b"x")
+    (cd1 / "d01t02.flac").write_bytes(b"x")
+    (cd2 / "d02t01.flac").write_bytes(b"x")
+
+    result = scan_folder(str(root))
+    assert result["sets_detected"] is True
+    assert [f["set_number"] for f in result["audio_files"]] == ["CD 1", "CD 1", "CD 2"]
+    assert [f["index"] for f in result["audio_files"]] == [1, 2, 3]
+
+
 def test_compute_audio_rename_map_pads_and_dedupes():
     """Zero-padding scales to the highest track number (2-digit minimum),
     and a naming collision (two tracks that would produce the same flat

@@ -51,7 +51,7 @@ import unicodedata
 from datetime import datetime
 
 DEFAULT_DB = os.path.expanduser("~/Workshop/dev/fluxaudio/db/fluxaudio.db")
-DEFAULT_LIB = "/Volumes/music/Flux Library"
+DEFAULT_LIB = "/Volumes/music/Flux Audio/Library"
 
 AUDIO_EXT = (".flac", ".wav", ".aiff", ".aif", ".shn", ".ape")
 JUNK = {".ds_store", "thumbs.db", "desktop.ini", ".apdisk"}

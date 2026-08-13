@@ -54,7 +54,7 @@ class Config:
     # Tracks are referenced by ID; this path never leaves the server.
     LIBRARY_ROOT = Path(os.environ.get(
         "LIBRARY_ROOT",
-        "/Volumes/music/Flux Library"
+        "/Volumes/music/Flux Audio/Library"
     ))
 
     # Allowlist of base directories the ingest-preview endpoint is permitted
@@ -70,12 +70,13 @@ class Config:
 
     # Where new material lands before ingest. This is the folder every "pick a
     # folder" box should open to. Defined here rather than hardcoded in the
-    # frontend so there is one place to change it — it moved once already
-    # (from Live Music Archive/Workshop/Import) and the old value was baked
-    # into app.js.
+    # frontend so there is one place to change it — it has moved twice now
+    # (Live Music Archive/Workshop/Import -> Flux Workshop/Download ->
+    # Flux Audio/Download, 2026-08-13) and an old value was once baked into
+    # app.js.
     IMPORT_DIR = os.environ.get(
         "IMPORT_DIR",
-        "/Volumes/music/Flux Workshop/Download"
+        "/Volumes/music/Flux Audio/Download"
     )
 
     # Triage destinations. During Listening Quality triage a show can be moved
@@ -85,9 +86,9 @@ class Config:
     # move, so the show leaves the scanned directory and stops being offered.
     TRIAGE_DIRS = {
         "backlog": os.environ.get(
-            "BACKLOG_DIR", "/Volumes/music/Flux Workshop/Backlog"),
-        "working": os.environ.get(
-            "WORKING_DIR", "/Volumes/music/Flux Workshop/Working"),
+            "BACKLOG_DIR", "/Volumes/music/Flux Audio/Backlog"),
+        "workshop": os.environ.get(
+            "WORKSHOP_DIR", "/Volumes/music/Flux Audio/Workshop"),
     }
 
     # ── App ───────────────────────────────────────────────────

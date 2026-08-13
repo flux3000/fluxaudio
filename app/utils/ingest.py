@@ -31,12 +31,59 @@ AUDIO_EXTENSIONS    = {".flac", ".mp3", ".wav"}
 FINGERPRINT_MARKERS = {"ffp", "md5", "eac", "shntool", "fingerprint", "st5"}
 TEXT_EXTENSION      = ".txt"
 
-# Subdir name patterns that indicate multi-set/disc folder structure.
-# Matched case-insensitively against the subdir basename.
-_SET_PATTERNS = re.compile(
-    r"^(cd|disc|disk|set|volume|vol|part|tape|show|d)\s*(\d+)$",
+# Subdir names that indicate multi-set/disc folder structure. Matched
+# case-insensitively against the subdir basename, in two forms.
+#
+# Traders spell the number as often as they digit it — Ryan hit `del01-09-22`
+# with `disc one` / `disc two` subdirs (2026-08-12), which matched nothing, so
+# the folder was read as a GROUPING folder and each disc queued as its own
+# recording. Hence the word form.
+_SET_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+# Digit form: "cd1", "Disc 2", "d-3". The bare "d" prefix is allowed here only.
+_SET_DIGIT_RE = re.compile(
+    r"^(cd|disc|disk|set|volume|vol|part|tape|show|d)\s*[-_]?\s*(\d+)$",
     re.IGNORECASE,
 )
+
+# Word form: "disc one", "Set_Two". A separator is REQUIRED and the bare "d"
+# prefix excluded — otherwise a staging folder named "done" parses as "Disc 1".
+_SET_WORD_RE = re.compile(
+    r"^(cd|disc|disk|set|volume|vol|part|tape|show)[\s\-_]+("
+    + "|".join(_SET_NUMBER_WORDS) + r")$",
+    re.IGNORECASE,
+)
+
+_SET_PREFIX_LABELS = {
+    "D": "Disc", "CD": "CD", "DISC": "Disc", "DISK": "Disc",
+    "VOL": "Vol", "VOLUME": "Vol", "PART": "Part", "TAPE": "Tape",
+    "SET": "Set", "SHOW": "Show",
+}
+
+
+def _parse_set_dir(name):
+    """
+    Parse a set/disc subdir name into (canonical_label, number).
+    'disc one' -> ('Disc 1', 1);  'CD 02' -> ('CD 2', 2).  None if no match.
+
+    Single source of truth for "is this folder a disc, and which one" —
+    resolve_shows() and scan_folder() both ask it, so the triage queue and the
+    ingest scanner can never disagree about whether a folder is one show.
+    """
+    name = (name or "").strip()
+    m = _SET_DIGIT_RE.match(name)
+    if m:
+        prefix, number = m.group(1), int(m.group(2))
+    else:
+        m = _SET_WORD_RE.match(name)
+        if not m:
+            return None
+        prefix, number = m.group(1), _SET_NUMBER_WORDS[m.group(2).lower()]
+    label = _SET_PREFIX_LABELS.get(prefix.upper(), prefix.title())
+    return f"{label} {number}", number
 
 # Keywords that suggest a text file is the info/setlist file rather than
 # a README or technical notes. Higher score = preferred.
@@ -108,6 +155,22 @@ def resolve_shows(path):
         return [path]
     if len(subs) == 1:
         return resolve_shows(subs[0].path)
+
+    # A multi-disc show is ONE show, not a grouping folder. When 2+ of the
+    # audio-bearing subdirs are named for a disc/set, the parent is the show
+    # and scan_folder() will flatten the discs into it with continuous track
+    # numbering. Expanding here instead queues each disc as its own recording
+    # — Ryan's `del01-09-22` report, 2026-08-12.
+    #
+    # The threshold is deliberately identical to scan_folder's own
+    # `len(set_dirs) >= 2`, and both count only audio-bearing subdirs, so the
+    # triage queue and the ingest scanner cannot disagree about what a folder
+    # is. A stray sibling that also holds audio (an "Extras" folder) does not
+    # veto the call: treating one show as two recordings is a worse and less
+    # recoverable outcome than one recording carrying an unlabelled extra.
+    if sum(1 for s in subs if _parse_set_dir(s.name)) >= 2:
+        return [path]
+
     result = []
     for sub in sorted(subs, key=lambda e: e.name.lower()):
         result.extend(resolve_shows(sub.path))
@@ -131,19 +194,88 @@ def resolve_shows_in_dir(source_dir):
 
 def _auto_set_label(subdir_name):
     """
-    Convert a subdir name like 'cd1', 'Disc 2', 'Set 1' into a canonical
-    set label like 'CD 1', 'Disc 2', 'Set 1'.  Returns None if no match.
+    Convert a subdir name like 'cd1', 'Disc 2', 'disc one' into a canonical
+    set label like 'CD 1', 'Disc 2', 'Disc 1'.  Returns None if no match.
     """
-    m = _SET_PATTERNS.match(subdir_name.strip())
+    parsed = _parse_set_dir(subdir_name)
+    return parsed[0] if parsed else None
+
+
+# Some sources are FLAT but encode the disc in the FILENAME rather than in a
+# subdir — the etree convention `d01t01.`, `cd1t05`, `s2t03`, `cd1-04`. The
+# subdir pass above sees one flat folder, reports sets_detected=False, and the
+# pipeline then trusts each file's TRACKNUMBER tag — which resets per disc,
+# producing two tracks numbered 1, two numbered 2, and so on. Same symptom as
+# the 2026-07-14 CD1/CD2 bug, different carrier for the disc number.
+# (Ryan, 2026-08-12 — Pat Metheny 1979-06-14, D01T01..D01T09 + D02T01..D02T07.)
+#
+# Anchored at the START of the basename, and _apply_filename_sets requires
+# EVERY audio file to match plus 2+ distinct disc numbers: a partial match
+# means the convention isn't really in use, and half-labelled sets are worse
+# than none. Known limitation: a prefix embedded mid-name (`gd77-05-08d1t01`)
+# is not detected — deliberately out of scope, one regex change if it shows up.
+_FILENAME_SET_RE = re.compile(
+    r"^(cd|d|s)\s*(\d{1,2})\s*(?:t|-|_)\s*(\d{1,3})(?=\D|$)",
+    re.IGNORECASE,
+)
+
+
+def _parse_filename_set(filename):
+    """
+    Parse a leading disc/track prefix off an audio filename.
+    'D01T01. Show - Song.flac' -> ('Disc 1', 1, 1).  None if no match.
+
+    Reuses _auto_set_label so a filename-carried disc produces exactly the
+    same label vocabulary as a subdir-carried one ('CD 1', 'Disc 2', 'Set 1')
+    — two sources of disc labels that disagree would surface as inconsistent
+    set names across otherwise identical recordings.
+    """
+    m = _FILENAME_SET_RE.match(os.path.basename(filename).strip())
     if not m:
         return None
-    prefix = m.group(1).upper()
-    number = m.group(2)
-    # Normalise common abbreviations
-    prefix = {"D": "Disc", "CD": "CD", "VOL": "Vol", "VOLUME": "Vol",
-              "PART": "Part", "TAPE": "Tape", "SET": "Set",
-              "SHOW": "Show", "DISK": "Disc"}.get(prefix, prefix.title())
-    return f"{prefix} {number}"
+    prefix, disc, track = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+    # "s" is unambiguous only in this position; _parse_set_dir spells it "set".
+    token = {"s": "set"}.get(prefix, prefix)
+    label = _auto_set_label(f"{token}{disc}")
+    if not label:
+        return None
+    return label, disc, track
+
+
+def _apply_filename_sets(result):
+    """
+    Second-chance set detection for flat folders whose FILENAMES carry the
+    disc (see _FILENAME_SET_RE). Mutates `result` in place: stamps
+    `set_number` on every audio file, re-sorts them into (disc, track) order
+    and renumbers `index` continuously across discs.
+
+    That continuous index is the whole point — it is the contract subdir
+    detection provides, and it is what tells the rest of the pipeline
+    (read_source_tags -> the ingest wizard -> compute_audio_rename_map) to
+    stop trusting per-disc TRACKNUMBER tags.
+
+    No-op unless every audio file matches and 2+ distinct discs are present.
+    """
+    audio = result["audio_files"]
+    if not audio:
+        return
+    parsed = [_parse_filename_set(a["filename"]) for a in audio]
+    if any(p is None for p in parsed):
+        return
+    if len({p[1] for p in parsed}) < 2:
+        return   # a lone "d1" isn't multi-anything — same rule as subdirs
+
+    order = sorted(
+        zip(audio, parsed),
+        key=lambda ap: (ap[1][1], ap[1][2], ap[0]["filename"].lower()),
+    )
+    result["audio_files"] = []
+    for i, (a, (label, _disc, _track)) in enumerate(order, start=1):
+        a["index"]      = i
+        a["set_number"] = label
+        result["audio_files"].append(a)
+
+    result["sets_detected"] = True
 
 
 def _score_text_file(filename):
@@ -226,9 +358,10 @@ def scan_folder(folder_path):
     # rest of the pipeline the FLAC TRACKNUMBER tags reset per disc.)
     set_dirs = []   # [(abs_dirpath, label, number)]
     for e in subdirs:
-        label = _auto_set_label(e)
-        if not label:
+        parsed = _parse_set_dir(e)
+        if not parsed:
             continue
+        label, num = parsed
         dpath = os.path.join(folder_path, e)
         try:
             has_audio = any(
@@ -239,7 +372,6 @@ def scan_folder(folder_path):
         except OSError:
             has_audio = False
         if has_audio:
-            num = int(_SET_PATTERNS.match(e.strip()).group(2))
             set_dirs.append((dpath, label, num))
     set_dirs.sort(key=lambda x: x[2])
     sets_detected = len(set_dirs) >= 2   # one lone "Disc 1" folder isn't multi-anything
@@ -345,6 +477,13 @@ def scan_folder(folder_path):
         for dirpath, _, filenames in os.walk(folder_path):
             for fname in sorted(filenames):
                 _classify(fname, dirpath, None)
+
+    # ── Filename-encoded sets ─────────────────────────────────────────────────
+    # Flat folder, disc in the filename (d01t01…). Runs only when the subdir
+    # pass found nothing, and after the walk so it can renumber the finished
+    # audio list rather than restructure the traversal.
+    if not sets_detected:
+        _apply_filename_sets(result)
 
     # ── Score and sort text files ──────────────────────────────────────────────
     for tf in all_text:

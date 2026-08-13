@@ -55,8 +55,8 @@ AUDIO_EXT = (".flac", ".wav", ".aiff", ".aif")
 # new material lands here before ingest, so it is what you almost always want
 # to analyse. Falls back to the library, then home, if it doesn't exist.
 DEFAULT_DIRS = [
-    os.environ.get("IMPORT_DIR", "/Volumes/music/Flux Workshop/Download"),
-    "/Volumes/music/Flux Library",
+    os.environ.get("IMPORT_DIR", "/Volumes/music/Flux Audio/Download"),
+    "/Volumes/music/Flux Audio/Library",
     os.path.expanduser("~"),
 ]
 
@@ -247,7 +247,7 @@ def _shortcuts():
     """Import folder first, then library, home, all volumes. Deduped."""
     out = []
     for s in (default_dir(),
-              os.environ.get("LIBRARY_ROOT", "/Volumes/music/Flux Library"),
+              os.environ.get("LIBRARY_ROOT", "/Volumes/music/Flux Audio/Library"),
               os.path.expanduser("~"), "/Volumes"):
         if s and os.path.isdir(s) and s not in out:
             out.append(s)
