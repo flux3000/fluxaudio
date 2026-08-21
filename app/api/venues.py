@@ -20,6 +20,7 @@ from app.models.venue_image import VenueImage
 from app.utils.serialize import recording_row
 from app.utils.ingest import _sanitize_path
 from app.utils import entity_images as ei
+from app.api.system import require_library
 
 bp = Blueprint("venues", __name__)
 
@@ -114,6 +115,7 @@ def upload_venue_images(venue_id):
 
 @bp.route("/images/<int:image_id>", methods=["GET"])
 @login_required
+@require_library(kind="image")
 def serve_venue_image(image_id):
     img = db.session.get(VenueImage, image_id)
     if not img:

@@ -457,6 +457,25 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Added 2026-08-18: main-content is now the second row of .content-column
+     rather than a direct grid child, so it has to claim the leftover height
+     itself. Without flex:1 it collapses to its content and the page loses
+     its scroll container. */
+  flex: 1;
+}
+
+/* ── Content column (2026-08-18) ────────────────────────────────────────────
+   Sits where <main> used to sit in the app-shell grid, and stacks the
+   persistent Search Bar above the page. min-width:0 is load-bearing: a grid
+   item defaults to min-content width, so a wide Track List or results table
+   would otherwise push the whole column past the viewport instead of
+   scrolling inside it. */
+.content-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .main-content::-webkit-scrollbar { width: 4px; }
@@ -5960,3 +5979,304 @@ input[type="range"].progress-bar {
 
 .rq-empty { padding: 16px; font-size: 12px; color: var(--t3); font-style: italic; }
 .rq-empty .rq-reanalyze-btn { margin: 10px 0 0; display: block; }
+
+/* ══ Search (IO-46, 2026-08-18) ═════════════════════════════════════════════
+   The Search Bar is persistent chrome above the page — distinct from the
+   Action Bar, which is per-view. Naming matters here: "Action Bar" is an
+   agreed UI-lexicon term for something else, and reusing it for this would
+   make every future instruction ambiguous. */
+
+.search-bar {
+  position: relative;
+  flex: none;
+  padding: 10px 28px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--bd-1);
+  z-index: 30;                      /* the dropdown overlays page content */
+}
+
+/* Peer mode: this searches MY library, and the page behind it is someone
+   else's. Showing a box that silently answers the wrong question is worse
+   than showing none — peer search is IO-48 and must filter through the
+   visible set or it leaks holdings. */
+html.peer-mode .search-bar { display: none; }
+
+.search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  max-width: 620px;
+  background: var(--bg-3);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md);
+  transition: border-color 0.12s, background 0.12s;
+}
+.search-field:focus-within {
+  border-color: var(--accent);
+  background: var(--bg-0);
+}
+
+.search-icon {
+  padding: 0 4px 0 10px;
+  font-size: 15px;
+  color: var(--t2);
+  line-height: 1;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  border: none;
+  background: transparent;
+  color: var(--t0);
+  font-family: var(--font);
+  font-size: 13px;
+  outline: none;
+}
+.search-input::placeholder { color: var(--t3); }
+
+.search-clear {
+  border: none;
+  background: transparent;
+  color: var(--t2);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 6px;
+  line-height: 1;
+}
+.search-clear:hover { color: var(--t0); }
+
+.search-hint {
+  margin-right: 8px;
+  padding: 1px 5px;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+}
+/* The "/" affordance is only useful while the box is empty and unfocused —
+   once there is a query it just crowds the clear button. */
+.search-field:focus-within .search-hint,
+.search-field.has-text .search-hint { display: none; }
+
+/* ── Dropdown ─────────────────────────────────────────────────────────────── */
+
+.search-dropdown {
+  position: absolute;
+  top: calc(100% - 6px);
+  left: 28px;
+  width: 620px;
+  max-width: calc(100% - 56px);
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-3);
+  border: 1px solid var(--bd-2);
+  border-radius: var(--r-md);
+  box-shadow: 0 10px 34px rgba(0,0,0,0.42);
+  padding: 4px 0;
+}
+
+.search-group-label {
+  padding: 8px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t3);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.search-group-count { color: var(--t3); font-weight: 400; letter-spacing: 0; }
+
+.search-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--t0);
+}
+.search-item:hover,
+.search-item.is-active { background: var(--accent-dim); }
+
+.search-item-name {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-item-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--t2);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-item-date {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--t1);
+  letter-spacing: 0.02em;
+}
+
+.search-more {
+  padding: 6px 12px 8px;
+  font-size: 11px;
+  color: var(--t2);
+  cursor: pointer;
+}
+.search-more:hover { color: var(--accent-lit); }
+
+.search-dropdown-empty {
+  padding: 14px 12px;
+  font-size: 12px;
+  color: var(--t2);
+}
+
+/* ── Results page ─────────────────────────────────────────────────────────── */
+
+.search-results { padding: 22px 28px 40px; }
+
+.search-results-head {
+  margin-bottom: 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--bd-0);
+}
+.search-results-title { font-size: 17px; color: var(--t0); }
+.search-results-title b { color: var(--accent-lit); font-weight: 600; }
+.search-results-sub { margin-top: 4px; font-size: 11px; color: var(--t2); }
+
+.search-section { margin-bottom: 26px; }
+.search-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.search-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t1);
+}
+.search-section-count { font-size: 11px; color: var(--t3); }
+
+.search-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--t0);
+  border-bottom: 1px solid var(--bd-0);
+}
+.search-row:hover { background: var(--bg-4); }
+.search-row-date {
+  flex: none;
+  width: 92px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--t1);
+  letter-spacing: 0.03em;
+}
+.search-row-main { flex: 1 1 auto; min-width: 0; }
+.search-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-row-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--t2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-row-right { flex: none; display: flex; align-items: center; gap: 8px; }
+
+.search-more-btn { margin-top: 10px; }
+
+/* Zero results: name the miss honestly, then offer real doors in. No fuzzy
+   "did you mean" — with 178 acts it would confidently suggest nonsense. */
+.search-zero { padding: 40px 10px; max-width: 560px; }
+.search-zero-title { font-size: 15px; color: var(--t0); margin-bottom: 6px; }
+.search-zero-body { font-size: 12px; color: var(--t2); line-height: 1.6; margin-bottom: 18px; }
+.search-zero-doors { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ── Library drive offline ──────────────────────────────────────────────────
+   LIBRARY_ROOT is an SMB share (/Volumes/music) that macOS drops on update,
+   reboot and sleep. Metadata is local SQLite and keeps working, so the app
+   stays browsable — these rules make the degraded state legible instead of
+   letting it surface as broken images and dead buttons.
+   Detection: app/utils/library_mount.py.  Repair: tools/mount_library.py. */
+
+.library-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 28px;
+  background: rgba(217,96,85,0.12);      /* --red at low alpha */
+  border-bottom: 1px solid rgba(217,96,85,0.30);
+  color: var(--t0);
+  font-size: 13px;
+  z-index: 31;                            /* above the Search Bar dropdown */
+}
+
+.library-banner-icon { color: var(--red); font-size: 14px; line-height: 1; }
+.library-banner-text { flex: 1; min-width: 0; }
+
+.library-banner-btn {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--bd-2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--t0);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.library-banner-btn:hover { background: var(--bg-4); border-color: var(--accent); }
+
+/* Peer mode: the page you are looking at streams from someone else's node, so
+   our drive is irrelevant to it. Same reasoning that hides the Search Bar. */
+html.peer-mode .library-banner { display: none; }
+
+/* ── Disabled affordances ──────────────────────────────────────────────────
+   One body class rather than tagging controls across 10k lines of renderers.
+   Anything that reads a byte off the share gets dimmed and made inert; the
+   click handlers still exist and still explain themselves if reached. */
+
+body.drive-offline .track-play,
+body.drive-offline #btn-play-all,
+body.drive-offline .player-controls,
+body.drive-offline .nav-add-btn {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* The track row itself stays clickable — you can still open, read and edit
+   metadata for a track you cannot currently hear. Only the play affordance
+   goes away. */
+body.drive-offline .track-row { cursor: default; }
+body.drive-offline .track-row:hover { background: transparent; }
+
+/* Artwork the server replaced with a placeholder SVG (api/system.py
+   require_library(kind="image")). Dimming it signals "not your real cover,
+   and not a missing file either" without a broken-image icon anywhere. */
+/* Matched on src rather than a class: perfPhotoHtml() takes its class from
+   the caller, so cards, hero portraits and the gallery all carry different
+   ones. The endpoint is the thing they genuinely have in common. */
+body.drive-offline img[src*="/api/performers/images/"],
+body.drive-offline img[src*="/api/venues/images/"] {
+  opacity: 0.45;
+  filter: grayscale(1);
+}

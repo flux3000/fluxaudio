@@ -75,6 +75,17 @@ const Player = (() => {
 
   function playIdx(idx, opts) {
     if (idx < 0 || idx >= queue.length) return
+
+    // The audio files live on the library share. Without this the <audio>
+    // element gets a 503, fires an error nobody surfaces, and the play button
+    // just... does nothing. Bail loudly instead.
+    // Peer libraries stream from the remote node, so their queue is unaffected
+    // by our drive — API.getLibraryContext() being non-null means hands off.
+    if (API.getLibraryContext() == null && App.libraryDrive.isOffline()) {
+      alert(App.libraryDrive.message())
+      return
+    }
+
     queueIdx  = idx
     const trk = currentTrack()
     const autoplay = !opts || opts.autoplay !== false
@@ -182,6 +193,12 @@ const Player = (() => {
 
   volBar.addEventListener('input', () => {
     audio.volume = parseFloat(volBar.value)
+  })
+
+  // Playback dying mid-track is the other way a dropped mount shows up. The
+  // media error itself is not diagnostic, so ask the server what happened.
+  audio.addEventListener('error', () => {
+    if (API.getLibraryContext() == null) App.libraryDrive.check({ force: true })
   })
 
   // Expose state for debug panel

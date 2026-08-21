@@ -16,6 +16,7 @@ from flask_login import login_required
 from app.extensions import db
 from app.models.track import Track
 from app.models.recording import Recording
+from app.api.system import require_library
 
 bp = Blueprint("stream", __name__)
 
@@ -79,6 +80,7 @@ def _serve_file(full_path, mimetype=MIMETYPE):
 
 @bp.route("/<int:track_id>")
 @login_required
+@require_library()
 def stream_track(track_id):
     # Resolve track → recording → full filesystem path
     track = db.session.get(Track, track_id)
@@ -109,6 +111,7 @@ def stream_track(track_id):
 
 @bp.route("/ingest-preview")
 @login_required
+@require_library()
 def stream_ingest_preview():
     """
     Stream a pre-ingest audio file by folder + filename.

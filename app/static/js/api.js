@@ -64,6 +64,15 @@ const API = (() => {
     if (res.status === 204) return null
 
     const data = await res.json()
+
+    // The library drive vanished mid-request. The banner poll would notice
+    // within 30s, but the user is looking at the consequence RIGHT NOW, so
+    // announce it immediately. Dispatched as an event rather than calling
+    // App directly: api.js loads before app.js and must not depend on it.
+    if (res.status === 503 && data && data.code === 'library_disconnected') {
+      window.dispatchEvent(new CustomEvent('flux:library-disconnected', { detail: data }))
+    }
+
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
     // Folder-rename-on-metadata-edit (app/utils/folder_naming.py) is
@@ -103,6 +112,15 @@ const API = (() => {
       list:   ()        => get('/api/remotes/'),
       enroll: (invite)  => post('/api/remotes/enroll', { invite }),
       leave:  (id)      => request('DELETE', `/api/remotes/${id}`),
+    },
+
+    // ── System ──────────────────────────────────────────────────────────────
+    // Deliberately absent from REMOTE_CAPABLE: this reports on MY drive. When
+    // browsing a peer's library the answer is still true and still worth
+    // showing, but it must never be asked of the peer.
+    system: {
+      libraryStatus:  () => get('/api/system/library-status'),
+      libraryRecheck: () => post('/api/system/library-recheck'),
     },
 
     // ── Auth ────────────────────────────────────────────────────────────────
@@ -302,6 +320,23 @@ const API = (() => {
       create: (data)     => post('/api/genres/', data),
       update: (id, data) => put(`/api/genres/${id}`, data),
       remove: (id)       => request('DELETE', `/api/genres/${id}`),
+    },
+
+    // ── Search (IO-46, 2026-08-18) ───────────────────────────────────────────
+    //
+    // Deliberately absent from REMOTE_CAPABLE above, so contextualise() never
+    // rewrites it: this searches the LOCAL library only. A peer search has to
+    // filter every group through the visible set or it leaks holdings, which
+    // is IO-48's job. The Search Bar hides itself in peer mode (CSS) so the
+    // box is never offered against a library it cannot answer for.
+    search: {
+      // Omnibox: a few per group plus honest totals.
+      all:   (q, limit = 5) =>
+        get(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+      // Results page: one group, paged.
+      group: (q, type, limit = 25, offset = 0) =>
+        get(`/api/search?q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}` +
+            `&limit=${limit}&offset=${offset}`),
     },
 
     // ── Events ───────────────────────────────────────────────────────────────

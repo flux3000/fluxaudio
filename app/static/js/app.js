@@ -9601,7 +9601,12 @@ const App = (() => {
     }
     _lastRouteHash = hash
 
-    if (hash.startsWith('#/recording/')) {
+    // Search first — its hash carries a query string ('#/search?q=hot+rize'),
+    // and any prefix match below would read the '?q=…' tail as an id.
+    if (hash.startsWith('#/search')) {
+      renderSearchView(hash)
+
+    } else if (hash.startsWith('#/recording/')) {
       const id = parseInt(hash.split('/')[2])
       if (id) renderRecordingView(id)
       else    renderLibraryView()
@@ -9719,6 +9724,7 @@ const App = (() => {
       state.user = user
       setUserUI(user)
       showApp()
+      libraryDrive.start()
       await loadRemotes()
       await loadArtistList()
       route()
@@ -9802,11 +9808,491 @@ const App = (() => {
 
   document.getElementById('settings-btn')?.addEventListener('click', openSettingsModal)
 
+  // ── Search (IO-46, 2026-08-18) ─────────────────────────────────────────────
+  //
+  // THE RULE: act, person, venue, date, or any combination. Track titles and
+  // provenance text are OUT of v1 — see app/utils/search.py before widening
+  // anything here. IO-46's Jira description still promises song identity and
+  // is out of date, not a spec.
+  //
+  // Local library only. The Search Bar hides itself in peer mode via CSS
+  // (html.peer-mode .search-bar) rather than by a JS check, so it is gone
+  // before first paint instead of flickering into view and back out.
+
+  const SEARCH_DEBOUNCE_MS   = 200
+  const SEARCH_DROPDOWN_MAX  = 5      // per group in the dropdown
+  const SEARCH_OVERVIEW_MAX  = 25     // per group on the results page
+  const SEARCH_PAGE_SIZE     = 50     // per "Load more" on a single-group page
+
+  const searchBar      = document.getElementById('search-bar')
+  const searchInput    = document.getElementById('search-input')
+  const searchDropdown = document.getElementById('search-dropdown')
+  const searchClearBtn = document.getElementById('search-clear')
+  const searchField    = searchInput ? searchInput.closest('.search-field') : null
+
+  function setSearchFieldFilled(filled) {
+    searchClearBtn.classList.toggle('hidden', !filled)
+    searchField?.classList.toggle('has-text', !!filled)
+  }
+
+  let _searchTimer = null
+  let _searchSeq   = 0        // guards against an out-of-order slow response
+  let _searchItems = []       // flat list of {hash} for arrow-key navigation
+  let _searchActive = -1
+
+  function searchGroupLine(item) {
+    // One dropdown row. Shapes differ per group, which is the point — a show
+    // without its date is not identifiable, and an act without its count
+    // gives no sense of what's behind the click.
+    if (item.type === 'recording') {
+      const where = [item.venue, item.city].filter(Boolean).join(' · ')
+      return `<span class="search-item-date">${esc(item.date || '—')}</span>
+              <span class="search-item-name">${esc(item.performer || 'Unknown')}</span>
+              <span class="search-item-meta">${esc(where)}</span>`
+    }
+    if (item.type === 'venue') {
+      const where = [item.city, item.state].filter(Boolean).join(', ')
+      return `<span class="search-item-name">${esc(item.name)}</span>
+              <span class="search-item-meta">${esc(where)}</span>`
+    }
+    if (item.type === 'artist') {
+      return `<span class="search-item-name">${esc(item.name)}</span>
+              <span class="search-item-meta">${esc((item.member_of || []).join(', '))}</span>`
+    }
+    const n = item.recording_count
+    return `<span class="search-item-name">${esc(item.name)}</span>
+            <span class="search-item-meta">${n} recording${n === 1 ? '' : 's'}</span>`
+  }
+
+  function renderSearchDropdown(body) {
+    _searchItems  = []
+    _searchActive = -1
+
+    if (!body.groups.length) {
+      // An honest empty state, not a fuzzy guess. With 178 acts in the
+      // library a "did you mean" would confidently suggest nonsense.
+      searchDropdown.innerHTML =
+        `<div class="search-dropdown-empty">No acts, people, venues or dates match
+         <b>${esc(body.query)}</b>.</div>`
+      openSearchDropdown()
+      return
+    }
+
+    let html = ''
+    for (const g of body.groups) {
+      const extra = g.total - g.items.length
+      html += `<div class="search-group-label">
+                 <span>${esc(g.label)}</span>
+                 <span class="search-group-count">${g.total}</span>
+               </div>`
+      for (const item of g.items) {
+        const i = _searchItems.length
+        _searchItems.push(item)
+        html += `<div class="search-item" role="option" data-idx="${i}">${searchGroupLine(item)}</div>`
+      }
+      if (extra > 0) {
+        html += `<div class="search-more" data-all="1">Show all ${g.total} ${esc(g.label.toLowerCase())} →</div>`
+      }
+    }
+    searchDropdown.innerHTML = html
+    openSearchDropdown()
+  }
+
+  function openSearchDropdown() {
+    searchDropdown.classList.remove('hidden')
+    searchInput.setAttribute('aria-expanded', 'true')
+  }
+
+  function closeSearchDropdown() {
+    searchDropdown.classList.add('hidden')
+    searchInput.setAttribute('aria-expanded', 'false')
+    _searchActive = -1
+  }
+
+  function setSearchActive(next) {
+    const rows = searchDropdown.querySelectorAll('.search-item')
+    if (!rows.length) return
+    if (_searchActive >= 0) rows[_searchActive]?.classList.remove('is-active')
+    _searchActive = (next + rows.length) % rows.length
+    const el = rows[_searchActive]
+    el.classList.add('is-active')
+    el.scrollIntoView({ block: 'nearest' })
+  }
+
+  async function runSearchDropdown(q) {
+    const seq = ++_searchSeq
+    let body
+    try {
+      body = await API.search.all(q, SEARCH_DROPDOWN_MAX)
+    } catch (e) {
+      // A failed fetch that renders as an empty dropdown is indistinguishable
+      // from "nothing matched" — a trap this project has hit repeatedly with
+      // remote calls (CONTEXT, "Remote failures disguise themselves").
+      if (seq !== _searchSeq) return
+      searchDropdown.innerHTML =
+        `<div class="search-dropdown-empty">Search failed — ${esc(e.message)}</div>`
+      openSearchDropdown()
+      return
+    }
+    // A slower earlier request must never overwrite a newer result.
+    if (seq !== _searchSeq) return
+    renderSearchDropdown(body)
+  }
+
+  function searchResultsHash(q, type) {
+    const base = `#/search?q=${encodeURIComponent(q)}`
+    return type ? `${base}&type=${encodeURIComponent(type)}` : base
+  }
+
+  function submitSearch() {
+    const q = searchInput.value.trim()
+    if (!q) return
+    closeSearchDropdown()
+    searchInput.blur()
+    window.location.hash = searchResultsHash(q)
+  }
+
+  function wireSearchBar() {
+    if (!searchInput) return
+
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.trim()
+      setSearchFieldFilled(searchInput.value)
+      clearTimeout(_searchTimer)
+      if (!q) {
+        _searchSeq++            // cancel anything in flight
+        closeSearchDropdown()
+        return
+      }
+      _searchTimer = setTimeout(() => runSearchDropdown(q), SEARCH_DEBOUNCE_MS)
+    })
+
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown')      { e.preventDefault(); setSearchActive(_searchActive + 1) }
+      else if (e.key === 'ArrowUp')   { e.preventDefault(); setSearchActive(_searchActive - 1) }
+      else if (e.key === 'Escape')    { closeSearchDropdown(); searchInput.blur() }
+      else if (e.key === 'Enter') {
+        e.preventDefault()
+        // An arrowed-to row goes straight to that thing; a bare Enter opens
+        // the full results page.
+        if (_searchActive >= 0 && _searchItems[_searchActive]) {
+          const item = _searchItems[_searchActive]
+          closeSearchDropdown()
+          searchInput.blur()
+          window.location.hash = item.hash
+        } else {
+          submitSearch()
+        }
+      }
+    })
+
+    searchInput.addEventListener('focus', () => {
+      if (searchInput.value.trim() && searchDropdown.innerHTML) openSearchDropdown()
+    })
+
+    searchDropdown.addEventListener('mousedown', e => {
+      // mousedown, not click: the input's blur handler would otherwise close
+      // the dropdown before the click ever lands on the row.
+      const more = e.target.closest('.search-more')
+      if (more) { e.preventDefault(); submitSearch(); return }
+      const row = e.target.closest('.search-item')
+      if (!row) return
+      e.preventDefault()
+      const item = _searchItems[parseInt(row.dataset.idx, 10)]
+      if (!item) return
+      closeSearchDropdown()
+      searchInput.blur()
+      window.location.hash = item.hash
+    })
+
+    searchClearBtn.addEventListener('click', () => {
+      searchInput.value = ''
+      setSearchFieldFilled(false)
+      _searchSeq++
+      closeSearchDropdown()
+      searchInput.focus()
+    })
+
+    document.addEventListener('mousedown', e => {
+      if (!searchBar.contains(e.target)) closeSearchDropdown()
+    })
+
+    // "/" focuses the box from anywhere — but never while the user is typing
+    // into something else, which would eat the character.
+    document.addEventListener('keydown', e => {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
+      const t = e.target
+      const tag = (t && t.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return
+      e.preventDefault()
+      searchInput.focus()
+      searchInput.select()
+    })
+  }
+
+  // ── Results page ───────────────────────────────────────────────────────────
+
+  function parseSearchHash(hash) {
+    const qs = hash.slice(hash.indexOf('?') + 1)
+    const params = new URLSearchParams(hash.includes('?') ? qs : '')
+    return { q: params.get('q') || '', type: params.get('type') || null }
+  }
+
+  function searchRowHtml(item) {
+    if (item.type === 'recording') {
+      const where = [item.venue, item.city, item.state].filter(Boolean).join(' · ')
+      return `<div class="search-row" data-hash="${esc(item.hash)}">
+                <span class="search-row-date">${esc(item.date || '—')}</span>
+                <div class="search-row-main">
+                  <div class="search-row-name">${esc(item.performer || 'Unknown')}</div>
+                  <div class="search-row-meta">${esc(where || 'No venue recorded')}</div>
+                </div>
+                <div class="search-row-right">${sourceBadge(item.source)}</div>
+              </div>`
+    }
+    if (item.type === 'venue') {
+      const where = [item.city, item.state, item.country].filter(Boolean).join(', ')
+      const n = item.recording_count
+      return `<div class="search-row" data-hash="${esc(item.hash)}">
+                <div class="search-row-main">
+                  <div class="search-row-name">${esc(item.name)}</div>
+                  <div class="search-row-meta">${esc(where)}</div>
+                </div>
+                <div class="search-row-right"><span class="search-row-meta">${n} recording${n === 1 ? '' : 's'}</span></div>
+              </div>`
+    }
+    if (item.type === 'artist') {
+      return `<div class="search-row" data-hash="${esc(item.hash)}">
+                <div class="search-row-main">
+                  <div class="search-row-name">${esc(item.name)}</div>
+                  <div class="search-row-meta">${esc((item.member_of || []).join(', ') || 'No acts recorded')}</div>
+                </div>
+              </div>`
+    }
+    const n = item.recording_count
+    return `<div class="search-row" data-hash="${esc(item.hash)}">
+              <div class="search-row-main"><div class="search-row-name">${esc(item.name)}</div></div>
+              <div class="search-row-right"><span class="search-row-meta">${n} recording${n === 1 ? '' : 's'}</span></div>
+            </div>`
+  }
+
+  function searchZeroStateHtml(q) {
+    // Name the miss, then offer real doors in. Deliberately not a fuzzy
+    // suggestion (Ryan, 2026-08-18): a dead end the user understands beats a
+    // confident wrong guess.
+    return `<div class="search-zero">
+      <div class="search-zero-title">Nothing matches “${esc(q)}”.</div>
+      <div class="search-zero-body">
+        Search covers acts, the people in them, venues and show dates —
+        not song titles or taping notes. Try a shorter name, or a year on its
+        own like <b>1983</b>.
+      </div>
+      <div class="search-zero-doors">
+        <button class="btn btn-ghost btn-sm" data-hash="#/">Browse the library</button>
+        <button class="btn btn-ghost btn-sm" data-hash="#/recent">Recently added</button>
+        <button class="btn btn-ghost btn-sm" data-hash="#/artists">All acts</button>
+        <button class="btn btn-ghost btn-sm" data-hash="#/venues">All venues</button>
+      </div>
+    </div>`
+  }
+
+  function wireSearchRows(root) {
+    root.querySelectorAll('[data-hash]').forEach(el =>
+      el.addEventListener('click', () => { window.location.hash = el.dataset.hash }))
+  }
+
+  function searchTermsSummary(body) {
+    const bits = []
+    if (body.text_terms.length) bits.push(body.text_terms.join(' + '))
+    for (const [y, m, d] of body.date_terms) {
+      bits.push(d ? `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+                  : m ? `${y}-${String(m).padStart(2,'0')}` : `${y}`)
+    }
+    return bits.join(' · ')
+  }
+
+  async function renderSearchView(hash) {
+    const { q, type } = parseSearchHash(hash)
+    setActiveNav(null)
+    setActiveArtist(null)
+    setNavCurrent('Search')          // omitting this breaks nav-back everywhere
+    searchInput.value = q
+    setSearchFieldFilled(q)
+    closeSearchDropdown()
+
+    if (!q) { setMainHTML(searchZeroStateHtml('')); wireSearchRows(mainContent); return }
+    setLoading()
+
+    if (type) return renderSearchGroupPage(q, type)
+
+    let body
+    try {
+      body = await API.search.all(q, SEARCH_OVERVIEW_MAX)
+    } catch (e) {
+      setMainHTML(`<div class="empty-state"><div class="empty-title">Search failed</div>
+                   <div class="empty-sub">${esc(e.message)}</div></div>`)
+      return
+    }
+
+    if (!body.groups.length) {
+      setMainHTML(searchZeroStateHtml(q))
+      wireSearchRows(mainContent)
+      return
+    }
+
+    const terms = searchTermsSummary(body)
+    let html = `<div class="search-results">
+      <div class="search-results-head">
+        <div class="search-results-title">${body.total} result${body.total === 1 ? '' : 's'} for <b>${esc(q)}</b></div>
+        ${terms ? `<div class="search-results-sub">Matching ${esc(terms)}</div>` : ''}
+      </div>`
+
+    for (const g of body.groups) {
+      html += `<div class="search-section">
+        <div class="search-section-head">
+          <span class="search-section-title">${esc(g.label)}</span>
+          <span class="search-section-count">${g.total}</span>
+        </div>
+        ${g.items.map(searchRowHtml).join('')}
+        ${g.total > g.items.length
+          ? `<button class="btn btn-ghost btn-sm search-more-btn"
+                     data-hash="${esc(searchResultsHash(q, g.type))}">Show all ${g.total} →</button>`
+          : ''}
+      </div>`
+    }
+    html += `</div>`
+
+    setMainHTML(html)
+    wireSearchRows(mainContent)
+  }
+
+  async function renderSearchGroupPage(q, type) {
+    let body
+    try {
+      body = await API.search.group(q, type, SEARCH_PAGE_SIZE, 0)
+    } catch (e) {
+      setMainHTML(`<div class="empty-state"><div class="empty-title">Search failed</div>
+                   <div class="empty-sub">${esc(e.message)}</div></div>`)
+      return
+    }
+
+    setMainHTML(`<div class="search-results">
+      <div class="search-results-head">
+        <div class="search-results-title">${body.total} ${esc(body.label.toLowerCase())} for <b>${esc(q)}</b></div>
+        <div class="search-results-sub"><span class="breadcrumb" data-hash="${esc(searchResultsHash(q))}">← All results</span></div>
+      </div>
+      <div id="search-group-rows">${body.items.map(searchRowHtml).join('')}</div>
+      <div id="search-group-more"></div>
+    </div>`)
+
+    const rowsEl = document.getElementById('search-group-rows')
+    const moreEl = document.getElementById('search-group-more')
+    let loaded = body.items.length
+
+    const drawMore = () => {
+      moreEl.innerHTML = loaded < body.total
+        ? `<button class="btn btn-ghost btn-sm search-more-btn" id="search-load-more">
+             Load more (${body.total - loaded} left)</button>`
+        : ''
+      document.getElementById('search-load-more')?.addEventListener('click', async () => {
+        const next = await API.search.group(q, type, SEARCH_PAGE_SIZE, loaded)
+        rowsEl.insertAdjacentHTML('beforeend', next.items.map(searchRowHtml).join(''))
+        loaded += next.items.length
+        wireSearchRows(rowsEl)
+        drawMore()
+      })
+    }
+
+    wireSearchRows(mainContent)
+    drawMore()
+  }
+
   // ── Hash routing ───────────────────────────────────────────────────────────
 
   window.addEventListener('hashchange', route)
 
+  wireSearchBar()
+
   // ── Init ───────────────────────────────────────────────────────────────────
+
+  // ── Library drive status ──────────────────────────────────────────────────
+  //
+  // LIBRARY_ROOT lives on an SMB share that macOS drops on update, reboot and
+  // sleep. The database is local SQLite and stays perfectly usable, so the app
+  // must keep browsing — what it must NOT do is pretend nothing happened and
+  // render a wall of broken images.
+  //
+  // Two inputs, deliberately:
+  //   * a 30s poll, so the banner appears even if you touch nothing
+  //   * a 'flux:library-disconnected' event from api.js the instant any
+  //     request 503s, so you never sit inside the poll window wondering
+  //
+  // Repair is not our job — tools/mount_library.py owns mounting. When the
+  // LaunchAgent fixes it, the next poll clears the banner on its own.
+  const libraryDrive = (() => {
+    const POLL_MS = 30000
+    let offline = false
+    let last    = null
+
+    const els = () => ({
+      bar:  document.getElementById('library-banner'),
+      text: document.getElementById('library-banner-text'),
+    })
+
+    function render(st) {
+      last = st
+      const nowOffline = !st.connected
+      const { bar, text } = els()
+      if (!bar) return
+
+      bar.classList.toggle('hidden', !nowOffline)
+      if (nowOffline) {
+        // Server-side copy: the message and the diagnosis that produced it
+        // live together in api/system.py and cannot drift apart.
+        text.textContent = st.message || 'The library drive is not connected.'
+      }
+
+      // One class drives every disabled affordance in the CSS. Cheaper and far
+      // more reliable than hunting play buttons through 10k lines of renderers.
+      document.body.classList.toggle('drive-offline', nowOffline)
+
+      // Transition back to healthy: re-render so the placeholder SVGs the
+      // server handed out get replaced by real artwork.
+      if (offline && !nowOffline) route()
+      offline = nowOffline
+    }
+
+    async function check({ force = false } = {}) {
+      try {
+        render(force ? await API.system.libraryRecheck()
+                     : await API.system.libraryStatus())
+      } catch (e) {
+        // Auth expiry or the server being down are different problems with
+        // their own handling. Leave the last known state rather than claiming
+        // the drive is gone on the strength of a failed fetch.
+      }
+    }
+
+    function start() {
+      check()
+      setInterval(check, POLL_MS)
+
+      // Instant signal from any 503 — see api.js.
+      window.addEventListener('flux:library-disconnected', (e) => {
+        render({ connected: false, ...(e.detail || {}) })
+      })
+
+      document.getElementById('library-banner-recheck')
+        ?.addEventListener('click', () => check({ force: true }))
+    }
+
+    return {
+      start,
+      check,
+      isOffline: () => offline,
+      message:   () => (last && last.message) || 'The library drive is not connected.',
+    }
+  })()
 
   async function init() {
     try {
@@ -9845,6 +10331,6 @@ const App = (() => {
     get paula()       { return (typeof ingest !== 'undefined' && ingest?.scan?.paula) || null },
   }
 
-  return { onTrackChange }
+  return { onTrackChange, libraryDrive }
 
 })()

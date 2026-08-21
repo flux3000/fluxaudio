@@ -36,6 +36,7 @@ from app.utils import entity_images as ei
 from app.utils.performer_research import run_performer_research
 from app.utils.ai_assist import AiAssistError
 from app.utils.prefs import get_api_key, get_pref
+from app.api.system import require_library
 
 bp = Blueprint("performers", __name__)
 
@@ -567,6 +568,7 @@ def fetch_performer_image(performer_id):
 
 @bp.route("/images/<int:image_id>", methods=["GET"])
 @login_required
+@require_library(kind="image")
 def serve_performer_image(image_id):
     """Serve one image by its own id — keyed on the image rather than the
     performer, so a card can request exactly the photo the serializer named."""

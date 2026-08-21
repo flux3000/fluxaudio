@@ -56,12 +56,42 @@
 
     <div class="sidebar-resizer" id="sidebar-resizer" title="Drag to resize"></div>
 
-    <main class="main-content" id="main-content">
-      <div class="empty-state">
-        <div class="empty-icon">◈</div>
-        <div class="empty-title">Select an artist to browse recordings</div>
+    <!-- The content column: Search Bar above, page below. The Search Bar is
+         persistent chrome — it is NOT the Action Bar, which is per-view markup
+         rendered inside five pages and absent from the Library landing page,
+         so it could never host a global search box (Ryan, 2026-08-18). -->
+    <div class="content-column">
+
+      <!-- Library drive status. Hidden while the drive is healthy, which is
+           almost always, so it costs no vertical space in normal use. -->
+      <div class="library-banner hidden" id="library-banner" role="status" aria-live="polite">
+        <span class="library-banner-icon" aria-hidden="true">⚠</span>
+        <span class="library-banner-text" id="library-banner-text"></span>
+        <button type="button" class="library-banner-btn" id="library-banner-recheck">Check again</button>
       </div>
-    </main>
+
+      <div class="search-bar" id="search-bar">
+        <div class="search-field">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input type="text" id="search-input" class="search-input"
+                 placeholder="Search acts, people, venues, dates…"
+                 autocomplete="off" spellcheck="false"
+                 role="combobox" aria-expanded="false" aria-autocomplete="list"
+                 aria-controls="search-dropdown" />
+          <button class="search-clear hidden" id="search-clear" title="Clear" tabindex="-1">✕</button>
+          <kbd class="search-hint" id="search-hint">/</kbd>
+        </div>
+        <div class="search-dropdown hidden" id="search-dropdown" role="listbox"></div>
+      </div>
+
+      <main class="main-content" id="main-content">
+        <div class="empty-state">
+          <div class="empty-icon">◈</div>
+          <div class="empty-title">Select an artist to browse recordings</div>
+        </div>
+      </main>
+
+    </div>
 
   </div>
 

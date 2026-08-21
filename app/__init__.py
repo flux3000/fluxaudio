@@ -90,6 +90,8 @@ def create_app(config_class=Config):
     from app.api.peers        import bp as peers_bp
     from app.api.remotes      import bp as remotes_bp
     from app.api.quality      import bp as quality_bp
+    from app.api.search       import bp as search_bp
+    from app.api.system       import bp as system_bp
 
     app.register_blueprint(auth_bp,         url_prefix="/api/auth")
     app.register_blueprint(artists_bp,      url_prefix="/api/artists")
@@ -109,6 +111,8 @@ def create_app(config_class=Config):
     app.register_blueprint(peers_bp,        url_prefix="/api/peers")
     app.register_blueprint(remotes_bp,      url_prefix="/api/remotes")
     app.register_blueprint(quality_bp,      url_prefix="/api/quality")
+    app.register_blueprint(search_bp,       url_prefix="/api/search")
+    app.register_blueprint(system_bp,       url_prefix="/api/system")
 
     # ── Dev mode: auto-login as first admin ───────────────────
     if app.config.get("DEV_MODE"):
