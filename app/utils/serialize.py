@@ -24,7 +24,11 @@ def recording_summary(rec):
         # replaces neither. None until the recording has been analysed.
         "listening_quality": (rec.quality_score.listening_quality
                               if rec.quality_score else None),
-        "rating":          rec.rating,
+        # `rating` (0-100 manual) was REMOVED from every payload 2026-08-18 at
+        # Ryan's direction. Three quality signals was one too many: the letter
+        # grade is the human judgement, listening_quality is the machine's, and
+        # is_favorite is the one-click reaction. The DB column survives unread
+        # (8 rows had a value) so the decision stays reversible.
         # One-click human highlight. Independent of both fields above — see the
         # comment on Recording.is_favorite.
         "is_favorite":     bool(rec.is_favorite),
@@ -83,7 +87,11 @@ def recording_row(rec, waveform=False, card=False):
         # replaces neither. None until the recording has been analysed.
         "listening_quality": (rec.quality_score.listening_quality
                               if rec.quality_score else None),
-        "rating":          rec.rating,
+        # `rating` (0-100 manual) was REMOVED from every payload 2026-08-18 at
+        # Ryan's direction. Three quality signals was one too many: the letter
+        # grade is the human judgement, listening_quality is the machine's, and
+        # is_favorite is the one-click reaction. The DB column survives unread
+        # (8 rows had a value) so the decision stays reversible.
         # One-click human highlight. Independent of both fields above — see the
         # comment on Recording.is_favorite.
         "is_favorite":     bool(rec.is_favorite),

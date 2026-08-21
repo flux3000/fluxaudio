@@ -353,7 +353,11 @@ const API = (() => {
       triageBulk: (folder_paths, status) => post('/api/quality/triage-bulk', { folder_paths, status }),
       staging:         (sourceDir)  => get(`/api/quality/staging?source_dir=${encodeURIComponent(sourceDir)}`),
       stagingFeatures: (folderPath) => get(`/api/quality/staging/features?folder_path=${encodeURIComponent(folderPath)}`),
-      forRecording:    (recId)      => get(`/api/quality/recording/${recId}`),
+      // features=1 also returns the plain-English `interpretation` block (group
+      // verdicts + advanced metric rows), which is what the View Recording
+      // Listening Quality pane renders. Without it you get the bare scores.
+      forRecording:    (recId, features) =>
+        get(`/api/quality/recording/${recId}${features ? '?features=1' : ''}`),
       // Physically moves a show out of the queue into Backlog or Working.
       // Touches real files — see app/api/quality.py::move_out_of_queue for the
       // guards (allowlisted destinations, import-root check, never overwrites).

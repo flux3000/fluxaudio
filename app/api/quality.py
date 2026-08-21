@@ -918,4 +918,19 @@ def for_recording(recording_id):
     if row is None:
         return jsonify({"error": "No quality analysis for that recording"}), 404
     include = request.args.get("features") == "1"
-    return jsonify(qs.serialize(row, include_features=include))
+    payload = qs.serialize(row, include_features=include)
+    # Plain-English interpretation is opt-in with the features dict, because it
+    # is derived FROM that dict — asking for one without the other would mean
+    # rendering metric rows with no measurements behind them. Mirrors the
+    # staging endpoint above deliberately: the View Recording quality pane and
+    # the triage card are the same report on the same numbers, so they must be
+    # fed from the same code path or they will drift.
+    if include:
+        from app.utils.quality import interpret_full
+        try:
+            payload["interpretation"] = interpret_full(payload, payload.get("features") or {})
+        except Exception:  # noqa: BLE001
+            # Plain-English rendering must never take down the metrics panel.
+            _tb.print_exc()
+            payload["interpretation"] = None
+    return jsonify(payload)

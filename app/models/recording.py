@@ -53,8 +53,13 @@ class Recording(db.Model):
     # Full text content of the accompanying info/text file
     info_file_content    = db.Column(db.Text, nullable=True)
 
-    # Listener rating: 0–100 holistic score (show quality + experience).
-    # Distinct from `quality` (technical recording grade).
+    # RETIRED 2026-08-18 — "remove rating everywhere" (Ryan). Was a 0-100
+    # holistic listener score. Nothing reads or writes it: it is gone from every
+    # serializer, API payload, form and view. The column stays because 8 rows
+    # carry a value and dropping it is the one step that cannot be undone; drop
+    # it on Ryan's word. Do NOT reintroduce it into a payload — the product has
+    # three quality signals already (the `quality` letter grade, the automated
+    # listening_quality score, and is_favorite), and this was the fourth.
     rating     = db.Column(db.Integer, nullable=True)
 
     # Favorite / highlight star (2026-07-31). A purely human marker, and

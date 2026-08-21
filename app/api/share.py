@@ -244,7 +244,6 @@ def recording_detail(recording_id):
         "source":           rec.source,
         "lineage":          rec.lineage,
         "quality":          rec.quality,
-        "rating":           rec.rating,
         "is_complete":      rec.is_complete,
         "is_official":      bool(rec.is_official),
         "info_file_content": rec.info_file_content,

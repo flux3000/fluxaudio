@@ -756,10 +756,6 @@ def _do_confirm(data, user_id, progress_cb=None, cancel_cb=None):
 
     # ── 7. Create Recording ───────────────────────────────────────────────────
     rec_is_official = bool(data.get("is_official", False))
-    try:
-        rating_val = int(data["rating"]) if data.get("rating") not in (None, "") else None
-    except (ValueError, TypeError):
-        rating_val = None
     # AI Assist may already have been run pre-confirm (Add Recording's own
     # "AI Assist" button, before the recording even exists) — if so, the
     # frontend sends the raw result back as "ai_result" so it isn't lost the
@@ -772,7 +768,6 @@ def _do_confirm(data, user_id, progress_cb=None, cancel_cb=None):
         source               = data.get("source"),
         lineage              = data.get("lineage"),
         quality              = data.get("quality"),
-        rating               = rating_val,
         is_complete          = data.get("is_complete", True),
         is_official          = rec_is_official,
         folder_path          = new_folder_path,

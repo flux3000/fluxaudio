@@ -1079,8 +1079,6 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   min-width: 0;
 }
 
-.rec-rating { text-align: right; }
-
 .rec-runtime {
   font-size: 11px;
   color: var(--t1);
@@ -1103,13 +1101,6 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   font-size: 9px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-/* Smaller rating badge for the dense catalog row */
-.rating-badge--sm {
-  font-size: 10px;
-  padding: 0 4px;
-  min-width: 20px;
 }
 
 .rec-play-btn {
@@ -1159,20 +1150,6 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .quality-B  { color: var(--amber); }
 .quality-C  { color: var(--red); }
 
-/* ── Rating badge (0–100 numeric score) ─────────────────────────────────────── */
-.rating-badge {
-  display: inline-block;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  font-weight: 700;
-  background: var(--accent-dim2);
-  color: var(--accent-lit);
-  border-radius: 4px;
-  padding: 1px 6px;
-  min-width: 28px;
-  text-align: center;
-}
-
 /* ── Recording detail view ──────────────────────────────────────────────────── */
 
 /* Back link + collections, one row (Ryan, 2026-07-15 — collections used to
@@ -1194,89 +1171,47 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   gap: 24px;
 }
 
+/* Avatar + text lines side by side. The circle spans the name and date rows
+   (Ryan, 2026-08-18), so it aligns to the top of the block rather than
+   centring against the whole header, which also carries notes and badges. */
 .rec-header-left {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.rec-header-lines { flex: 1; min-width: 0; }
+.rec-header-avatar { flex-shrink: 0; padding-top: 2px; }
+.rec-header-photo {
+  width: 54px; height: 54px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--genre-fg, var(--bd-1)); background: var(--bg-2);
+  display: block;
+}
+/* Initials disc — the DEFAULT, not a fallback: most acts have no photo. Same
+   treatment as the cards and the Performer hero so an act looks the same
+   everywhere it appears. */
+.rec-header-photo--initials {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--t2);
 }
 
-/* Recording metadata sidebar panel — a small vertical-tab panel (Ryan,
-   2026-07-15: "turn the box into a multi-vertical tab element like the
-   lower right one is"), mirroring .slide-panel's look at a fixed, non-
-   collapsing size. */
+/* Recording metadata block — Source / Lineage / Quality. Borderless since
+   2026-08-18 (Ryan): it was a bordered two-tab panel, but with Fidelity moved
+   into the Side Panel there is one pane left, and a box with a tab strip for a
+   single pane is furniture around three rows of text. */
 .rec-header-right {
   flex-shrink: 0;
   width: 45%;
-  align-self: stretch;
-  border: 1px solid var(--bd-0);
-  border-radius: var(--r-sm);
-  background: var(--bg-1);
-  overflow: hidden;
+  align-self: flex-start;
+  padding-top: 2px;
 }
-.hm-tabbed-panel {
-  display: flex;
-  flex-direction: row;
-  height: 100%;
-}
-.hm-tabbed-body {
-  flex: 1;
-  min-width: 0;
-  padding: 14px 16px;
-  overflow-y: auto;
-}
-.hm-pane { display: none; }
-.hm-pane.active { display: block; }
-.hm-pane-empty {
-  font-size: 12px;
-  color: var(--t3);
-  font-style: italic;
-}
-
-/* Vertical tab strip — same visual language as .slide-tabs */
-.hm-tabs {
-  width: 24px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 10px 0;
-  gap: 4px;
-  border-left: 1px solid var(--bd-1);
-  background: var(--bg-0);
-}
-.hm-tab {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  transform: rotate(180deg);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--t3);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 8px 4px;
-  border-radius: 3px;
-  transition: color 0.15s, background 0.15s, opacity 0.15s;
-  user-select: none;
-}
-.hm-tab:hover { color: var(--t1); background: var(--bg-2); }
-.hm-tab.active { color: var(--accent); }
-/* Fidelity tab before analysis exists — present, but dimmed ("minimized")
-   until there's something to show (Ryan, 2026-07-15). */
-.hm-tab--empty { opacity: 0.45; }
-
-/* Spectrogram, now inside the Fidelity tab below Dyn Range instead of its
-   own tab in the lower-right panel (Ryan, 2026-07-15). */
-.hm-spectrogram { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--bd-0); }
-.hm-spectrogram-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--t3);
-  margin-bottom: 6px;
-}
+/* .hm-tabbed-panel / .hm-tabs / .hm-tab / .hm-pane / .hm-spectrogram / .hm-metric
+   / .hm-hint / .hm-warn / .hm-reanalyze-btn were REMOVED 2026-08-18 with the
+   Fidelity tab (IO-61). The .hm-row / .hm-label / .hm-val trio below survives —
+   it is the Record Header's Source / Lineage / Quality block, which kept the
+   same markup when the box around it went away. */
 
 .hm-row {
   display: flex;
@@ -1335,27 +1270,6 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   font-family: inherit;
 }
 
-
-.hm-divider {
-  border: none;
-  border-top: 1px solid var(--bd-0);
-  margin: 8px 0;
-}
-
-.hm-section-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.hm-section-title {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--t3);
-}
 
 /* Clickable venue name in date line */
 .venue-link {
@@ -1598,6 +1512,57 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .slide-pane-scroll, .slide-pane-scroll * { -webkit-user-select: text; user-select: text; }
 .slide-pane-scroll::-webkit-scrollbar { width: 4px; }
 .slide-pane-scroll::-webkit-scrollbar-thumb { background: var(--bd-2); border-radius: 2px; }
+
+/* ── Horizontal tab variant (Ryan, 2026-08-18) ────────────────────────────
+   Applied as a MODIFIER rather than changing .slide-tabs outright, because the
+   ingest Review screen reuses these same classes and its layout was not part of
+   this change. Extending it there is one class on the wrapper. */
+.slide-panel--htabs { flex-direction: column; }
+.slide-panel--htabs .slide-tabs {
+  order: -1;                 /* strip above the panes, whatever the DOM order */
+  width: auto;
+  flex-direction: row;
+  align-items: stretch;
+  padding: 0 4px;
+  gap: 2px;
+  border-left: none;
+  border-bottom: 1px solid var(--bd-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.slide-panel--htabs .slide-tabs::-webkit-scrollbar { display: none; }
+.slide-panel--htabs .slide-tab {
+  writing-mode: horizontal-tb;
+  transform: none;
+  padding: 9px 9px 8px;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  border-radius: 3px 3px 0 0;
+}
+.slide-panel--htabs .slide-tab.active { border-bottom-color: var(--accent); }
+/* Collapsed: the horizontal strip has nowhere to render at 28px wide, so it
+   hides and a rail takes over as the way back in. */
+.slide-panel--htabs:not(.open) .slide-tabs,
+.slide-panel--htabs:not(.open) .slide-panel-body { display: none; }
+.slide-rail { display: none; }
+.slide-panel--htabs:not(.open) .slide-rail {
+  display: block;
+  flex: 1;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: rotate(180deg);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--t3);
+  background: var(--bg-0);
+  border: none;
+  cursor: pointer;
+  padding: 10px 5px;
+  user-select: none;
+}
+.slide-panel--htabs:not(.open) .slide-rail:hover { color: var(--t1); background: var(--bg-2); }
 
 /* Vertical tab strip */
 .slide-tabs {
@@ -3438,7 +3403,7 @@ input[type="range"].progress-bar {
 .rec-table { padding: 4px 0 20px; }
 .rec-row--flat {
   display: grid;
-  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 22px 28px;
+  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 54px 46px 78px 22px 28px;
   align-items: center;
   gap: 10px;
   padding: 5px 20px;
@@ -3447,7 +3412,7 @@ input[type="range"].progress-bar {
   font-size: 12px;
 }
 .rec-row--flat.with-performer {
-  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 22px 28px;
+  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 54px 46px 78px 22px 28px;
 }
 .rec-row--flat:hover { background: var(--bg-1); }
 .rec-performer-cell { color: var(--t0); font-weight: 450; }
@@ -3456,14 +3421,14 @@ input[type="range"].progress-bar {
 /* Header row paired with .rec-row--flat — same grid, mostly blank; "Added" sorts. */
 .rec-table-head {
   display: grid;
-  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 30px 54px 46px 78px 22px 28px;
+  grid-template-columns: 92px minmax(0,1fr) 130px 40px 34px 54px 46px 78px 22px 28px;
   align-items: center;
   gap: 10px;
   padding: 0 20px 4px;
   font-size: 10px;
 }
 .rec-table-head.with-performer {
-  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 30px 54px 46px 78px 22px 28px;
+  grid-template-columns: 160px 92px minmax(0,1fr) 120px 40px 34px 54px 46px 78px 22px 28px;
 }
 .rec-th-added {
   background: none; border: none; padding: 0; margin: 0;
@@ -5846,3 +5811,152 @@ input[type="range"].progress-bar {
 .otd-year      { font-size: 11.5px; color: var(--t3); width: 40px; flex-shrink: 0; }
 .otd-performer { font-size: 13px; color: var(--t0); flex: 0 1 auto; min-width: 0; max-width: 40%; }
 .otd-venue     { font-size: 12px; color: var(--t2); flex: 1; min-width: 0; }
+
+/* ── View Recording · Listening Quality pane ──────────────────────────────────
+   The unified quality surface (IO-61, 2026-08-18). Replaces the Fidelity tab
+   that used to sit in the Record Header's top-right box and describe the same
+   property in a second vocabulary.
+
+   Deliberately its OWN class prefix rather than reusing .lq-* wholesale: the
+   .lq-* rules are sized for the triage card, which is a full-width report in a
+   1034px column, and this pane is ~40% of the window. The two SHARE the pieces
+   that must never disagree — .lq-verdict (the band pill) and .lq-meter (the
+   group bars) — and diverge only on layout. Colour comes from the same
+   _lqColour()/_stateColour() helpers in app.js for the same reason. */
+
+.rq-wrap { padding: 14px 16px 22px; }
+
+.rq-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.rq-score {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rq-score-lbl {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--t3);
+}
+.rq-reanalyze-btn { margin-left: auto; }
+
+/* Quick facts — format, bitrate, cutoff. Plain facts on the pane's own
+   background, not a boxed strip: they are readings you check against the info
+   file, not measurements that need a meter. */
+.rq-qline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--t2);
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--bd-0);
+  margin-bottom: 14px;
+}
+.rq-qline .sep { color: var(--t3); opacity: 0.6; }
+
+.rq-grp { margin-bottom: 16px; }
+.rq-grp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.rq-grp-name {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--t1);
+}
+.rq-grp-score {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rq-grp-weight { margin-left: auto; font-size: 10px; color: var(--t3); }
+.rq-grp-txt { font-size: 11.5px; color: var(--t2); line-height: 1.45; }
+
+/* Advanced metrics: collapsed by default behind a caret (Ryan, 2026-08-18).
+   On the triage card these are the point — you are deciding whether to ingest.
+   Here you are usually deciding whether to press play, and the meter above
+   answers that on its own. */
+.rq-adv-toggle {
+  background: none;
+  border: none;
+  padding: 5px 0 0;
+  margin: 0;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--t3);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.rq-adv-toggle:hover { color: var(--t1); }
+/* Same caret rotation as the nav and the .lq-dir rows — one rotating triangle
+   everywhere, never a swapped glyph. */
+.rq-caret { display: inline-block; transition: transform 0.15s; }
+.rq-adv-toggle.open .rq-caret { transform: rotate(90deg); }
+
+.rq-adv { display: none; padding: 6px 0 2px 10px; border-left: 1px solid var(--bd-0); margin-top: 6px; }
+.rq-adv.open { display: block; }
+
+.rq-mrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 62px minmax(0, 1.1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.rq-mlabel { color: var(--t2); }
+.rq-mval { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.rq-mverdict { color: var(--t3); font-size: 10.5px; }
+/* Five of the eleven readings carry ZERO weight. Showing them at equal visual
+   standing implied they all move the number, which is how the 2026-07-30 Gatton
+   confusion started — so they are dimmed and starred instead. */
+.rq-mrow--unscored { opacity: 0.62; }
+.rq-star { color: var(--t3); margin-left: 2px; }
+.rq-star-note { font-size: 10px; color: var(--t3); font-style: italic; padding: 6px 0 0; }
+
+.rq-issues { margin-top: 14px; }
+.rq-issues h4 {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--t3);
+  margin: 0 0 6px;
+}
+.rq-issue { font-size: 11px; color: var(--t2); line-height: 1.5; margin-bottom: 5px; }
+.rq-issue b { color: var(--red); font-weight: 600; }
+.rq-clean {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--t3);
+  line-height: 1.5;
+}
+
+.rq-spectrogram { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--bd-0); }
+.rq-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t3);
+  margin-bottom: 6px;
+}
+
+.rq-empty { padding: 16px; font-size: 12px; color: var(--t3); font-style: italic; }
+.rq-empty .rq-reanalyze-btn { margin: 10px 0 0; display: block; }

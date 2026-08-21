@@ -63,10 +63,18 @@ def get_performance(performance_id):
 
     v = p.venue
     resolved = resolve_performance_personnel(p)
+    # Performer photo + genre colour ride along on the performance detail so the
+    # Record Header can draw its avatar circle without a second round trip. Same
+    # id the card serializer sends (serialize._primary_image_id), so the header,
+    # the cards and the Performer page hero can never show different faces.
+    from app.utils.serialize import _primary_image_id
+    _perf_genre = getattr(p.performer, "genre", None)
     return jsonify({
         "id":           p.id,
         "performer_id": p.performer_id,
         "performer":    p.performer.name,
+        "performer_image_id":   _primary_image_id(p.performer),
+        "performer_genre_color": _perf_genre.color if _perf_genre else None,
         # Back-compat shape (id/name pairs) for the existing recording-page
         # Artists pill row — now the RESOLVED show lineup (act roster with
         # stint bounds applied, plus guests, or the explicit list), not the

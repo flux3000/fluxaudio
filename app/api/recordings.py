@@ -283,7 +283,6 @@ def get_recording(recording_id):
         "source":               rec.source,
         "lineage":              rec.lineage,
         "quality":              rec.quality,
-        "rating":               rec.rating,
         "is_favorite":          bool(rec.is_favorite),
         "is_complete":          rec.is_complete,
         "is_official":          bool(rec.is_official),
@@ -398,8 +397,11 @@ def update_recording(recording_id):
     # TODO: validate archivist permission for this recording's artist
 
     data = request.get_json()
+    # "rating" deliberately absent since 2026-08-18 — the field is retired from
+    # the product, so accepting a write for it would quietly repopulate a column
+    # nothing reads. See app/utils/serialize.py for the rationale.
     updatable = ["title", "source", "lineage",
-                 "quality", "rating", "is_complete", "notes", "info_file_content"]
+                 "quality", "is_complete", "notes", "info_file_content"]
     for field in updatable:
         if field in data:
             setattr(rec, field, data[field])

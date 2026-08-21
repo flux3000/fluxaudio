@@ -44,8 +44,11 @@ def test_recording_summary_shape(app, seeded_ids):
     # human highlight, owing nothing to either the letter grade or the automated
     # score. Defaults off and analysis never sets it.
     assert s["is_favorite"] is False
+    # "rating" left this set 2026-08-18 — the 0-100 manual score is retired from
+    # every payload (the DB column survives unread). Three quality signals is the
+    # design: the letter grade, the automated score, and the favourite flag.
     assert set(s.keys()) == {"id", "source", "quality", "listening_quality",
-                             "rating", "is_favorite", "is_complete",
+                             "is_favorite", "is_complete",
                              "is_official", "track_count", "duration_sec",
                              "created_at"}
 

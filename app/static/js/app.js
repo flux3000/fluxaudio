@@ -1025,7 +1025,6 @@ const App = (() => {
     const date    = fmtDate(r.start_year, r.start_month, r.start_day)
     const loc     = fmtLocation(r.city, r.state, r.country)
     const quality = r.quality || ''
-    const rating  = r.rating != null ? `<span class="rating-badge rating-badge--sm">${r.rating}</span>` : ''
     const runtime = fmtRuntime(r.duration_sec)
     const inc     = r.is_complete ? '' : '<span class="rec-inc" title="Incomplete recording">inc</span>'
     return `
@@ -1036,7 +1035,6 @@ const App = (() => {
         <span class="rec-location truncate">${esc(loc)}</span>
         <span>${sourceBadge(r.source)}</span>
         <span class="quality ${qualityClass(quality)}">${esc(quality)}</span>
-        <span class="rec-rating">${rating}</span>
         <span class="rec-runtime">${runtime}</span>
         <span class="rec-tracks">${r.track_count}t${inc ? ' ' + inc : ''}</span>
         <span class="rec-date-added">${esc(fmtDateAdded(r.created_at))}</span>
@@ -1054,7 +1052,12 @@ const App = (() => {
     return `
       <div class="rec-table-head ${showPerformer ? 'with-performer' : ''}">
         ${showPerformer ? '<span></span>' : ''}
-        <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+        <!-- One blank cell per data column before "Added": date, venue, location,
+             source, quality, runtime, tracks. The rating column was removed
+             2026-08-18 — keep this count in step with flatRowHtml() and with the
+             grid-template-columns pair in main.css or the header shears off the
+             row it labels. -->
+        <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
         <button class="rec-th-added" type="button" title="Sort by date added">Added <span class="rec-th-arrow"></span></button>
         <span></span><span></span>
       </div>`
@@ -1964,7 +1967,7 @@ const App = (() => {
           start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
           venue: p.venue_name, city: p.city, state: p.state, country: p.country,
           source: r.source, quality: r.quality,
-          rating: r.rating, is_complete: r.is_complete,
+          is_complete: r.is_complete,
           track_count: r.track_count, duration_sec: r.duration_sec,
         }, false)).join('')).join('')
       if (!rows) return ''
@@ -2001,7 +2004,7 @@ const App = (() => {
           start_year: ap.start_year, start_month: ap.start_month, start_day: ap.start_day,
           venue: ap.venue_name, city: ap.city, state: ap.state, country: ap.country,
           source: r.source, quality: r.quality,
-          rating: r.rating, is_complete: r.is_complete,
+          is_complete: r.is_complete,
           track_count: r.track_count, duration_sec: r.duration_sec,
         }, false)).join('')).join('')
       if (!rows) return ''
@@ -2471,7 +2474,7 @@ const App = (() => {
           start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
           venue: p.venue_name, city: p.city, state: p.state, country: p.country,
           source: r.source, quality: r.quality,
-          rating: r.rating, is_complete: r.is_complete,
+          is_complete: r.is_complete,
           track_count: r.track_count, duration_sec: r.duration_sec, created_at: r.created_at,
         }))
       )
@@ -2612,7 +2615,7 @@ const App = (() => {
         start_year: p.start_year, start_month: p.start_month, start_day: p.start_day,
         venue: p.venue_name, city: p.city, state: p.state, country: p.country,
         source: r.source, quality: r.quality,
-        rating: r.rating, is_complete: r.is_complete,
+        is_complete: r.is_complete,
         track_count: r.track_count, duration_sec: r.duration_sec, created_at: r.created_at,
       }))
     )
@@ -3970,116 +3973,48 @@ const App = (() => {
     })
     const hasAnalysis = Object.keys(_waveformMap).length > 0
 
-    // Fidelity metrics: pull from first analysed track
+    // Fidelity metrics used to be computed here and rendered as a second tab of
+    // the top-right box — raw librosa readings (RMS, Dyn Range, cutoff) in one
+    // vocabulary, while the Listening Quality engine described the same property
+    // in another vocabulary elsewhere on the same page. Two systems, one
+    // property. Unified 2026-08-18 (IO-61): the engine is now the single quality
+    // surface and it lives in the Side Panel, which has the room for its three
+    // meters and the metrics underneath them. Everything the old Fidelity tab
+    // showed is still on the page — format, cutoff, dynamics and the
+    // spectrogram all come out of the same feature dict the engine scores from,
+    // so nothing was dropped, it was de-duplicated.
+    //
+    // The top-right box is therefore no longer a tabbed element at all. It is a
+    // plain borderless block of the three things a human typed.
     const firstAnalysed = rec.tracks?.find(t => t.analysis) ?? null
-    const rmsDb    = firstAnalysed?.analysis?.rms_db
-    const dynDb    = firstAnalysed?.analysis?.dynamic_range_db
-    const srHz     = firstAnalysed?.analysis?.sample_rate_hz
-    const bitDepth = firstAnalysed?.analysis?.bit_depth
-    const bitrateK = firstAnalysed?.analysis?.bitrate_kbps
-    const cutoffHz = firstAnalysed?.analysis?.spectral_cutoff_hz
-    const fmtDb  = v => (v != null ? `${v.toFixed(1)} dB` : '—')
-    const fmtSr  = hz => hz ? `${(hz / 1000).toFixed(1).replace(/\.0$/, '')} kHz` : '—'
-    const fmtBit = bd => bd ? `${bd}-bit` : (bitrateK ? `${bitrateK} kbps` : '—')
 
-    // Cutoff is informational only now — NOT a transcode detector (Ryan,
-    // 2026-07-15: "I don't buy them really... every recording in the
-    // collection has said Possible Transcode"). Checked against the real
-    // library: 99% of analysed tracks tripped the old "within 2kHz of
-    // Nyquist" rule. That's not a rare warning sign, it's just what live/
-    // audience recordings look like — natural mic/room/tape rolloff pushes
-    // the -40dB cutoff well below Nyquist on almost everything, with no
-    // relation to whether a file was ever lossy-transcoded. A single cutoff
-    // frequency can't tell a gradual natural rolloff apart from a lossy
-    // codec's hard bandwidth wall — that would need the actual rolloff
-    // shape, which isn't captured here. So: no more warning icon, no more
-    // "possible transcode" accusation — just the number, plus a positive
-    // callout on the rare track that's genuinely full-spectrum.
-    const nyquist    = srHz ? srHz / 2 : 22050
-    const cutoffFull = cutoffHz && srHz && (cutoffHz >= nyquist - 500)
-    const fmtCutoff  = hz => hz ? `${(hz / 1000).toFixed(1)} kHz` : '—'
-
-    // ── Interpretive hints ────────────────────────────────────────────────────
-    const hint = s => `<span class="hm-hint">${s}</span>`
-
-    const formatLabel = (() => {
-      if (bitrateK && !bitDepth) return hint('Lossy')
-      if (!bitDepth) return ''
-      if (srHz >= 88200)                       return hint('Hi-Res')
-      if (bitDepth >= 24)                      return hint('Studio')
-      if (bitDepth <= 16 && srHz <= 44100)     return hint('Standard')
-      return hint('Lossless')
-    })()
-
-    // RMS: live recordings typically sit -20 to -12 dB
-    const rmsHint = (() => {
-      if (rmsDb == null) return ''
-      if (rmsDb > -6)    return hint('Very hot')
-      if (rmsDb > -10)   return hint('Hot — compressed')
-      if (rmsDb > -14)   return hint('Loud')
-      if (rmsDb > -20)   return hint('Normal')
-      if (rmsDb > -28)   return hint('Quiet')
-      return hint('Very quiet')
-    })()
-
-    // Dynamic range: higher = more natural dynamics
-    const dynHint = (() => {
-      if (dynDb == null) return ''
-      if (dynDb > 40)    return hint('Excellent')
-      if (dynDb > 25)    return hint('Good')
-      if (dynDb > 15)    return hint('Moderate')
-      if (dynDb > 8)     return hint('Compressed')
-      return hint('Heavily limited')
-    })()
-
-    const cutoffHint = cutoffFull ? hint('Full spectrum') : ''
-
-    // Top-right box: a vertical-tab panel now (Ryan, 2026-07-15 — "turn the
-    // box into a multi-vertical tab element like the lower right one is"),
-    // mirroring the lower-right slide-panel's look. Two tabs: Source (Source/
-    // Lineage/Quality/Rating — shown by default, quick-editable in place for
-    // admin/archivist: click the value → type → Enter to save) and Fidelity
-    // (the analysis metrics + this track's spectrogram, dimmed/empty until
-    // analysis exists).
-    const trunc          = (s, n) => s && s.length > n ? s.slice(0, n) + '…' : s
+    // Quick-edit in place is unchanged — click a value, type, Enter to save.
+    const trunc          = (s, n) => s && s.length > n ? s.slice(0, n) + '\u2026' : s
     const sourceDisplay  = rec.source || ''
     const lineageDisplay = rec.lineage ? trunc(rec.lineage, 220) : null
 
     const qEditable = canEditLibrary()
     const qc  = qEditable ? ' hm-val--editable' : ''
     const qa  = f => qEditable ? ` data-qedit="${f}" title="Click to edit"` : ''
-    const sourcePane = `
-      <div class="hm-row"><span class="hm-label">Source</span><span class="hm-val${qc}"${qa('source')}>${esc(sourceDisplay || '—')}</span></div>
-      <div class="hm-row"><span class="hm-label">Lineage</span><span class="hm-val${qc}"${qa('lineage')}>${esc(lineageDisplay || rec.lineage || '—')}</span></div>
-      <div class="hm-row"><span class="hm-label">Quality</span><span class="hm-val ${qualityClass(rec.quality)}${qc}"${qa('quality')}>${esc(rec.quality || '—')}</span></div>
-      <div class="hm-row"><span class="hm-label">Rating</span><span class="hm-val${qc}"${qa('rating')}>${rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'}</span></div>`
+    const metaBlock = `
+      <div class="hm-row"><span class="hm-label">Source</span><span class="hm-val${qc}"${qa('source')}>${esc(sourceDisplay || '\u2014')}</span></div>
+      <div class="hm-row"><span class="hm-label">Lineage</span><span class="hm-val${qc}"${qa('lineage')}>${esc(lineageDisplay || rec.lineage || '\u2014')}</span></div>
+      <div class="hm-row"><span class="hm-label">Quality</span><span class="hm-val ${qualityClass(rec.quality)}${qc}"${qa('quality')}>${esc(rec.quality || '\u2014')}</span></div>`
 
-    // Spectrogram now lives here (below Dyn Range) instead of its own tab in
-    // the lower-right panel, which was getting crowded (Ryan, 2026-07-15).
-    // Same element ids as before — loadSpectrogram() and its wiring are
-    // unchanged, just relocated.
-    // Re-Analyze lives here now, not in the bottom action row (Ryan,
-    // 2026-07-15) — it regenerates exactly the data this pane shows, so it
-    // belongs next to it.
+    // Re-Analyze moves with the data it regenerates: it now lives at the top of
+    // the Listening Quality pane rather than in the retired Fidelity tab.
+    //
+    // Named "Tracks" deliberately: POST /reprocess re-runs the per-track librosa
+    // pass (waveform, spectrogram, the raw readings) and does NOT recompute the
+    // recording_quality row — there is no per-recording rescore endpoint today,
+    // only the bulk quality_store.rescore_stored(). Sitting this button under a
+    // "Listening Quality" heading while it silently leaves the score alone is
+    // exactly the kind of thing that costs an hour later, so the label says
+    // what it does.
     const reanalyzeBtn = canEdit
-      ? `<button class="btn btn-ghost btn-sm hm-reanalyze-btn" id="btn-analyze-audio">Re-Analyze</button>`
+      ? `<button class="btn btn-ghost btn-sm rq-reanalyze-btn" id="btn-analyze-audio"
+                 title="Re-runs per-track audio analysis (waveform, spectrogram, raw readings). Does not recompute the Listening Quality score.">Re-Analyze Tracks</button>`
       : ''
-    const fidelityPane = firstAnalysed
-      ? `${reanalyzeBtn}
-         <div class="hm-row"><span class="hm-label">Format</span><span class="hm-val hm-metric">${fmtBit(bitDepth)} / ${fmtSr(srHz)}</span>${formatLabel}</div>
-         <div class="hm-row"><span class="hm-label">Cutoff</span><span class="hm-val hm-metric">${fmtCutoff(cutoffHz)}</span>${cutoffHint}</div>
-         <div class="hm-row"><span class="hm-label">RMS</span><span class="hm-val hm-metric">${fmtDb(rmsDb)}</span>${rmsHint}</div>
-         <div class="hm-row"><span class="hm-label">Dyn Range</span><span class="hm-val hm-metric">${fmtDb(dynDb)}</span>${dynHint}</div>
-         <div class="hm-spectrogram">
-           <div class="hm-spectrogram-label">Spectrogram <span class="spectrogram-track-name" id="spectrogram-track-name"></span></div>
-           <div id="spectrogram-wrap">
-             <div class="spectrogram-img-wrap" id="spectrogram-img-wrap">
-               <div class="spectrogram-loading" id="spectrogram-loading">Generating…</div>
-               <img id="spectrogram-img" class="spectrogram-img" style="display:none" />
-             </div>
-           </div>
-         </div>`
-      : `<div class="hm-pane-empty">No analysis yet.${reanalyzeBtn ? ` ${reanalyzeBtn}` : ''}</div>`
 
     // Which track to show by default: currently playing (if in this rec) else first track
     const firstTrack    = rec.tracks?.[0] ?? null
@@ -4123,6 +4058,17 @@ const App = (() => {
       </div>
       <div class="rec-detail-header">
         <div class="rec-header-left">
+          <!-- Performer avatar (Ryan, 2026-08-18) — circle to the left of the
+               name and date lines, spanning both. Same perfPhotoHtml() the
+               cards and the Performer hero use, so an act has one face
+               everywhere; falls back to the initials disc, which is the NORMAL
+               appearance rather than an error state (62 of 173 performers are
+               photographed). Ringed in the performer's genre colour, matching
+               the card treatment. -->
+          <div class="rec-header-avatar" style="--genre-fg:${esc(perf?.performer_genre_color || 'var(--bd-1)')}">
+            ${perfPhotoHtml({ image_id: perf?.performer_image_id, performer: perfName }, 'rec-header-photo')}
+          </div>
+          <div class="rec-header-lines">
           <div class="rec-name-row">
             <h2 class="rec-perf-name${canEdit ? ' pp-editable' : ''}" id="rec-perf-name"${canEdit ? ' title="Click to reassign performer"' : ''}>${esc(perfName) || (canEdit ? '<span class="pp-empty">Set performer</span>' : '')}</h2>
             ${perfNavLink}
@@ -4141,22 +4087,16 @@ const App = (() => {
           <div class="rec-artists-row" id="rec-artists"></div>
           <div class="rec-header-notes${canEdit ? ' pp-editable' : ''}${rec.notes ? '' : ' pp-empty'}" id="rec-notes"${canEdit ? ' title="Click to edit notes"' : ''}>${rec.notes ? esc(rec.notes) : (canEdit ? 'Add notes…' : '')}</div>
           ${rec.is_official ? `<div class="badge-row"><span class="badge-official" title="Contains officially released material">© Official</span></div>` : ''}
-        </div>
-        <!-- Source / Fidelity vertical-tab box (Ryan, 2026-07-15 — mirrors the
-             lower-right slide-panel's look). Source shown by default; Fidelity
-             is dimmed until analysis exists, and now also holds this track's
-             spectrogram (moved out of the lower-right panel, which was
-             getting crowded). -->
-        <div class="rec-header-right hm-tabbed-panel">
-          <div class="hm-tabbed-body">
-            <div class="hm-pane active" id="hm-pane-source">${sourcePane}</div>
-            <div class="hm-pane" id="hm-pane-fidelity">${fidelityPane}</div>
-          </div>
-          <div class="hm-tabs">
-            <button class="hm-tab active" data-hmpane="source">Source</button>
-            <button class="hm-tab${firstAnalysed ? '' : ' hm-tab--empty'}" data-hmpane="fidelity">Fidelity</button>
           </div>
         </div>
+        <!-- Source / Lineage / Quality — a plain borderless block since
+             2026-08-18 (Ryan). It was a two-tab panel (Source | Fidelity)
+             mirroring the Side Panel's look, but with Fidelity gone there is
+             one pane left, and a tab strip for one pane is furniture. These
+             three are what a human typed about the recording; everything the
+             machine measured now lives in the Side Panel's Listening Quality
+             tab. -->
+        <div class="rec-header-right">${metaBlock}</div>
       </div>
       <div class="action-bar">
         <!-- Playback actions only — editing/admin actions live at the bottom -->
@@ -4173,17 +4113,33 @@ const App = (() => {
         </div>
 
         <!-- Slide-in right panel — collapsed by default, expands to ~40% -->
-        <div class="slide-panel" id="slide-panel">
+        <!-- Horizontal tab strip (Ryan, 2026-08-18). The vertical strip ran
+             out of vertical room once a fifth tab arrived, and it degraded
+             badly on a short browser window — rotated text cannot wrap or
+             ellipsize. Horizontal tabs scroll sideways instead, which is a
+             graceful failure. When the panel is collapsed the strip has
+             nowhere to live, so a slim rail button takes its place. -->
+        <div class="slide-panel slide-panel--htabs" id="slide-panel">
+          <button class="slide-rail" id="slide-rail" title="Show details">Details</button>
           <div class="slide-panel-body" id="slide-panel-body">
+
+            <!-- Listening Quality pane — the single quality surface (IO-61,
+                 2026-08-18). Verdict band + the three group meters up top,
+                 each group's advanced metrics folded underneath it behind a
+                 caret. Loaded lazily on first open: it is a second request and
+                 most visits to a recording are to play it, not to audit it. -->
+            <div class="slide-pane" id="sp-quality">
+              <div class="slide-pane-header">Listening Quality</div>
+              <div class="slide-pane-scroll" id="sp-quality-body">
+                <div class="info-panel-empty">Loading…</div>
+              </div>
+            </div>
 
             <!-- Info File pane -->
             <div class="slide-pane" id="sp-info">
               <div class="slide-pane-header">Info File</div>
               <div class="slide-pane-scroll"><div class="rev-raw-section">${infoContent}</div></div>
             </div>
-
-            <!-- Spectrogram moved into the top-right Fidelity tab, 2026-07-15
-                 (Ryan: this panel was getting crowded) — see hm-pane-fidelity. -->
 
             <!-- File Tags pane — actual on-disk Vorbis comments -->
             <div class="slide-pane" id="sp-filetags">
@@ -4215,8 +4171,8 @@ const App = (() => {
 
           </div>
 
-          <!-- Vertical tab strip anchored to the right edge -->
           <div class="slide-tabs">
+            <button class="slide-tab" data-pane="quality">Quality</button>
             <button class="slide-tab" data-pane="info">Info File</button>
             <button class="slide-tab" data-pane="filetags">File Tags</button>
             <button class="slide-tab" data-pane="checksums">Checksums</button>
@@ -4282,23 +4238,20 @@ const App = (() => {
       })
     })
 
-    // ── Quick edit: recording metadata (Source/Lineage/Quality/Rating) ────────
+    // ── Quick edit: recording metadata (Source/Lineage/Quality) ──────────────
     // Click an editable value → inline input → Enter saves, Esc cancels.
+    // Rating dropped 2026-08-18 — see app/models/recording.py.
     function metaCellDisplay(field) {
       if (field === 'source')  return esc(rec.source || '—')
       if (field === 'lineage') { const l = rec.lineage; return esc(l ? (l.length > 220 ? l.slice(0, 220) + '…' : l) : '—') }
-      if (field === 'rating')  return rec.rating != null ? `<span class="rating-badge">${rec.rating}</span>` : '—'
       return esc(rec.quality || '—')  // quality
     }
     function startMetaQuickEdit(cell) {
       const field = cell.dataset.qedit
-      const raw = field === 'rating'  ? (rec.rating != null ? rec.rating : '')
-                : field === 'source'  ? (rec.source  || '')
+      const raw = field === 'source'  ? (rec.source  || '')
                 : field === 'lineage' ? (rec.lineage || '')
                 :                       (rec.quality || '')
-      const type  = field === 'rating' ? 'number' : 'text'
-      const extra = field === 'rating' ? 'min="0" max="100"' : ''
-      cell.innerHTML = `<input class="hm-qedit-input" type="${type}" ${extra} value="${esc(String(raw))}" />`
+      cell.innerHTML = `<input class="hm-qedit-input" type="text" value="${esc(String(raw))}" />`
       const input = cell.querySelector('input')
       input.focus(); input.select()
       let done = false
@@ -4306,9 +4259,7 @@ const App = (() => {
         if (done) return; done = true
         if (save) {
           const v = input.value.trim()
-          const payload = {}
-          if (field === 'rating') payload.rating = v === '' ? null : Math.max(0, Math.min(100, parseInt(v, 10) || 0))
-          else payload[field] = v || null
+          const payload = { [field]: v || null }
           try {
             await API.recordings.update(recordingId, { ...payload, change_note: 'Quick edit' })
             Object.assign(rec, payload)
@@ -4755,16 +4706,20 @@ const App = (() => {
       }
     }
 
-    // Analyze Audio — run Librosa analysis on all tracks
-    document.getElementById('btn-analyze-audio')?.addEventListener('click', async () => {
+    // Analyze Audio — run Librosa analysis on all tracks. A named function
+    // rather than a binding at page-build time, because the button now lives
+    // inside the lazily-rendered Listening Quality pane and does not exist in
+    // the DOM yet when this line runs. wireReanalyze() attaches it.
+    async function onAnalyzeAudio() {
       const btn = document.getElementById('btn-analyze-audio')
+      if (!btn) return
       btn.disabled = true
       btn.textContent = 'Analyzing…'
       try {
         const result = await API.recordings.reprocess(recordingId)
         btn.textContent = `Done (${result.analysed} track${result.analysed === 1 ? '' : 's'})`
         setTimeout(() => {
-          if (btn) { btn.disabled = false; btn.textContent = 'Analyze Audio' }
+          if (btn) { btn.disabled = false; btn.textContent = 'Re-Analyze Tracks' }
           renderRecordingView(recordingId)  // reload to show waveform/spectrogram
         }, 1500)
         if (result.errors?.length) {
@@ -4772,10 +4727,10 @@ const App = (() => {
         }
       } catch (e) {
         btn.disabled = false
-        btn.textContent = 'Analyze Audio'
+        btn.textContent = 'Re-Analyze Tracks'
         alert('Analysis failed: ' + e.message)
       }
-    })
+    }
 
     // Re-validate checksums — re-checks against the files on disk now, and
     // opportunistically picks up any fingerprint file that was never parsed
@@ -4918,7 +4873,14 @@ const App = (() => {
         activePane = pane
         state.recLastPane = pane   // survives the reload an Apply/edit triggers
         if (pane === 'filetags') loadFileTags(recordingId)
+        if (pane === 'quality')  loadQualityPane()
       }
+
+      // Collapsed rail — the horizontal tab strip has nowhere to render at 28px
+      // wide, so this replaces it and reopens whichever pane was last shown.
+      document.getElementById('slide-rail')?.addEventListener('click', () => {
+        openPane(activePane || state.recLastPane || 'quality')
+      })
 
       document.querySelectorAll('.slide-tab').forEach(tab => {
         tab.addEventListener('click', () => {
@@ -4938,30 +4900,175 @@ const App = (() => {
 
       // Default: whichever pane was open before the last reload (e.g. an AI
       // Assist Apply), falling back to Info File on a fresh visit. 'spectrogram'
-      // is stale from before it moved into the Fidelity tab (2026-07-15) —
-      // treat it the same as no saved pane.
+      // is stale from before the spectrogram moved (2026-07-15, then again
+      // 2026-08-18 into the Quality pane) — treat it as no saved pane.
       openPane((state.recLastPane && state.recLastPane !== 'spectrogram') ? state.recLastPane : 'info')
     })()
 
-    // ── Top-right Source/Fidelity tab wiring ────────────────────────────────
-    ;(function () {
-      const tabs  = mainContent.querySelectorAll('.hm-tab')
-      if (!tabs.length) return
-      tabs.forEach(tab => {
-        tab.addEventListener('click', () => {
-          const pane = tab.dataset.hmpane
-          mainContent.querySelectorAll('.hm-pane').forEach(p => p.classList.remove('active'))
-          mainContent.querySelectorAll('.hm-tab').forEach(t => t.classList.remove('active'))
-          document.getElementById(`hm-pane-${pane}`)?.classList.add('active')
-          tab.classList.add('active')
-          // Spectrogram loads lazily the first time Fidelity is opened.
-          if (pane === 'fidelity' && defaultTrackId) {
-            const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
-            loadSpectrogram(defaultTrackId, defaultTrack?.title)
-          }
+    // ── Listening Quality pane ──────────────────────────────────────────────
+    // Renders the SAME report the triage card renders, from the same endpoint
+    // and the same interpret_full() output — see app/api/quality.py. Anything
+    // that changes in the engine's vocabulary changes in both places at once,
+    // which is the whole point of unifying them (IO-61).
+    //
+    // Differences from the triage card, all deliberate: no sampled-track
+    // players (the real player is right there), no triage actions (the
+    // recording is already ingested), and the per-group metrics are COLLAPSED
+    // behind a caret. On the triage card the metrics are the point — you are
+    // deciding whether to ingest. Here you are usually deciding whether to
+    // press play, and the verdict answers that on its own.
+    let _qualityLoaded = false
+    async function loadQualityPane() {
+      if (_qualityLoaded) return
+      _qualityLoaded = true
+      const body = document.getElementById('sp-quality-body')
+      if (!body) return
+      let q
+      try {
+        q = await API.quality.forRecording(recordingId, true)
+      } catch (e) {
+        // 404 is the normal "never analysed" case, not a failure worth shouting
+        // about — offer the button that fixes it.
+        body.innerHTML = `<div class="rq-empty">No listening-quality analysis for this recording yet.
+          ${reanalyzeBtn}</div>`
+        wireReanalyze()
+        return
+      }
+      body.innerHTML = buildQualityPaneHtml(q)
+      wireReanalyze()
+
+      // Caret sections, closed by default.
+      body.querySelectorAll('.rq-adv-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const wrap = btn.closest('.rq-grp')?.querySelector('.rq-adv')
+          if (!wrap) return
+          const open = wrap.classList.toggle('open')
+          btn.classList.toggle('open', open)
+          btn.setAttribute('aria-expanded', open ? 'true' : 'false')
         })
       })
-    })()
+
+      // Spectrogram is the one heavy asset here, so it loads only once the
+      // pane it lives in is actually on screen.
+      if (defaultTrackId) {
+        const defaultTrack = rec.tracks.find(t => t.id === defaultTrackId)
+        loadSpectrogram(defaultTrackId, defaultTrack?.title)
+      }
+    }
+
+    // Re-Analyze is re-rendered with the pane, so its handler is re-attached
+    // rather than bound once at page build.
+    function wireReanalyze() {
+      const btn = document.getElementById('btn-analyze-audio')
+      if (btn && !btn._wired) { btn._wired = true; btn.addEventListener('click', onAnalyzeAudio) }
+    }
+
+    function buildQualityPaneHtml(q) {
+      const it = q.interpretation || {}
+      const band = q.verdict_band || 'unknown'
+
+      // Headline: the three-band verdict, not the raw composite. Decided
+      // 2026-07-31 — validated fit is r 0.55 / MAE ~7 grade points, so a
+      // decimal on the number is false precision. The number is still shown,
+      // smaller and beside the band, because an archivist ranking two shows
+      // needs to break a tie the band cannot.
+      const head = `
+        <div class="rq-head">
+          <span class="lq-verdict lq-verdict--${esc(band)}">${_LQ_BAND_TEXT[band] || '—'}</span>
+          <span class="rq-score" style="color:${_lqColour(q.listening_quality)}">${_fmt1(q.listening_quality)}</span>
+          <span class="rq-score-lbl">Listening Quality</span>
+          ${reanalyzeBtn}
+        </div>`
+
+      // Quick facts line — format, bitrate, cutoff. Same strip the triage card
+      // leads with, and the last surviving content of the old Fidelity tab.
+      const qk = it.quick || {}, cut = it.cutoff || {}
+      const bits = [
+        [qk.format, qk.bit_depth ? `${qk.bit_depth}-bit` : null,
+         qk.sample_rate_hz ? `${(qk.sample_rate_hz / 1000).toFixed(1)} kHz` : null]
+          .filter(Boolean).join(' ') || null,
+        qk.bitrate_kbps ? `${qk.bitrate_kbps} kbps` : null,
+        cut.khz != null ? `${cut.khz} kHz cutoff` : null,
+      ].filter(Boolean).map(esc)
+      const quick = bits.length
+        ? `<div class="rq-qline">${bits.map(b => `<span>${b}</span>`)
+            .join('<span class="sep">|</span>')}</div>` : ''
+
+      // Metrics filed under the group whose score they actually move, with the
+      // scored ones first — same ordering rule as the triage card, for the same
+      // reason: the first reading under a meter should be one that moves it.
+      const byGroup = {}
+      for (const m of (it.metrics || [])) (byGroup[m.group] ||= []).push(m)
+      for (const k of Object.keys(byGroup)) {
+        byGroup[k] = [...byGroup[k].filter(m => m.scored),
+                      ...byGroup[k].filter(m => !m.scored)]
+      }
+
+      const metricRow = m => {
+        const hasScale = m.scale && m.scale.length
+        const col = hasScale ? _stateColour(m.state) : 'var(--t1)'
+        const dp  = m.dp != null ? m.dp : (m.unit === ' Hz' ? 0 : 1)
+        const shown = m.abs ? Math.abs(m.value) : m.value
+        return `
+          <div class="rq-mrow${m.scored ? '' : ' rq-mrow--unscored'}" title="${esc(m.about || '')}">
+            <span class="rq-mlabel">${esc(m.label)}${m.scored ? '' : '<span class="rq-star">*</span>'}</span>
+            <span class="rq-mval" style="color:${col}">${_fmtN(shown, m.unit, dp)}</span>
+            <span class="rq-mverdict">${esc(m.verdict || '')}</span>
+          </div>`
+      }
+
+      const groups = (it.groups || []).map(g => {
+        const rows = byGroup[g.key] || []
+        return `
+        <div class="rq-grp">
+          <div class="rq-grp-head" title="${esc(g.blurb || '')}">
+            <span class="rq-grp-name">${esc(g.label)}</span>
+            <span class="rq-grp-score" style="color:${_lqColour(g.score)}">${_fmt1(g.score)}</span>
+            <span class="rq-grp-weight">${_lqWeight(g.key)}</span>
+          </div>
+          <div class="lq-meter"><div class="lq-meter-fill"
+               style="width:${g.score || 0}%;background:${_lqColour(g.score)}"></div></div>
+          <div class="rq-grp-txt">${esc(g.text || '')}</div>
+          ${rows.length ? `
+            <button class="rq-adv-toggle" aria-expanded="false">
+              <span class="rq-caret">\u25b8</span>${rows.length} metric${rows.length === 1 ? '' : 's'}
+            </button>
+            <div class="rq-adv">${rows.map(metricRow).join('')}
+              <div class="rq-star-note">* measured and shown, but carries no weight in the score.</div>
+            </div>` : ''}
+        </div>`
+      }).join('')
+
+      // Ungrouped catch-all: every metric should map to a group, but a new
+      // METRICS entry without a METRIC_GROUP entry would otherwise vanish
+      // silently, which is the worst failure mode for a panel like this.
+      const other = (byGroup.other || []).length ? `
+        <div class="rq-grp">
+          <div class="rq-grp-head"><span class="rq-grp-name">Ungrouped</span></div>
+          <div class="rq-adv open">${byGroup.other.map(metricRow).join('')}</div>
+        </div>` : ''
+
+      const issues = (it.issues || []).length
+        ? `<div class="rq-issues"><h4>Technical Issues</h4>
+            ${it.issues.map(i => `<div class="rq-issue"><b>${esc(i.issue)}</b> — ${esc(i.detail)}
+              (−${i.deduction}) <span>${esc(i.text || '')}</span></div>`).join('')}
+           </div>`
+        : `<div class="rq-clean">No technical issues detected — no clipping, dead channel,
+             phase problem or dropouts.</div>`
+
+      const spectro = `
+        <div class="rq-spectrogram">
+          <div class="rq-section-label">Spectrogram <span class="spectrogram-track-name" id="spectrogram-track-name"></span></div>
+          <div id="spectrogram-wrap">
+            <div class="spectrogram-img-wrap" id="spectrogram-img-wrap">
+              <div class="spectrogram-loading" id="spectrogram-loading">Generating…</div>
+              <img id="spectrogram-img" class="spectrogram-img" style="display:none" />
+            </div>
+          </div>
+        </div>`
+
+      return `<div class="rq-wrap">${head}${quick}${groups}${other}${issues}${spectro}</div>`
+    }
 
     // ── Waveform (wavesurfer.js) — official renderer, fully wired to the
     // persistent player, adopted 2026-07-15 ─────────────────────────────────
@@ -5086,8 +5193,11 @@ const App = (() => {
       row.addEventListener('click', () => {
         const tid   = parseInt(row.dataset.trackId)
         const title = row.querySelector('.track-title')?.textContent || ''
-        const fidelityPaneEl = document.getElementById('hm-pane-fidelity')
-        if (tid && _waveformMap[tid] && fidelityPaneEl?.classList.contains('active')) {
+        // Only when the Quality pane is on screen — the spectrogram lives
+        // inside it now (2026-08-18), so redrawing it while another pane is
+        // showing costs a render for a picture nobody can see.
+        const qualityPaneEl = document.getElementById('sp-quality')
+        if (tid && _waveformMap[tid] && qualityPaneEl?.classList.contains('active')) {
           loadSpectrogram(tid, title)
         }
       })
@@ -7394,7 +7504,6 @@ const App = (() => {
       f.country         = tags.country || info.country || ''
       f.source          = pick(tags, info, 'source') || ''
       f.quality         = ''
-      f.rating          = ''
       // Bug (Ryan, 2026-08-09): lineage almost always comes from the info
       // file's "Source:"/"Lineage:" text, not a FLAC tag, but this only ever
       // read tags.lineage — every other field here already falls back to the
@@ -7659,11 +7768,6 @@ const App = (() => {
               <div class="ingest-field">
                 <label>Quality</label>
                 <input type="text" id="f-quality" value="${esc(f.quality)}" />
-              </div>
-              <div class="ingest-field">
-                <label>Rating <span style="color:var(--t3);font-size:10px">0–100</span></label>
-                <input type="number" id="f-rating" min="0" max="100" style="width:100%"
-                       value="${f.rating != null && f.rating !== '' ? f.rating : ''}" placeholder="—" />
               </div>
             </div>
 
@@ -8417,7 +8521,6 @@ const App = (() => {
       f.is_official     = document.getElementById('f-is-official').checked
       f.source          = document.getElementById('f-source').value
       f.quality         = document.getElementById('f-quality').value.trim()
-      f.rating          = document.getElementById('f-rating').value.trim()
       f.lineage         = document.getElementById('f-lineage').value.trim()
       f.notes           = document.getElementById('f-notes').value.trim()
 
