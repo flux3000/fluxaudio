@@ -242,6 +242,10 @@ const API = (() => {
       get:    (id)       => get(`/api/performances/${id}`),
       create: (data)     => post('/api/performances/', data),
       update: (id, data) => put(`/api/performances/${id}`, data),
+      // Per-show instrument / note. NO CALLER as of 2026-08-22 — the inline
+      // editor was cut from V1 (Ryan) and a name click now opens the Artist
+      // page. Kept deliberately: the column, the resolver and the endpoint all
+      // still carry this, and the UI is the only piece that went.
       updatePersonnelRow: (perfId, personnelId, data) =>
         put(`/api/performances/${perfId}/personnel/${personnelId}`, data),
     },
@@ -271,11 +275,24 @@ const API = (() => {
       // Browse's On This Day module — recordings whose date matches today's
       // month/day, any year. Empty most days; the module hides itself then.
       onThisDay:  ()          => get('/api/recordings/on-this-day'),
+      // Sidebar Favorites. Complete rather than capped — see the endpoint.
+      favorites:  ()          => get('/api/recordings/favorites'),
       scan:       (folder)   => post('/api/recordings/scan', { folder_path: folder }),
       update:     (id, data) => put(`/api/recordings/${id}`, data),
-      delete:     (id)       => request('DELETE', `/api/recordings/${id}`),
+      // deleteFiles is an explicit opt-in from the confirm dialog's checkbox.
+      // The server resolves the folder itself and refuses anything that does not
+      // land inside LIBRARY_ROOT — the client never names a path.
+      delete:     (id, deleteFiles) => request('DELETE',
+        `/api/recordings/${id}${deleteFiles ? '?delete_files=1' : ''}`),
       writeTags:  (id)       => post(`/api/recordings/${id}/write-tags`),
+      // Info file save — DB always, plus the .txt on disk when the library
+      // folder already has one. Deliberately separate from update(): it can
+      // touch the filesystem, so it is its own explicit action.
+      saveInfoFile: (id, content) => post(`/api/recordings/${id}/info-file`, { content }),
       revealFolder: (id)     => post(`/api/recordings/${id}/reveal`),
+      // Move the folder out of the library to Workshop/Backlog and unpublish
+      // the row. Destination is a key, not a path — the server owns the paths.
+      moveOut:    (id, destination) => post(`/api/recordings/${id}/move`, { destination }),
       fileTags:   (id)       => get(`/api/recordings/${id}/tags`),
       reprocess:  (id)       => post(`/api/recordings/${id}/reprocess`),
       verifyChecksums: (id)  => post(`/api/recordings/${id}/verify-checksums`),

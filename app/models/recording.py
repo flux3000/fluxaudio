@@ -47,6 +47,30 @@ class Recording(db.Model):
     # Path to recording folder, relative to LIBRARY_ROOT — never sent to frontend
     folder_path    = db.Column(db.String(512), nullable=False)
 
+    # In the library, or back out at the workbench? (2026-08-21)
+    #
+    # True  — the folder lives under LIBRARY_ROOT at folder_path and the show is
+    #         part of the browsable collection. Every row ingested before this
+    #         column existed backfills to True, which is correct: being in the
+    #         database used to mean exactly this.
+    # False — "Move to Workshop/Backlog" physically moved the folder OUT of the
+    #         library. The audio still exists and the metadata, lineage,
+    #         checksums and event history ingest produced are all still here;
+    #         the show is simply off the shelf.
+    #
+    # Why a flag rather than deleting the row: deleting throws away everything
+    # ingest learned, so a show that comes back has to be re-ingested from
+    # scratch. Why not leave it published: folder_path would point at nothing,
+    # and a recording that browses but cannot play is the failure mode CONTEXT.md
+    # warns about — an empty state that is really a broken fetch.
+    #
+    # ⚠ folder_path is deliberately NOT rewritten on a move. It stays as the
+    # library-relative path the show HAD, because it is only meaningful relative
+    # to LIBRARY_ROOT and the folder is no longer under it. Where the folder
+    # actually went is recorded in the RecordingEvent the move writes.
+    is_published   = db.Column(db.Boolean, nullable=False, default=True,
+                               server_default="1")
+
     # Original folder name as ingested (before any renaming)
     original_folder_name = db.Column(db.String(512), nullable=True)
 

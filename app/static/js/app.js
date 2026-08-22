@@ -222,15 +222,17 @@ const App = (() => {
     }
   })
 
-  // ── Theme toggle ───────────────────────────────────────────────────────────
-  ;(function () {
-    const btn = document.getElementById('theme-btn')
-    if (!btn) return
-    btn.addEventListener('click', () => {
-      const isLight = document.body.classList.toggle('theme-light')
-      localStorage.setItem('fluxTheme', isLight ? 'light' : 'dark')
-    })
-  })()
+  // ── Theme ──────────────────────────────────────────────────────────────────
+  // The ◑ button left the sidebar header on 2026-08-22 (that header is gone —
+  // the app name and icon moved to the App Header). Light/dark is a preference,
+  // set rarely, so it lives in Settings with the other preferences rather than
+  // taking permanent space in the chrome. Still localStorage, not the server:
+  // it is per-machine, and it must apply before the first paint.
+  function setTheme(light) {
+    document.body.classList.toggle('theme-light', light)
+    localStorage.setItem('fluxTheme', light ? 'light' : 'dark')
+  }
+  function isLightTheme() { return document.body.classList.contains('theme-light') }
 
   // ── Resizable sidebar ──────────────────────────────────────────────────────
   ;(function () {
@@ -439,14 +441,84 @@ const App = (() => {
     return [...flags].sort()
   }
 
+  // ── Who may edit, and are they asking to? ────────────────────────────────
+  //
+  // Two separate questions, kept separate (Ryan, 2026-08-21):
+  //
+  //   hasEditRole()      Does this account have the authority at all?
+  //   getViewMode()      Is this person currently asking to use it?
+  //
+  // canEditLibrary() is their conjunction, and it stayed the name every caller
+  // already used — which is why adding a whole Playback mode touched almost
+  // nothing. The recording view, the personnel widget, the quick-edit cells and
+  // the track rows were all already built around this one flag, so switching
+  // modes turns the entire editing surface off through a single choke point
+  // instead of a dozen scattered checks that could drift apart.
+  //
+  // This is a UI mode, NOT a security boundary. Every endpoint still enforces
+  // its own role check server-side; Playback mode hides controls, it does not
+  // protect anything. A listener gets Playback because they have no edit role,
+  // not because the toggle put them there.
+
   // True for roles that may edit library metadata (admin/archivist).
   // Listener is read-only. Doesn't yet distinguish an archivist's specific
   // artist permissions (all_artists / user_artist_permission) — the frontend
   // has no per-artist gating anywhere else either, so this matches the
   // existing (coarser) enforcement level rather than building that out here.
-  function canEditLibrary() {
+  function hasEditRole() {
     const role = state.user?.role
     return role === 'admin' || role === 'archivist'
+  }
+
+  // 'admin' | 'playback'. Anyone without an edit role is ALWAYS 'playback' and
+  // never sees the toggle, so a stale localStorage value from a previous
+  // session on a shared machine cannot hand a listener an editing UI.
+  function getViewMode() {
+    if (!hasEditRole()) return 'playback'
+    return localStorage.getItem('fluxViewMode') === 'playback' ? 'playback' : 'admin'
+  }
+
+  function setViewMode(mode) {
+    const next = mode === 'playback' ? 'playback' : 'admin'
+    localStorage.setItem('fluxViewMode', next)
+    document.documentElement.classList.toggle('playback-mode', next === 'playback')
+    paintViewModeToggle()
+    // Re-render both halves of the chrome: the sidebar drops its admin entries
+    // and the current view rebuilds with the new gating. route() re-dispatches
+    // the hash we are already on, which is the whole re-render — and it is also
+    // what bounces us off an admin-only page if that is where we were standing.
+    renderSidebar()
+    route()
+  }
+
+  function paintViewModeToggle() {
+    const wrap = document.getElementById('view-mode-toggle')
+    if (!wrap) return
+    const show = hasEditRole()
+    wrap.classList.toggle('hidden', !show)
+    const mode = getViewMode()
+    wrap.querySelectorAll('.vm-opt').forEach(b => {
+      const on = b.dataset.mode === mode
+      b.classList.toggle('active', on)
+      b.setAttribute('aria-pressed', on ? 'true' : 'false')
+    })
+  }
+
+  function initViewMode() {
+    document.documentElement.classList.toggle('playback-mode', getViewMode() === 'playback')
+    paintViewModeToggle()
+    const wrap = document.getElementById('view-mode-toggle')
+    if (wrap && !wrap._wired) {
+      wrap._wired = true
+      wrap.addEventListener('click', e => {
+        const btn = e.target.closest('.vm-opt')
+        if (btn && btn.dataset.mode !== getViewMode()) setViewMode(btn.dataset.mode)
+      })
+    }
+  }
+
+  function canEditLibrary() {
+    return hasEditRole() && getViewMode() === 'admin'
   }
 
 
@@ -771,7 +843,7 @@ const App = (() => {
           ${icon ? `<span class="nav-icon">${icon}</span>` : ''}
           <span class="nav-dim-label truncate">${label}</span>
           <span class="nav-dim-actions">
-            ${libraryState.activeId != null ? '' :
+            ${(libraryState.activeId != null || dim === 'favorites') ? '' :
               `<span class="nav-action" data-act="new" data-admin
                      title="Create new ${esc(singular)}">＋</span>`}
             <span class="nav-action" data-act="refresh" title="Refresh list">↻</span>
@@ -786,7 +858,8 @@ const App = (() => {
     if (_dimCache[dim]) return _dimCache[dim]
     let rows = []
     try {
-      if (dim === 'venues')            rows = await API.venues.list()
+      if (dim === 'favorites')         rows = await API.recordings.favorites()
+      else if (dim === 'venues')       rows = await API.venues.list()
       else if (dim === 'performers')   rows = await API.performers.list()
       else if (dim === 'artists')      rows = await API.artists.list()
       else if (dim === 'collections')  rows = await API.collections.list()
@@ -800,12 +873,28 @@ const App = (() => {
     const box = document.getElementById(`nav-records-${dim}`)
     if (!box) return
     const rows = await _loadDim(dim)
-    const target = { venues: 'venue', performers: 'artist', artists: 'person', collections: 'collection', genres: 'genre' }[dim]
-    if (!rows.length) { box.innerHTML = `<div class="nav-record nav-record--empty">None yet</div>`; return }
-    box.innerHTML = rows.map(r => `
-      <div class="nav-record" data-dim="${dim}" data-id="${r.id}">
-        <span class="truncate">${esc(r.name)}</span>${r.recording_count ? `<span class="nav-record-count">${r.recording_count}</span>` : ''}
-      </div>`).join('')
+    const target = { favorites: 'recording', venues: 'venue', performers: 'artist',
+                     artists: 'person', collections: 'collection', genres: 'genre' }[dim]
+    if (!rows.length) {
+      // Favorites is empty by default for everyone, so it says what to DO about
+      // it rather than the bare "None yet" a dimension index uses.
+      box.innerHTML = dim === 'favorites'
+        ? `<div class="nav-record nav-record--empty">Star a recording to keep it here</div>`
+        : `<div class="nav-record nav-record--empty">None yet</div>`
+      return
+    }
+    // Favorites rows are recordings, not dimension entries: a show is named by
+    // its act and its date, and the date is load-bearing for a live recording —
+    // it is how collectors name, trade and search shows (see CONTEXT.md).
+    box.innerHTML = rows.map(r => dim === 'favorites'
+      ? `<div class="nav-record nav-record--fav" data-dim="${dim}" data-id="${r.id}"
+              title="${esc([r.performer, r.date, r.venue].filter(Boolean).join(' · '))}">
+           <span class="truncate">${esc(r.performer || 'Unknown act')}</span>
+           <span class="nav-record-sub">${esc(r.date || '')}</span>
+         </div>`
+      : `<div class="nav-record" data-dim="${dim}" data-id="${r.id}">
+           <span class="truncate">${esc(r.name)}</span>${r.recording_count ? `<span class="nav-record-count">${r.recording_count}</span>` : ''}
+         </div>`).join('')
     box.querySelectorAll('.nav-record[data-id]').forEach(el =>
       el.addEventListener('click', () => { window.location.hash = `#/${target}/${el.dataset.id}` }))
   }
@@ -890,6 +979,23 @@ const App = (() => {
       <div class="lib-select-menu" id="lib-select-menu" style="display:none"></div>`
   }
 
+  // Renders the selector into its App Header host and wires it. Called from
+  // renderSidebar(), which already fires at every moment this can change.
+  //
+  // With no remote libraries the host is left EMPTY rather than showing a
+  // one-option control: a caret that opens a menu of one promises something the
+  // app cannot yet do, and in the header — where space is now contested by the
+  // mode toggle and the user chip — a label that only ever says "My Library"
+  // beside a sidebar heading that says the same thing is pure duplication.
+  // The moment a remote is joined it appears.
+  function renderLibrarySelector() {
+    const host = document.getElementById('lib-select-host')
+    if (!host) return
+    if (libraryState.remotes.length === 0) { host.innerHTML = ''; return }
+    host.innerHTML = librarySelectorHtml()
+    wireLibrarySelector(host)
+  }
+
   function wireLibrarySelector(nav) {
     const el = nav.querySelector('#lib-select')
     const menu = nav.querySelector('#lib-select-menu')
@@ -963,7 +1069,8 @@ const App = (() => {
   async function renderSidebar() {
     const nav = document.getElementById('sidebar-nav')
     if (!nav) return
-    _dimCache.venues = _dimCache.performers = _dimCache.artists = _dimCache.collections = _dimCache.genres = null
+    _dimCache.favorites = _dimCache.venues = _dimCache.performers =
+      _dimCache.artists = _dimCache.collections = _dimCache.genres = null
 
     // A shared library offers a deliberately narrower sidebar. This is not
     // squeamishness about peer mode — it is that api/share.py has no LIST
@@ -980,16 +1087,36 @@ const App = (() => {
     // moved: a peer reaches a performer, venue or genre page FROM a recording
     // they were granted, and an index listing three genres is noise pretending
     // to be navigation. The pages themselves still exist and still work.
+    // Reworked 2026-08-22 (Ryan) along the lines of Spotify's left column: this
+    // is a shelf of things you chose to keep — starred shows, collections, and
+    // playlists once those exist — not a menu of the app's pages.
+    //
+    // What left, and where it went:
+    //   Library link      → the App Header's Home button. "My Library" is now a
+    //                       plain heading; two ways to reach one page, one of
+    //                       them a heading that only sometimes did something,
+    //                       was the confusing half.
+    //   Recently Added    → it was already a module on the Library view. A nav
+    //                       link to a page that duplicates a module you scroll
+    //                       past on arrival is a second front door to one room.
+    //   Sharing           → Settings. Peer management is account configuration,
+    //                       not a place in the library.
+    //   Library selector  → the App Header, beside the mode toggle. Switching
+    //                       library is a whole-app context change; the sidebar
+    //                       is for moving around inside one.
+    //   Add Recordings    → the bottom. It is the one thing here that is an
+    //                       action rather than a destination.
+    //
+    // The dimension indexes keep their footer as-is: they are how you get at
+    // the library along an axis other than "shows I kept", and they were not
+    // part of what needed rethinking.
     const remote = libraryState.activeId != null
+    const active = activeLibrary()
     nav.innerHTML = remote ? `
-      ${librarySelectorHtml()}
-      <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
+      <div class="nav-header truncate">${esc(active ? active.display_name : 'Shared Library')}</div>
       ${_dimSection('collections', null, 'Collections', true)}` : `
-      ${librarySelectorHtml()}
-      <a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recordings</a>
-      <a class="nav-item nav-top" data-nav="library" href="#/"><span class="nav-icon">◈</span> Library</a>
-      <a class="nav-item nav-top" data-nav="recent" href="#/recent"><span class="nav-icon">◷</span> Recently Added</a>
-      <a class="nav-item nav-top" data-nav="peers" href="#/peers"><span class="nav-icon">⇄</span> Sharing</a>
+      <div class="nav-header">My Library</div>
+      ${_dimSection('favorites', '★', 'Favorites', true)}
       ${_dimSection('collections', null, 'Collections', true)}
       <div class="nav-spacer"></div>
       <div class="nav-dims-foot">
@@ -997,7 +1124,14 @@ const App = (() => {
         ${_dimSection('performers', '✦', 'Performers')}
         ${_dimSection('artists', '♪', 'Artists')}
         ${_dimSection('genres', '♫', 'Genres')}
-      </div>`
+      </div>
+      ${canEditLibrary() ? `<a class="nav-add-btn" data-nav="ingest" href="#/ingest"><span class="nav-add-plus">+</span> Add Recordings</a>` : ''}`
+
+    // The library selector lives in the App Header now, but it is rendered from
+    // here: this function already runs at every moment the selector could need
+    // to change (boot, after loadRemotes, on a mode switch, after a library
+    // switch), and one render path is worth more than tidy ownership.
+    renderLibrarySelector()
     nav.querySelectorAll('.nav-expand').forEach(el => {
       el.addEventListener('click', e => {
         if (e.target.closest('.nav-action')) return
@@ -1012,7 +1146,6 @@ const App = (() => {
         else createInDim(dim)
       })
     })
-    wireLibrarySelector(nav)
     state.expandedDims.forEach(dim => _renderDimRecords(dim))
     setActiveNav(state._activeNav)
   }
@@ -1233,21 +1366,30 @@ const App = (() => {
     const tabs = (opts.tabs || []).filter(Boolean)
     const activeId = (tabs.find(t => t.active) || tabs[0] || {}).id
     const stats = opts.stats || []
+    // Playback mode: no editable title, and no hero actions — every page that
+    // passes `actions` passes an admin verb there (Delete performer / venue /
+    // genre / collection / artist, + Add peer, + New collection). Enforced in
+    // the shell rather than at each caller so a new entity page cannot forget.
+    // ⚠ This also removes "+ New collection" in Playback. Add to Collection and
+    // Mark as Favorite still work everywhere; MAKING a collection is filed as
+    // editing. Reverse by moving that one call site to its own opt-in.
+    const shellEditable = canEditLibrary()
+    const titleEditable = opts.titleEditable && shellEditable
+    const heroActions   = shellEditable ? opts.actions : null
     return `
       <div class="performer-page${opts.pageClass ? ' ' + opts.pageClass : ''}">
-        ${opts.navBack ? `<div class="pp-back-row"><div class="breadcrumb" id="pp-back-btn">← ${esc(opts.navBack.label)}</div></div>` : ''}
 
         <div class="pp-hero">
           ${opts.portrait ? `<div class="pp-hero-portrait">${opts.portrait}</div>` : ''}
           <div class="pp-hero-main">
-            <h1 class="pp-name${opts.titleEditable ? ' pp-editable' : ''}"
+            <h1 class="pp-name${titleEditable ? ' pp-editable' : ''}"
                 ${opts.titleId ? `id="${opts.titleId}"` : ''}
-                ${opts.titleEditable ? 'title="Click to edit"' : ''}>${opts.title}</h1>
+                ${titleEditable ? 'title="Click to edit"' : ''}>${opts.title}</h1>
             ${opts.chips ? `<div class="pp-hero-chips">${opts.chips}</div>` : ''}
             ${stats.length ? `<div class="pp-hero-stats">${stats.map(([n, l]) => `
               <div class="pp-stat"><div class="pp-stat-n">${esc(String(n))}</div><div class="pp-stat-l">${esc(l)}</div></div>`).join('')}</div>` : ''}
           </div>
-          ${opts.actions ? `<div class="pp-hero-actions">${opts.actions}</div>` : ''}
+          ${heroActions ? `<div class="pp-hero-actions">${heroActions}</div>` : ''}
         </div>
 
         ${tabs.length > 1 ? `
@@ -1290,7 +1432,12 @@ const App = (() => {
     function render() {
       const box = document.getElementById(opts.mountId)
       if (!box) return
-      const ft = typeof opts.fetchTile === 'function' ? opts.fetchTile() : opts.fetchTile
+      // Playback mode gets the pictures and nothing else — no per-photo
+      // actions, no drop zone, no Commons fetch tile.
+      const galEditable = canEditLibrary()
+      const ft = galEditable
+        ? (typeof opts.fetchTile === 'function' ? opts.fetchTile() : opts.fetchTile)
+        : null
       box.innerHTML = `
         <div class="pp-gal" data-gal="1">
           ${images.map(img => `
@@ -1299,16 +1446,16 @@ const App = (() => {
               <img src="${opts.api.imageUrl(img.id)}" alt="" loading="lazy">
               ${img.is_primary ? '<span class="pp-ph-tag">Primary</span>' : ''}
               ${img.credit ? `<span class="pp-ph-credit">${esc(img.credit)}</span>` : ''}
-              <div class="pp-ph-acts">
+              ${galEditable ? `<div class="pp-ph-acts">
                 ${img.is_primary ? '' : `<button type="button" class="pp-ph-btn" data-act="primary">Make primary</button>`}
                 <button type="button" class="pp-ph-btn" data-act="delete">Delete</button>
-              </div>
+              </div>` : ''}
             </div>`).join('')}
-          <div class="pp-drop" data-drop="1">
+          ${galEditable ? `<div class="pp-drop" data-drop="1">
             <span class="pp-drop-plus">＋</span>
             <span>Drop photos here<br>or click to browse</span>
             <div class="pp-drop-veil">Drop to upload</div>
-          </div>
+          </div>` : ''}
           ${ft ? `
             <div class="pp-drop pp-fetch-tile${ft.run ? '' : ' is-disabled'}" data-fetch="1"
                  ${ft.run ? '' : 'aria-disabled="true"'}>
@@ -1322,9 +1469,11 @@ const App = (() => {
                accept="image/png,image/jpeg,image/webp" style="display:none" />
         <div class="pp-fetch-msg" data-msg="1"></div>
         <div class="pp-gal-note">${
-          images.length
-            ? 'The primary photo is the one shown on this page and on cards.'
-            : 'No photos yet. The primary photo appears on this page and on cards.'
+          !galEditable
+            ? (images.length ? '' : 'No photos yet.')
+            : images.length
+              ? 'The primary photo is the one shown on this page and on cards.'
+              : 'No photos yet. The primary photo appears on this page and on cards.'
         }</div>`
 
       const input = box.querySelector('[data-input]')
@@ -1778,11 +1927,9 @@ const App = (() => {
         root.querySelector(`.pp-pane[data-pane="${btn.dataset.pane}"]`)?.classList.add('active')
       })
     })
-    if (navBack) {
-      root.querySelector('#pp-back-btn')?.addEventListener('click', () => {
-        window.location.hash = navBack.hash
-      })
-    }
+    // The #pp-back-row link was removed 2026-08-22 — the App Header's back
+    // arrow covers every view. `navBack` is still threaded through because the
+    // new-entity forms use it as their post-save/cancel destination.
   }
 
   // A recordings pane using the flat catalog table — the shape Venue, Artist,
@@ -3538,8 +3685,30 @@ const App = (() => {
   }
 
   // Turn an element into a click-to-edit field. opts: {get, onSave, multiline, placeholder}.
+  // Every click-to-edit field in the app goes through here — recording notes,
+  // performer and venue and genre and collection and artist names and
+  // descriptions, venue City/State/Country. That makes it the one place
+  // Playback mode has to be honoured, rather than gating ~25 call sites and
+  // missing one (which is exactly how the Venue page's City/State/Country
+  // stayed editable in Playback — Ryan, 2026-08-22).
+  //
+  // It strips the affordance as well as the behaviour: a span that still looks
+  // clickable and highlights on hover but does nothing is worse than a plain
+  // one, because the user tries it twice before believing it.
   function makeInlineEditable(el, opts) {
     if (!el) return
+    if (!canEditLibrary()) {
+      el.classList.remove('pp-editable')
+      el.removeAttribute('title')
+      // An empty field's text is a call to action here by convention — "Add a
+      // description…", "Add notes…". With no way to act on it, it is a lie, so
+      // it goes and the space closes up. A real "—" (unknown value) is left
+      // alone: that still means something to a reader.
+      if (el.classList.contains('pp-empty') && /^Add\b/.test(el.textContent.trim())) {
+        el.textContent = ''
+      }
+      return
+    }
     el.addEventListener('click', () => {
       if (el.querySelector('input, textarea')) return   // already editing
       const cur = opts.get()
@@ -3875,7 +4044,12 @@ const App = (() => {
     // hack that only worked if you'd arrived via a Performer page (Ryan's
     // 2026-07-23 bug report: Recently Added → Recording → Back landed on
     // Library, since selectedArtist was never set by Recently Added).
-    const backLabel = state.navBack ? `← ${esc(state.navBack.label)}` : '← Back'
+    // The visible "← Library" link is gone (Ryan, 2026-08-22) — the App
+    // Header's back arrow does this job for every view at once. state.navBack
+    // survives because it is still the right destination after a delete or a
+    // move: those actions destroy the page you are on, so "go back" is more
+    // useful than "go to the previous entry in the history stack", which would
+    // be this same dead recording.
     const backHash  = state.navBack ? state.navBack.hash : '#/'
 
     // We need performance info to show the date/venue
@@ -3950,13 +4124,20 @@ const App = (() => {
         </div>`
     }).join('')
 
-    // Editable for admins/archivists — same textarea treatment as Add
-    // Recording's Info File pane (looks like plain text until you click in;
-    // Ryan, 2026-07-15: "match the info file editing capability and UX
-    // treatment we have in Add Recording"). Read-only <pre> for viewers.
+    // Info File is READ-ONLY until asked otherwise (Ryan, 2026-08-21). It used
+    // to be a live textarea that autosaved on blur, matching Add Recording —
+    // but Add Recording is a form you came to in order to type, and a recording
+    // page is a page you came to in order to listen. An always-hot textarea on
+    // the listening surface means a stray click plus a keystroke silently
+    // rewrites the taper's own words. Admins get an explicit "Edit File" link;
+    // everyone else never sees an editable control at all.
+    //
+    // Still a <textarea> rather than a <pre>-swapped-for-a-textarea, so that
+    // unlocking preserves scroll position and needs no re-render: the lock is
+    // the `readonly` attribute plus a class that strips the input chrome.
     const infoContent = canEdit
-      ? `<textarea class="rev-info-text rev-info-edit" id="rec-info-edit"
-          placeholder="No info file found — paste or type one in.">${esc(rec.info_file_content || '')}</textarea>`
+      ? `<textarea class="rev-info-text rev-info-edit rev-info-text--locked" id="rec-info-edit"
+          readonly placeholder="No info file found.">${esc(rec.info_file_content || '')}</textarea>`
       : (rec.info_file_content
           ? `<pre class="info-file-content">${esc(rec.info_file_content)}</pre>`
           : `<div class="info-panel-empty">No info file attached</div>`)
@@ -3990,31 +4171,57 @@ const App = (() => {
 
     // Quick-edit in place is unchanged — click a value, type, Enter to save.
     const trunc          = (s, n) => s && s.length > n ? s.slice(0, n) + '\u2026' : s
-    const sourceDisplay  = rec.source || ''
     const lineageDisplay = rec.lineage ? trunc(rec.lineage, 220) : null
 
     const qEditable = canEditLibrary()
     const qc  = qEditable ? ' hm-val--editable' : ''
     const qa  = f => qEditable ? ` data-qedit="${f}" title="Click to edit"` : ''
-    const metaBlock = `
-      <div class="hm-row"><span class="hm-label">Source</span><span class="hm-val${qc}"${qa('source')}>${esc(sourceDisplay || '\u2014')}</span></div>
-      <div class="hm-row"><span class="hm-label">Lineage</span><span class="hm-val${qc}"${qa('lineage')}>${esc(lineageDisplay || rec.lineage || '\u2014')}</span></div>
-      <div class="hm-row"><span class="hm-label">Quality</span><span class="hm-val ${qualityClass(rec.quality)}${qc}"${qa('quality')}>${esc(rec.quality || '\u2014')}</span></div>`
+    // Source and Quality render with the SAME chips the Library rows, cards and
+    // search results use (Ryan, 2026-08-21) — a coloured source badge and the
+    // graded quality colour — rather than the flat grey text they used to carry.
+    // They are the two fastest reads on a recording, and a listener scanning a
+    // list then opening a show should not have to re-learn what "SBD" looks
+    // like on the way in. Editability is unchanged wherever they land: the chip
+    // sits INSIDE the .hm-val cell rather than replacing it, so the quick-edit
+    // handler still finds .hm-val--editable[data-qedit] and swaps its innerHTML.
+    //
+    // The three of them no longer share a box (Ryan, 2026-08-21). They were
+    // never one thing — Quality is a human verdict on the whole recording and
+    // the single attribute a collector sorts and chooses by, while Source and
+    // Lineage are provenance: the tape's paperwork, read once when you care
+    // where it came from. So Quality goes UP into the action row at full size,
+    // and Source + Lineage go DOWN into a quiet row with Members and Guests,
+    // where the rest of the show's supporting facts already live.
+    const qualityChip = `
+      <span class="rec-quality-chip" title="Quality grade">
+        <span class="rec-quality-lbl">Quality</span>
+        <span class="hm-val hm-val--chip${qc}"${qa('quality')}><span class="quality ${qualityClass(rec.quality)}">${esc(rec.quality || '\u2014')}</span></span>
+      </span>`
 
-    // Re-Analyze moves with the data it regenerates: it now lives at the top of
-    // the Listening Quality pane rather than in the retired Fidelity tab.
+    // Aligned with the Members/Guests rows above it — same .mg-row-label type
+    // treatment and the same left edge, because it is the same kind of content.
+    const sourceLineageRow = (!qEditable && !rec.source && !rec.lineage) ? '' : `
+      <div class="rec-sl-row">
+        <div class="rec-sl-item">
+          <span class="mg-row-label">Source</span>
+          <span class="hm-val hm-val--chip${qc}"${qa('source')}>${sourceBadge(rec.source) || '\u2014'}</span>
+        </div>
+        <div class="rec-sl-item rec-sl-item--lineage">
+          <span class="mg-row-label">Lineage</span>
+          <span class="hm-val${qc}"${qa('lineage')}>${esc(lineageDisplay || rec.lineage || '\u2014')}</span>
+        </div>
+      </div>`
+
+    // Re-Analyze Tracks now lives in the Side Panel's tab strip with every
+    // other pane action (2026-08-21) — see the .pane-acts block below.
     //
     // Named "Tracks" deliberately: POST /reprocess re-runs the per-track librosa
     // pass (waveform, spectrogram, the raw readings) and does NOT recompute the
     // recording_quality row — there is no per-recording rescore endpoint today,
-    // only the bulk quality_store.rescore_stored(). Sitting this button under a
-    // "Listening Quality" heading while it silently leaves the score alone is
+    // only the bulk quality_store.rescore_stored(). A button labelled
+    // "Re-Analyze" sitting beside a quality verdict it silently leaves alone is
     // exactly the kind of thing that costs an hour later, so the label says
     // what it does.
-    const reanalyzeBtn = canEdit
-      ? `<button class="btn btn-ghost btn-sm rq-reanalyze-btn" id="btn-analyze-audio"
-                 title="Re-runs per-track audio analysis (waveform, spectrogram, raw readings). Does not recompute the Listening Quality score.">Re-Analyze Tracks</button>`
-      : ''
 
     // Which track to show by default: currently playing (if in this rec) else first track
     const firstTrack    = rec.tracks?.[0] ?? null
@@ -4027,6 +4234,7 @@ const App = (() => {
     const collectionArea = `
       <div class="rec-collections" id="rec-collections">
         ${(rec.collections || []).map(collectionTagHtml).join('')}
+        ${qualityChip}
         <button class="collection-add-btn" id="btn-add-collection">+ Add to Collection</button>
         <!-- Favorite toggle (moved here 2026-08-09 — was a star icon beside
              the title). Sits next to Add to Collection since both are "mark
@@ -4037,6 +4245,38 @@ const App = (() => {
         <button class="fav-toggle-btn${rec.is_favorite ? ' is-fav' : ''}" id="btn-favorite"
                 aria-pressed="${rec.is_favorite ? 'true' : 'false'}">${
           rec.is_favorite ? '★ Favorited' : '☆ Mark as Favorite'}</button>
+        <!-- Actions menu (Ryan, 2026-08-21). Replaces the .rec-bottom-actions
+             row that used to sit under the track list: four admin buttons at
+             the far end of a page whose main content scrolls, so reaching
+             Delete meant scrolling past every track. These are per-recording
+             admin verbs, they belong with the other per-recording controls,
+             and a menu keeps them from competing with Play All for attention
+             on a listening surface. Write Tags is NOT here — it moved into
+             the File Tags pane, beside the tags it writes. -->
+        ${canEdit ? `
+        <div class="rec-actions-wrap">
+          <button class="actions-btn" id="btn-rec-actions" aria-expanded="false"
+                  aria-haspopup="true">Actions ▾</button>
+          <div class="actions-menu" id="rec-actions-menu" hidden role="menu">
+            <button class="actions-item" role="menuitem" data-act="reveal">Open in Containing Folder</button>
+            <button class="actions-item" role="menuitem" data-act="official">${
+              rec.is_official ? '✓ Official Release' : 'Mark as Official Release'}</button>
+            <!-- Move to — same two destinations as the triage queue's Move,
+                 deliberately: Workshop and Backlog are the two real folders a
+                 show goes back to, and having a different vocabulary before
+                 and after ingest would be the kind of small inconsistency
+                 that makes people hesitate. -->
+            ${rec.is_published === false ? `
+            <div class="actions-note">Out of the library — in Workshop or Backlog</div>` : `
+            <button class="actions-item" role="menuitem" data-act="move-toggle" aria-expanded="false">Move to ›</button>
+            <div class="actions-submenu" id="rec-move-sub" hidden>
+              <button class="actions-item actions-item--indent" role="menuitem" data-act="move" data-dest="workshop">Workshop</button>
+              <button class="actions-item actions-item--indent" role="menuitem" data-act="move" data-dest="backlog">Backlog</button>
+            </div>`}
+            <div class="actions-sep"></div>
+            <button class="actions-item actions-item--danger" role="menuitem" data-act="delete">Delete Recording…</button>
+          </div>
+        </div>` : ''}
       </div>`
 
     setMainHTML(`
@@ -4053,10 +4293,17 @@ const App = (() => {
       </div>` : ''}
       <!-- Back link + collections, one row, horizontally aligned (Ryan, 2026-07-15) -->
       <div class="rec-top-row">
-        <div class="breadcrumb" id="back-btn">${backLabel}</div>
         ${collectionArea}
       </div>
       <div class="rec-detail-header">
+        <!-- Two rows since 2026-08-21: the identity row (avatar + lines +
+             then Notes spanning the full width beneath it. Notes used to sit
+             inside .rec-header-lines, which capped it at the left column's
+             width and at 480px on top of that — a paragraph of taper notes
+             wrapped into a narrow ribbon with half the header empty beside it.
+             The right-hand meta block that emptiness belonged to is gone as of
+             2026-08-21; see the qualityChip / sourceLineageRow comment. -->
+        <div class="rec-header-main">
         <div class="rec-header-left">
           <!-- Performer avatar (Ryan, 2026-08-18) — circle to the left of the
                name and date lines, spanning both. Same perfPhotoHtml() the
@@ -4085,18 +4332,15 @@ const App = (() => {
               : (eventStr ? `<span class="rec-dot">·</span><span class="rec-f-loc">${esc(eventStr)}</span>` : '')}
           </div>
           <div class="rec-artists-row" id="rec-artists"></div>
+          ${sourceLineageRow}
+          ${(rec.is_official || rec.is_published === false) ? `<div class="badge-row">
+            ${rec.is_published === false ? `<span class="badge-unpublished" title="This recording's folder was moved out of the library to Workshop or Backlog. The library record is intact; playback will not work until it comes back.">⚑ Out of Library</span>` : ''}
+            ${rec.is_official ? `<span class="badge-official" title="Contains officially released material">© Official</span>` : ''}
+          </div>` : ''}
           <div class="rec-header-notes${canEdit ? ' pp-editable' : ''}${rec.notes ? '' : ' pp-empty'}" id="rec-notes"${canEdit ? ' title="Click to edit notes"' : ''}>${rec.notes ? esc(rec.notes) : (canEdit ? 'Add notes…' : '')}</div>
-          ${rec.is_official ? `<div class="badge-row"><span class="badge-official" title="Contains officially released material">© Official</span></div>` : ''}
           </div>
         </div>
-        <!-- Source / Lineage / Quality — a plain borderless block since
-             2026-08-18 (Ryan). It was a two-tab panel (Source | Fidelity)
-             mirroring the Side Panel's look, but with Fidelity gone there is
-             one pane left, and a tab strip for one pane is furniture. These
-             three are what a human typed about the recording; everything the
-             machine measured now lives in the Side Panel's Listening Quality
-             tab. -->
-        <div class="rec-header-right">${metaBlock}</div>
+        </div>
       </div>
       <div class="action-bar">
         <!-- Playback actions only — editing/admin actions live at the bottom -->
@@ -4112,16 +4356,106 @@ const App = (() => {
           ${trackRows || '<div class="info-panel-empty">No tracks</div>'}
         </div>
 
-        <!-- Slide-in right panel — collapsed by default, expands to ~40% -->
-        <!-- Horizontal tab strip (Ryan, 2026-08-18). The vertical strip ran
+        <!-- The Details pane is an ADMIN surface and is not rendered at all in
+             Playback mode (Ryan, 2026-08-21) — not hidden with CSS, absent.
+             Info file, quality metrics, Vorbis comments and checksums are an
+             archivist's working set; a listener opening a show wants the tracks
+             and the transport. Removing it also gives the track list the full
+             width, which is the point of the mode. -->
+        ${canEdit ? `
+        <!-- Slide-in right panel — the Details pane.
+             Horizontal tab strip (Ryan, 2026-08-18). The vertical strip ran
              out of vertical room once a fifth tab arrived, and it degraded
              badly on a short browser window — rotated text cannot wrap or
              ellipsize. Horizontal tabs scroll sideways instead, which is a
-             graceful failure. When the panel is collapsed the strip has
-             nowhere to live, so a slim rail button takes its place. -->
+             graceful failure.
+
+             The vertical DETAILS rail is now PERMANENT (Ryan, 2026-08-21).
+             It used to appear only while collapsed, which left "click the
+             active tab again" as the sole way back to a full-width track
+             list — a gesture nothing on the page advertises. The rail is a
+             visible, always-present toggle: click to hide, click to show.
+             That also makes it the natural affordance for the listener
+             layout, where Details is the thing you usually want out of the
+             way.
+
+             DOM note: the rail is a sibling of .slide-panel-main (tabs +
+             panes) rather than living inside it, so it keeps its own fixed
+             28px column in both states and does not move when the panel
+             opens. -->
         <div class="slide-panel slide-panel--htabs" id="slide-panel">
-          <button class="slide-rail" id="slide-rail" title="Show details">Details</button>
+          <button class="slide-rail" id="slide-rail" title="Show/hide details" aria-expanded="false">Details</button>
+          <div class="slide-panel-main">
+
+          <!-- Two rows: navigation, then actions (Ryan, 2026-08-21).
+               Every pane used to repeat its own name in a .slide-pane-header
+               directly under the tab that already said it, and each pane put
+               its action somewhere different — Re-Analyze inside the Quality
+               report, AI Assist as a call-to-action block in its pane,
+               Re-validate in a pane header, Write Tags all the way down in the
+               page's bottom row. The pane headers are gone and every action now
+               uses .pane-act in one place.
+               That place is a row of its OWN, under the tabs, rather than the
+               right end of the tab strip: crammed in beside five tabs the
+               longer labels ("Write Tags to Files") pushed the strip into
+               horizontal scrolling, so the action could scroll out of sight —
+               and an action bar you have to scroll to find is worse than the
+               scattered buttons it replaced. The row hides itself when the
+               active pane has nothing to offer. -->
+          <div class="slide-tabs">
+            <!-- Info File leads and is the default. It is the taper's own
+                 document — the one artifact that arrived with the recording,
+                 and the thing you open a show to read. Quality is a machine
+                 opinion and can wait one click. -->
+            <button class="slide-tab" data-pane="info">Info File</button>
+            <!-- "Quality", not "Listening Quality" — the tab is a label in a
+                 row of one-or-two-word labels. The score itself is still
+                 called Listening Quality everywhere it is described. -->
+            <button class="slide-tab" data-pane="quality">Quality</button>
+            <!-- The tab itself goes amber when the database holds metadata the
+                 FLAC files do not (Ryan, 2026-08-22). The Write Tags button was
+                 already marked, but it only exists while you are LOOKING at the
+                 File Tags pane — so the one signal that mattered was invisible
+                 from every other tab. -->
+            <button class="slide-tab${stagedCount > 0 ? ' slide-tab--staged' : ''}" data-pane="filetags">File Tags</button>
+            <button class="slide-tab" data-pane="checksums">Checksums</button>
+            ${canEdit ? `<button class="slide-tab slide-tab--ai" data-pane="ai">AI Assist</button>` : ''}
+          </div>
+
+          <!-- Action row. Every action for every pane is rendered once here and
+               shown by data-for as the pane changes, rather than being
+               re-created on each switch — so ids stay stable and existing
+               wiring (markStaged's #btn-write-tags, wireReanalyze) keeps
+               working with no lookup churn. -->
+          <div class="pane-acts" id="pane-acts">
+              ${canEdit ? `
+              <span class="pane-act-status" id="rec-info-save-status" data-for="info"></span>
+              <button class="pane-act act-suppressed" id="btn-rec-save-info" data-for="info" hidden disabled>Save to File</button>
+              <button class="pane-act" id="btn-info-edit" data-for="info">Edit File</button>` : ''}
+              ${canEdit ? `
+              <button class="pane-act" id="btn-analyze-audio" data-for="quality"
+                      title="Re-runs per-track audio analysis (waveform, spectrogram, raw readings). Does not recompute the Listening Quality score.">Re-Analyze Tracks</button>` : ''}
+              ${canEdit ? `
+              <span class="pane-act-note${stagedCount > 0 ? '' : ' act-suppressed'}" id="tags-staged-note" data-for="filetags"
+                    ${stagedCount > 0 ? '' : 'hidden'}>Edits not yet written to the files</span>
+              <button class="pane-act${stagedCount > 0 ? ' pane-act--staged' : ''}" id="btn-write-tags" data-for="filetags"
+                      title="Write the database's metadata into the FLAC files' Vorbis comments">Write Tags to Files</button>` : ''}
+              <button class="pane-act" id="btn-cksum-revalidate" data-for="checksums"
+                      title="Re-check against the files on disk">↻ Re-validate</button>
+              ${canEdit ? `
+              <button class="pane-act pane-act--primary" id="btn-ai-assist" data-for="ai">✨ AI Assist</button>` : ''}
+          </div>
+
           <div class="slide-panel-body" id="slide-panel-body">
+
+            <!-- Info File pane. Locked until "Edit File" is clicked; see the
+                 infoContent comment above for why. Save stays disabled until
+                 the text actually changes — "changes have been staged" is a
+                 real precondition here, not decoration: the button writes to
+                 the collector's disk. -->
+            <div class="slide-pane" id="sp-info">
+              <div class="slide-pane-scroll"><div class="rev-raw-section">${infoContent}</div></div>
+            </div>
 
             <!-- Listening Quality pane — the single quality surface (IO-61,
                  2026-08-18). Verdict band + the three group meters up top,
@@ -4129,21 +4463,13 @@ const App = (() => {
                  caret. Loaded lazily on first open: it is a second request and
                  most visits to a recording are to play it, not to audit it. -->
             <div class="slide-pane" id="sp-quality">
-              <div class="slide-pane-header">Listening Quality</div>
               <div class="slide-pane-scroll" id="sp-quality-body">
                 <div class="info-panel-empty">Loading…</div>
               </div>
             </div>
 
-            <!-- Info File pane -->
-            <div class="slide-pane" id="sp-info">
-              <div class="slide-pane-header">Info File</div>
-              <div class="slide-pane-scroll"><div class="rev-raw-section">${infoContent}</div></div>
-            </div>
-
             <!-- File Tags pane — actual on-disk Vorbis comments -->
             <div class="slide-pane" id="sp-filetags">
-              <div class="slide-pane-header">File Tags <span class="filetags-hint">(Vorbis, on disk)</span></div>
               <div class="slide-pane-scroll" id="sp-filetags-body">
                 <div class="info-panel-empty">Loading…</div>
               </div>
@@ -4151,65 +4477,32 @@ const App = (() => {
 
             <!-- Checksums pane — .ffp/.md5/.st5 fingerprint verification -->
             <div class="slide-pane" id="sp-checksums">
-              <div class="slide-pane-header">Checksums
-                <button class="btn btn-ghost btn-xs" id="btn-cksum-revalidate" title="Re-check against the files on disk">↻ Re-validate</button>
-              </div>
               <div class="slide-pane-scroll" id="sp-checksums-body">${buildChecksumsPaneHtml(rec.tracks)}</div>
             </div>
 
             ${canEdit ? `
-            <!-- AI Assist pane (results of a web-research pass) -->
+            <!-- AI Assist pane. The execute button lives in the tab strip with
+                 every other pane action; the pane itself holds results, and
+                 renderRecAiResults() replaces this block wholesale — which is
+                 the other reason the button had to move out of it. -->
             <div class="slide-pane" id="sp-ai">
-              <div class="slide-pane-header">AI Assist</div>
               <div class="slide-pane-scroll"><div class="ai-results" id="ai-results">
-                <div class="ai-assist-cta">
-                  <button class="btn btn-primary btn-sm iq-ai-btn" id="btn-ai-assist">✨ AI Assist</button>
-                  <div class="ai-assist-hint">Research the web to verify and fill this recording's metadata.</div>
-                </div>
+                <div class="ai-assist-hint">Research the web to verify and fill this recording's metadata.</div>
               </div></div>
             </div>` : ''}
 
           </div>
-
-          <div class="slide-tabs">
-            <button class="slide-tab" data-pane="quality">Quality</button>
-            <button class="slide-tab" data-pane="info">Info File</button>
-            <button class="slide-tab" data-pane="filetags">File Tags</button>
-            <button class="slide-tab" data-pane="checksums">Checksums</button>
-            ${canEdit ? `<button class="slide-tab slide-tab--ai" data-pane="ai">AI Assist</button>` : ''}
           </div>
         </div>
+        ` : ''}
 
       </div>
-      ${canEdit ? `
-      <div class="rec-bottom-actions">
-        <button class="btn btn-sm btn-ghost" id="btn-reveal-folder" title="Open this recording's folder in Finder">Open in Containing Folder</button>
-        <button class="btn btn-sm ${stagedCount > 0 ? 'btn-staged' : 'btn-ghost'}" id="btn-write-tags">Write Tags to Files</button>
-        <button class="btn btn-sm ${rec.is_official ? 'btn-staged' : 'btn-ghost'}" id="btn-official" title="Mark this recording (and its tracks) as an official release">${rec.is_official ? '✓ Official Release' : 'Mark as Official Release'}</button>
-        <button class="btn btn-danger btn-sm" id="btn-delete-rec" title="Delete this recording from the database (files are not removed)">Delete Recording</button>
-      </div>` : ''}
       </div>
     `)
-
-    // Back button
-    document.getElementById('back-btn')?.addEventListener('click', () => {
-      window.location.hash = backHash
-    })
 
     // Venue name → venue page
     document.querySelector('.venue-link')?.addEventListener('click', () => {
       if (venueId) window.location.hash = `#/venue/${venueId}`
-    })
-
-    // Right panel collapsible sections
-    document.querySelectorAll('.rec-header-right .rev-panel-toggle').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const panel = document.getElementById(btn.dataset.panel)
-        if (!panel) return
-        const collapsed = panel.style.display === 'none'
-        panel.style.display = collapsed ? '' : 'none'
-        btn.textContent = collapsed ? '▾' : '▸'
-      })
     })
 
     // Info-panel section toggle (Info file)
@@ -4241,10 +4534,13 @@ const App = (() => {
     // ── Quick edit: recording metadata (Source/Lineage/Quality) ──────────────
     // Click an editable value → inline input → Enter saves, Esc cancels.
     // Rating dropped 2026-08-18 — see app/models/recording.py.
+    // Redisplay after a quick edit must rebuild the SAME chip markup the
+    // initial render emitted (2026-08-21) — otherwise editing Source once
+    // silently downgrades it from a coloured badge to grey text until reload.
     function metaCellDisplay(field) {
-      if (field === 'source')  return esc(rec.source || '—')
+      if (field === 'source')  return sourceBadge(rec.source) || '—'
       if (field === 'lineage') { const l = rec.lineage; return esc(l ? (l.length > 220 ? l.slice(0, 220) + '…' : l) : '—') }
-      return esc(rec.quality || '—')  // quality
+      return `<span class="quality ${qualityClass(rec.quality)}">${esc(rec.quality || '—')}</span>`  // quality
     }
     function startMetaQuickEdit(cell) {
       const field = cell.dataset.qedit
@@ -4263,12 +4559,12 @@ const App = (() => {
           try {
             await API.recordings.update(recordingId, { ...payload, change_note: 'Quick edit' })
             Object.assign(rec, payload)
-            const wt = document.getElementById('btn-write-tags')   // now has unwritten changes
-            wt?.classList.add('btn-staged'); wt?.classList.remove('btn-ghost')
+            markStaged()   // now has unwritten changes
           } catch (e) { console.error('Quick edit failed:', e) }
         }
+        // The colour now lives on the inner .quality chip, so the cell's own
+        // className is stable and no longer needs rewriting here.
         cell.innerHTML = metaCellDisplay(field)
-        if (field === 'quality') cell.className = `hm-val ${qualityClass(rec.quality)} hm-val--editable`
       }
       input.addEventListener('keydown', e => {
         e.stopPropagation()
@@ -4277,18 +4573,86 @@ const App = (() => {
       })
       input.addEventListener('blur', () => finish(true))
     }
+    // ── Members / Guests pills ──────────────────────────────────────────────
+    // Who played the show is CONTENT, not an editing surface — a listener wants
+    // it as much as an archivist does. It went missing in Playback mode because
+    // the whole personnel block sat inside `if (canEdit && perf)`, wiring and
+    // rendering together (Ryan, 2026-08-22).
+    //
+    // The markup lives here, once, and both paths call it: renderRecArtists()
+    // inside the editing block, and the read-only render below. Duplicating it
+    // would be the classic two-implementations-of-one-thing drift.
+    function recPersonnelHtml(personnel, editable) {
+      const members = (personnel || []).filter(p => !p.is_guest)
+      const guests  = (personnel || []).filter(p =>  p.is_guest)
+      // The name is a link to that person's Artist page, in BOTH modes
+      // (Ryan, 2026-08-22). It used to open an inline instrument/note editor —
+      // see renderPersonnelDetail, removed with it. Every other name in the app
+      // navigates when clicked; this one alone opened a form, which is exactly
+      // the kind of inconsistency that makes people stop clicking things.
+      //
+      // artist_id is on every resolved entry (inherited ones have no
+      // PerformancePersonnel row, so `id` can be null — `artist_id` cannot).
+      // Guard anyway: a name with nowhere to go renders as plain text rather
+      // than a link to #/person/undefined.
+      const pill = (p, i, role) => `
+        <span class="member-chip ${role === 'guest' ? 'member-chip--guest' : ''}">
+          ${p.artist_id
+            ? `<a class="member-chip-name rec-pill-name" href="#/person/${p.artist_id}" title="Open ${esc(p.name)}">${esc(p.name)}</a>`
+            : `<span class="member-chip-name">${esc(p.name)}</span>`}
+          ${editable ? `<span class="member-chip-x" data-role="${role}" data-i="${i}" title="Remove">×</span>` : ''}
+        </span>`
+      const row = (role, label, items) => {
+        // Read-only: an empty row is a prompt to an editor that isn't there, so
+        // it is omitted rather than shown as a dash.
+        if (!editable && !items.length) return ''
+        return `
+        <div class="mg-row">
+          <span class="mg-row-label">${label}</span>
+          ${items.map((p, i) => pill(p, i, role)).join('')}
+          ${editable ? `
+            <button type="button" class="mg-add-btn" data-role="${role}" title="Add ${label === 'Members' ? 'Member' : 'Guest'} Name">+</button>
+            <span class="artist-picker-wrap mg-add-picker" data-role="${role}" style="display:none">
+              <input type="text" class="member-input mg-role-input" data-role="${role}" autocomplete="off" placeholder="Add ${label === 'Members' ? 'Member' : 'Guest'} Name…" />
+              <div class="artist-dropdown mg-role-dd" data-role="${role}" style="display:none"></div>
+            </span>` : ''}
+        </div>`
+      }
+      return row('member', 'Members', members) + row('guest', 'Guests', guests)
+    }
+
+    // Read-only render for Playback mode and for listeners. The editable path
+    // renders from inside the `if (canEdit && perf)` block below.
+    if (!canEdit && perf) {
+      const box = document.getElementById('rec-artists')
+      if (box) box.innerHTML = recPersonnelHtml(perf.personnel || [], false)
+    }
+
+    // Delegated from the view shell rather than one container: Quality now sits
+    // in the top action row and Source/Lineage down beside Members, so there is
+    // no single ancestor of all three but the view itself.
+    //
+    // .rec-view-shell, NOT mainContent — mainContent survives every navigation,
+    // so binding there would stack one more handler per recording opened.
     if (canEditLibrary()) {
-      mainContent.querySelector('.rec-header-right')?.addEventListener('click', ev => {
+      mainContent.querySelector('.rec-view-shell')?.addEventListener('click', ev => {
         const cell = ev.target.closest('.hm-val--editable[data-qedit]')
         if (cell && !cell.querySelector('input')) startMetaQuickEdit(cell)
       })
     }
 
     // ── Quick edit: right-click a track → flags + note popup ──────────────────
-    function markStaged() {
-      const wt = document.getElementById('btn-write-tags')
-      wt?.classList.add('btn-staged'); wt?.classList.remove('btn-ghost')
+    // Three surfaces, one call: the Write Tags button, the File Tags tab, and
+    // the note that explains what the amber means. They must never disagree —
+    // an amber tab with no explanation is a puzzle, and an explanation with no
+    // amber tab is noise.
+    function setTagsStaged(on) {
+      document.getElementById('btn-write-tags')?.classList.toggle('pane-act--staged', on)
+      document.querySelector('.slide-tab[data-pane="filetags"]')?.classList.toggle('slide-tab--staged', on)
+      document.getElementById('tags-staged-note')?.classList.toggle('act-suppressed', !on)
+      syncPaneActs()
     }
+    function markStaged() { setTagsStaged(true) }
     function refreshTrackRow(t) {
       const row = mainContent.querySelector(`.track-row[data-track-id="${t.id}"]`)
       if (!row) return
@@ -4558,18 +4922,73 @@ const App = (() => {
         },
       })
 
-      // Info File — always-editable textarea (not click-to-reveal like Notes
-      // above), matching Add Recording's treatment. Auto-saves on blur, only
-      // when the text actually changed. Not a tag field, so no markStaged().
-      const infoEditEl = document.getElementById('rec-info-edit')
-      if (infoEditEl) {
-        infoEditEl.addEventListener('blur', async () => {
+      // ── Info File: locked → Edit File → Save to File ────────────────────
+      // Replaces the old always-hot textarea that autosaved on blur (see the
+      // infoContent comment for why). Three states:
+      //   locked            readonly + .rev-info-text--locked, Save suppressed
+      //   editing, clean    editable, Save visible but disabled
+      //   editing, dirty    Save enabled
+      // Save writes the DB row AND the .txt on disk when the library folder
+      // already has one — API.recordings.saveInfoFile, not update(), because
+      // it can touch the filesystem. It never creates a file in a folder that
+      // never had one; the endpoint reports that back and the status line
+      // says so rather than pretending the disk was written.
+      //
+      // Both controls live in the tab strip now, so hiding Save is done with
+      // the .act-suppressed class rather than the hidden attribute: the pane
+      // switcher owns `hidden` on every .pane-acts child, and two owners of
+      // one attribute is a bug waiting to happen.
+      const infoEditEl  = document.getElementById('rec-info-edit')
+      const infoEditBtn = document.getElementById('btn-info-edit')
+      const infoSaveBtn = document.getElementById('btn-rec-save-info')
+      const infoStatus  = document.getElementById('rec-info-save-status')
+
+      if (infoEditEl && infoEditBtn) {
+        const isDirty = () => infoEditEl.value !== (rec.info_file_content || '')
+
+        function setLocked(locked) {
+          infoEditEl.readOnly = locked
+          infoEditEl.classList.toggle('rev-info-text--locked', locked)
+          infoSaveBtn.classList.toggle('act-suppressed', locked)
+          infoSaveBtn.hidden = locked
+          syncPaneActs('info')   // Save appearing/leaving can empty the row
+          // "Cancel", not "Done" — clicking it while editing DISCARDS whatever
+          // is unsaved, so the label has to say so. "Done" reads like a save.
+          infoEditBtn.textContent = locked ? 'Edit File' : 'Cancel'
+          if (!locked) infoEditEl.focus()
+        }
+        const refreshSaveBtn = () => { infoSaveBtn.disabled = !isDirty() }
+
+        infoEditBtn.addEventListener('click', () => {
+          if (!infoEditEl.readOnly && isDirty() &&
+              !confirm('Discard unsaved changes to the info file?')) return
+          if (!infoEditEl.readOnly) infoEditEl.value = rec.info_file_content || ''
+          infoStatus.textContent = ''
+          setLocked(!infoEditEl.readOnly)
+          refreshSaveBtn()
+        })
+
+        infoEditEl.addEventListener('input', refreshSaveBtn)
+
+        infoSaveBtn.addEventListener('click', async () => {
           const v = infoEditEl.value
-          if (v === (rec.info_file_content || '')) return
+          infoSaveBtn.disabled = true
+          infoStatus.textContent = 'Saving…'
           try {
-            await API.recordings.update(recordingId, { info_file_content: v || null, change_note: 'Edited info file' })
+            const res = await API.recordings.saveInfoFile(recordingId, v)
             rec.info_file_content = v
-          } catch (e) { alert('Failed to save info file: ' + e.message) }
+            // Stays in edit mode on purpose. The status line lives inside the
+            // save row, so relocking here would hide the very confirmation the
+            // save produced — and after saving to disk, "did that land, and
+            // where?" is exactly what you want to read. "Done" relocks.
+            refreshSaveBtn()
+            infoStatus.textContent = res?.wrote_file
+              ? `Saved to ${res.filename} ✓`
+              : `Saved — ${res?.reason || 'database only'}`
+          } catch (e) {
+            infoStatus.textContent = 'Save failed: ' + e.message
+            infoSaveBtn.disabled = false
+          }
         })
       }
 
@@ -4600,26 +5019,7 @@ const App = (() => {
         const guests  = personnel.filter(p =>  p.is_guest)
         const listFor = role => role === 'guest' ? guests : members
 
-        const pill = (p, i, role) => `
-          <span class="member-chip ${role === 'guest' ? 'member-chip--guest' : ''}">
-            <span class="member-chip-name rec-pill-name" data-role="${role}" data-i="${i}" title="${canEdit ? 'Click for instrument/note' : ''}">${esc(p.name)}</span>
-            ${canEdit ? `<span class="member-chip-x" data-role="${role}" data-i="${i}" title="Remove">×</span>` : ''}
-          </span>`
-        const row = (role, label, items) => `
-          <div class="mg-row">
-            <span class="mg-row-label">${label}</span>
-            ${items.map((p, i) => pill(p, i, role)).join('')}
-            ${canEdit ? `
-              <button type="button" class="mg-add-btn" data-role="${role}" title="Add ${label === 'Members' ? 'Member' : 'Guest'} Name">+</button>
-              <span class="artist-picker-wrap mg-add-picker" data-role="${role}" style="display:none">
-                <input type="text" class="member-input mg-role-input" data-role="${role}" autocomplete="off" placeholder="Add ${label === 'Members' ? 'Member' : 'Guest'} Name…" />
-                <div class="artist-dropdown mg-role-dd" data-role="${role}" style="display:none"></div>
-              </span>` : (items.length === 0 ? '<span class="mg-row-empty">—</span>' : '')}
-          </div>`
-
-        box.innerHTML =
-          row('member', 'Members', members) + row('guest', 'Guests', guests) +
-          `<div class="rec-personnel-detail" id="rec-personnel-detail" style="display:none"></div>`
+        box.innerHTML = recPersonnelHtml(personnel, true)
 
         if (!canEdit) return
 
@@ -4630,9 +5030,6 @@ const App = (() => {
             const newGuests  = (role === 'guest'  ? guests.filter((_, i) => i !== idx)  : guests).map(p => p.name)
             await persistPersonnelLists(newMembers, newGuests)
           }))
-
-        box.querySelectorAll('.rec-pill-name').forEach(el =>
-          el.addEventListener('click', () => renderPersonnelDetail(listFor(el.dataset.role)[parseInt(el.dataset.i)])))
 
         box.querySelectorAll('.mg-add-btn').forEach(btn =>
           btn.addEventListener('click', () => {
@@ -4659,40 +5056,16 @@ const App = (() => {
         })
       }
 
-      function renderPersonnelDetail(p) {
-        const box = document.getElementById('rec-personnel-detail')
-        if (!box) return
-        if (!p.id) {
-          // Purely inherited — no performance_personnel row of its own, so
-          // there's nothing here to attach an instrument/note to (that would
-          // mean converting them to an explicit entry first — not a plain
-          // metadata edit, not built in Phase 2).
-          box.style.display = ''
-          box.innerHTML = `<div class="rec-personnel-detail-inner">
-            <span class="pp-stint-always">${esc(p.name)} is from the act's roster — instrument/note only apply to guests or explicit-mode entries.</span>
-            <span class="pp-stint-editor-close" id="rec-pd-close" title="Close">×</span>
-          </div>`
-          document.getElementById('rec-pd-close').addEventListener('click', () => { box.style.display = 'none' })
-          return
-        }
-        box.style.display = ''
-        box.innerHTML = `<div class="rec-personnel-detail-inner">
-          <span class="pp-stint-editor-title">${esc(p.name)}</span>
-          <input type="text" class="pp-stint-input rec-pd-instrument" placeholder="Instrument (optional)" value="${esc(p.instrument || '')}" style="width:140px" />
-          <input type="text" class="pp-stint-input rec-pd-note" placeholder="Note (optional)" value="${esc(p.note || '')}" style="width:180px" />
-          <span class="pp-stint-editor-close" id="rec-pd-close" title="Close">×</span>
-        </div>`
-        const commit = async () => {
-          const instrument = box.querySelector('.rec-pd-instrument').value.trim() || null
-          const note       = box.querySelector('.rec-pd-note').value.trim() || null
-          p.instrument = instrument; p.note = note   // keep the closure's copy in sync until the next reload
-          try { await API.performances.updatePersonnelRow(perf.id, p.id, { instrument, note }) }
-          catch (e) { alert('Failed: ' + e.message) }
-        }
-        box.querySelector('.rec-pd-instrument').addEventListener('blur', commit)
-        box.querySelector('.rec-pd-note').addEventListener('blur', commit)
-        document.getElementById('rec-pd-close').addEventListener('click', () => { box.style.display = 'none' })
-      }
+      // renderPersonnelDetail() REMOVED 2026-08-22 (Ryan) — the inline
+      // instrument/note editor is out of V1. Clicking a name now opens that
+      // person's Artist page instead, which is what every other name in the app
+      // does.
+      //
+      // The DATA and its API survive untouched: PerformancePersonnel still
+      // carries `instrument` and `note`, resolve_performance_personnel still
+      // returns them, and PATCH /api/performances/<id>/personnel/<row_id>
+      // (API.performances.updatePersonnelRow) still writes them. Only the UI
+      // went. Rebuilding it is a render function, not a migration.
 
       renderRecArtists()
 
@@ -4706,10 +5079,9 @@ const App = (() => {
       }
     }
 
-    // Analyze Audio — run Librosa analysis on all tracks. A named function
-    // rather than a binding at page-build time, because the button now lives
-    // inside the lazily-rendered Listening Quality pane and does not exist in
-    // the DOM yet when this line runs. wireReanalyze() attaches it.
+    // Analyze Audio — run Librosa analysis on all tracks. The button lives in
+    // the tab strip and is present from page build, so it is bound once below
+    // (see wireReanalyze) rather than re-attached on every pane render.
     async function onAnalyzeAudio() {
       const btn = document.getElementById('btn-analyze-audio')
       if (!btn) return
@@ -4759,15 +5131,13 @@ const App = (() => {
     // Ryan's own Mac. Fails soft: no folder on disk (a Move-ingested show
     // whose staging row outlived it, same story as the Triage list) just
     // shows an alert rather than anything blocking.
-    document.getElementById('btn-reveal-folder')?.addEventListener('click', async () => {
-      const btn = document.getElementById('btn-reveal-folder')
-      btn.disabled = true
+    async function actRevealFolder() {
       try {
         await API.recordings.revealFolder(recordingId)
       } catch (e) {
         alert('Could not open folder: ' + e.message)
-      } finally { btn.disabled = false }
-    })
+      }
+    }
 
     // Write FLAC tags
     document.getElementById('btn-write-tags')?.addEventListener('click', async () => {
@@ -4786,8 +5156,7 @@ const App = (() => {
         // button, then refresh the File Tags pane if it's open.
         btn.disabled = false
         btn.textContent = 'Write Tags to Files'
-        btn.classList.remove('btn-staged')
-        btn.classList.add('btn-ghost')
+        setTagsStaged(false)
         const ftPane = document.getElementById('sp-filetags')
         if (ftPane && ftPane.classList.contains('active')) {
           loadFileTags(recordingId)
@@ -4800,20 +5169,17 @@ const App = (() => {
     })
 
     // Mark / unmark as official release (cascades to tracks server-side).
-    document.getElementById('btn-official')?.addEventListener('click', async () => {
-      const btn = document.getElementById('btn-official')
+    async function actToggleOfficial(item) {
       const next = !rec.is_official
-      btn.disabled = true
+      item.disabled = true
       try {
         await API.recordings.update(recordingId, { is_official: next, change_note: 'Official flag' })
         rec.is_official = next
-        btn.classList.toggle('btn-staged', next)
-        btn.classList.toggle('btn-ghost', !next)
-        btn.textContent = next ? '✓ Official Release' : 'Mark as Official Release'
+        item.textContent = next ? '✓ Official Release' : 'Mark as Official Release'
         markStaged()
       } catch (e) { alert('Failed: ' + e.message) }
-      finally { btn.disabled = false }
-    })
+      finally { item.disabled = false }
+    }
 
     // Favorite toggle. Optimistic: the button flips immediately and reverts if
     // the request fails. A highlight is a low-stakes personal mark and should
@@ -4832,6 +5198,12 @@ const App = (() => {
       btn.disabled = true
       try {
         await API.recordings.update(recordingId, { is_favorite: next })
+        // The sidebar's Favorites section is this star's other face — starring a
+        // show and not seeing it appear on the shelf makes the star feel like it
+        // did nothing. Cache dropped either way; re-rendered only if the section
+        // is open, so a collapsed one just reloads next time it is expanded.
+        _dimCache.favorites = null
+        if (state.expandedDims.has('favorites')) _renderDimRecords('favorites')
       } catch (e) {
         rec.is_favorite = !next
         paint(!next)
@@ -4839,24 +5211,168 @@ const App = (() => {
       } finally { btn.disabled = false }
     })
 
-    document.getElementById('btn-delete-rec')?.addEventListener('click', async () => {
-      if (!confirm('Delete this recording from the database?\n\nAudio files on disk are not removed.')) return
-      const btn = document.getElementById('btn-delete-rec')
-      btn.disabled = true
-      btn.textContent = 'Deleting…'
+    // Delete — a real dialog rather than confirm(), because there is a choice
+    // to make inside it and confirm() cannot carry one (Ryan, 2026-08-21).
+    //
+    // The files checkbox is UNCHECKED by default and stays that way: for a ROIO
+    // collector the tape is the irreplaceable thing and the database row is
+    // not. Checking it turns a reversible mistake into an unrecoverable one, so
+    // it is opt-in, it is spelled out in red, and the confirm button changes
+    // its own label to say which of the two things is about to happen.
+    function actDeleteRecording() {
+      const shown = [perfName, dateStr, venueStr].filter(Boolean).join(' · ')
+      const wrap = document.createElement('div')
+      wrap.className = 'modal-overlay'
+      wrap.innerHTML = `
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="del-title">
+          <div class="modal-header"><h3 id="del-title">Delete recording</h3></div>
+          <div class="modal-body">
+            <p class="del-subject">${esc(shown || 'This recording')}</p>
+            <p class="del-note">Removes the library record, its tracks, checksums and history.
+              Any performer or venue left with nothing attached is pruned too.</p>
+            <label class="del-files-row">
+              <input type="checkbox" id="del-files-cb" />
+              <span>Also delete the audio files from disk</span>
+            </label>
+            <p class="del-warn" id="del-warn" hidden>The folder and everything in it is removed permanently. This cannot be undone.</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-sm btn-ghost" id="del-cancel">Cancel</button>
+            <button class="btn btn-sm btn-danger" id="del-confirm">Delete record</button>
+          </div>
+        </div>`
+      document.body.appendChild(wrap)
+
+      const cb      = wrap.querySelector('#del-files-cb')
+      const warn    = wrap.querySelector('#del-warn')
+      const confirmBtn = wrap.querySelector('#del-confirm')
+      const close   = () => { wrap.remove(); document.removeEventListener('keydown', onKey) }
+      const onKey   = e => { if (e.key === 'Escape') close() }
+      document.addEventListener('keydown', onKey)
+
+      cb.addEventListener('change', () => {
+        warn.hidden = !cb.checked
+        confirmBtn.textContent = cb.checked ? 'Delete record and files' : 'Delete record'
+      })
+      wrap.querySelector('#del-cancel').addEventListener('click', close)
+      wrap.addEventListener('click', e => { if (e.target === wrap) close() })
+
+      confirmBtn.addEventListener('click', async () => {
+        confirmBtn.disabled = true
+        confirmBtn.textContent = 'Deleting…'
+        try {
+          const res = await API.recordings.delete(recordingId, cb.checked)
+          // The row goes even when the folder could not be removed — the server
+          // says so rather than failing the whole delete, so surface that here
+          // instead of letting the user assume the disk is clean.
+          if (cb.checked && !res?.files_deleted) {
+            alert('The library record was deleted, but the files were not: ' +
+                  (res?.files_error || 'unknown reason'))
+          }
+          // Deleting a recording can prune its performer / venue / artists.
+          invalidateDims('performers', 'venues', 'artists')
+          close()
+          // Navigate back to wherever the user came from (falls back to
+          // Library if this recording was reached with nothing preceding it).
+          window.location.hash = state.navBack ? state.navBack.hash : '#/'
+        } catch (err) {
+          confirmBtn.disabled = false
+          confirmBtn.textContent = cb.checked ? 'Delete record and files' : 'Delete record'
+          alert('Delete failed: ' + err.message)
+        }
+      })
+    }
+
+    // Move the folder out of the library. Confirmed inline rather than with a
+    // dialog: unlike Delete this is fully reversible — the files are all still
+    // there under a name the response reports — so the weight of a modal would
+    // overstate it. The page reloads so the header picks up its Out of Library
+    // badge and the menu collapses to a note.
+    async function actMoveOut(item) {
+      const dest = item.dataset.dest
+      const label = dest === 'workshop' ? 'Workshop' : 'Backlog'
+      if (!confirm(`Move this recording's folder out of the library into ${label}?\n\n` +
+                   'The library record, its metadata and its history are kept. ' +
+                   'The show stops being playable until it comes back.')) return
+      item.disabled = true
+      const original = item.textContent
+      item.textContent = 'Moving…'
       try {
-        await API.recordings.delete(recordingId)
-        // Deleting a recording can prune its performer / venue / artists.
+        const res = await API.recordings.moveOut(recordingId, dest)
+        rec.is_published = false
+        // A move can empty a performer or venue of everything visible.
         invalidateDims('performers', 'venues', 'artists')
-        // Navigate back to wherever the user came from (falls back to
-        // Library if this recording was reached with nothing preceding it).
-        window.location.hash = state.navBack ? state.navBack.hash : '#/'
-      } catch (err) {
-        btn.disabled = false
-        btn.textContent = 'Delete'
-        alert('Delete failed: ' + err.message)
+        alert(`Moved to ${label} as "${res.moved_to_name}".`)
+        renderRecordingView(recordingId)
+      } catch (e) {
+        item.disabled = false
+        item.textContent = original
+        alert('Move failed: ' + e.message)
       }
-    })
+    }
+
+    // One action row, five panes: show the controls tagged for the pane being
+    // opened and hide the rest, then collapse the row entirely if that leaves
+    // nothing. .act-suppressed is a second, separate reason a control can stay
+    // hidden (today: Save to File while the Info File pane is locked) and
+    // always wins.
+    //
+    // Declared at this level rather than inside the slide-panel IIFE below
+    // because the Info File wiring calls it too, from a deeper scope.
+    function syncPaneActs(pane) {
+      // Called with no argument from setTagsStaged, which can fire while any
+      // pane is showing — read the active tab rather than guessing.
+      if (pane == null) pane = document.querySelector('.slide-tab.active')?.dataset.pane || null
+      const row = document.getElementById('pane-acts')
+      let any = false
+      document.querySelectorAll('#pane-acts [data-for]').forEach(el => {
+        el.hidden = el.dataset.for !== pane || el.classList.contains('act-suppressed')
+        // Status text and the staged note are not actions — neither should hold
+        // the row open on a pane whose only real control is suppressed.
+        const isAction = !el.classList.contains('pane-act-status') &&
+                         !el.classList.contains('pane-act-note')
+        if (!el.hidden && isAction) any = true
+      })
+      if (row) row.hidden = !any
+    }
+
+    // ── Actions menu ────────────────────────────────────────────────────────
+    ;(function () {
+      const btn  = document.getElementById('btn-rec-actions')
+      const menu = document.getElementById('rec-actions-menu')
+      if (!btn || !menu) return
+      const setOpen = open => {
+        menu.hidden = !open
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false')
+        btn.classList.toggle('is-open', open)
+      }
+      btn.addEventListener('click', e => { e.stopPropagation(); setOpen(menu.hidden) })
+      document.addEventListener('click', e => {
+        if (!menu.hidden && !menu.contains(e.target)) setOpen(false)
+      })
+      document.addEventListener('keydown', e => { if (e.key === 'Escape') setOpen(false) })
+
+      menu.addEventListener('click', async e => {
+        const item = e.target.closest('.actions-item')
+        if (!item) return
+        const act = item.dataset.act
+        // Official and Move-to keep the menu open — one shows its result in
+        // place, the other is a step towards a second choice. The rest either
+        // navigate or open a dialog, so there is nothing left to look at.
+        if (act === 'official') return actToggleOfficial(item)
+        if (act === 'move-toggle') {
+          const sub = document.getElementById('rec-move-sub')
+          if (!sub) return
+          sub.hidden = !sub.hidden
+          item.setAttribute('aria-expanded', sub.hidden ? 'false' : 'true')
+          return
+        }
+        if (act === 'move') return actMoveOut(item)
+        setOpen(false)
+        if (act === 'reveal') actRevealFolder()
+        if (act === 'delete') actDeleteRecording()
+      })
+    })()
 
     // ── Slide panel tab wiring ───────────────────────────────────────────────
     ;(function () {
@@ -4864,37 +5380,51 @@ const App = (() => {
       if (!panel) return
       let activePane = null
 
+      const rail = document.getElementById('slide-rail')
+
       function openPane(pane) {
+        state.recPanelOpen = true
         panel.classList.add('open')
         document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
         document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
         document.getElementById(`sp-${pane}`)?.classList.add('active')
         document.querySelector(`.slide-tab[data-pane="${pane}"]`)?.classList.add('active')
+        syncPaneActs(pane)
         activePane = pane
         state.recLastPane = pane   // survives the reload an Apply/edit triggers
+        rail?.setAttribute('aria-expanded', 'true')
         if (pane === 'filetags') loadFileTags(recordingId)
         if (pane === 'quality')  loadQualityPane()
       }
 
-      // Collapsed rail — the horizontal tab strip has nowhere to render at 28px
-      // wide, so this replaces it and reopens whichever pane was last shown.
-      document.getElementById('slide-rail')?.addEventListener('click', () => {
-        openPane(activePane || state.recLastPane || 'quality')
+      // Collapse keeps `activePane` in `state.recLastPane` so reopening lands
+      // where you left off. It is NOT cleared any more: clearing it meant the
+      // rail always reopened on the fallback pane, which read as the panel
+      // forgetting what you had been looking at.
+      function closePanel() {
+        state.recPanelOpen = false
+        panel.classList.remove('open')
+        document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
+        document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
+        activePane = null
+        rail?.setAttribute('aria-expanded', 'false')
+      }
+
+      // The rail is always on screen now (2026-08-21) and is the panel's
+      // show/hide control in both directions — the single obvious way to get
+      // the track list back to full width.
+      rail?.addEventListener('click', () => {
+        if (panel.classList.contains('open')) closePanel()
+        else openPane(state.recLastPane || 'info')
       })
 
       document.querySelectorAll('.slide-tab').forEach(tab => {
         tab.addEventListener('click', () => {
           const pane = tab.dataset.pane
-          if (panel.classList.contains('open') && activePane === pane) {
-            // Same tab clicked again → collapse
-            panel.classList.remove('open')
-            document.querySelectorAll('.slide-pane').forEach(p => p.classList.remove('active'))
-            document.querySelectorAll('.slide-tab').forEach(t => t.classList.remove('active'))
-            activePane = null
-            state.recLastPane = null
-          } else {
-            openPane(pane)
-          }
+          // Same tab clicked again → collapse (kept alongside the rail; it is
+          // the gesture existing muscle memory expects).
+          if (panel.classList.contains('open') && activePane === pane) closePanel()
+          else openPane(pane)
         })
       })
 
@@ -4902,7 +5432,13 @@ const App = (() => {
       // Assist Apply), falling back to Info File on a fresh visit. 'spectrogram'
       // is stale from before the spectrogram moved (2026-07-15, then again
       // 2026-08-18 into the Quality pane) — treat it as no saved pane.
-      openPane((state.recLastPane && state.recLastPane !== 'spectrogram') ? state.recLastPane : 'info')
+      // recPanelOpen persists a deliberate collapse across recordings: someone
+      // who put Details away is listening, not auditing, and should not have to
+      // dismiss it again on every show. Undefined (first visit) means open.
+      const startPane = (state.recLastPane && state.recLastPane !== 'spectrogram')
+        ? state.recLastPane : 'info'
+      if (state.recPanelOpen === false) closePanel()
+      else openPane(startPane)
     })()
 
     // ── Listening Quality pane ──────────────────────────────────────────────
@@ -4929,9 +5465,8 @@ const App = (() => {
       } catch (e) {
         // 404 is the normal "never analysed" case, not a failure worth shouting
         // about — offer the button that fixes it.
-        body.innerHTML = `<div class="rq-empty">No listening-quality analysis for this recording yet.
-          ${reanalyzeBtn}</div>`
-        wireReanalyze()
+        body.innerHTML = `<div class="rq-empty">No listening-quality analysis for this
+          recording yet — run Re-Analyze Tracks above.</div>`
         return
       }
       body.innerHTML = buildQualityPaneHtml(q)
@@ -4956,8 +5491,10 @@ const App = (() => {
       }
     }
 
-    // Re-Analyze is re-rendered with the pane, so its handler is re-attached
-    // rather than bound once at page build.
+    // Bound once — the button is in the tab strip now, not inside the pane it
+    // acts on, so it survives every re-render of that pane. The _wired guard
+    // stays because loadQualityPane() still calls this after a successful load
+    // and it must not double-bind.
     function wireReanalyze() {
       const btn = document.getElementById('btn-analyze-audio')
       if (btn && !btn._wired) { btn._wired = true; btn.addEventListener('click', onAnalyzeAudio) }
@@ -4967,17 +5504,19 @@ const App = (() => {
       const it = q.interpretation || {}
       const band = q.verdict_band || 'unknown'
 
-      // Headline: the three-band verdict, not the raw composite. Decided
-      // 2026-07-31 — validated fit is r 0.55 / MAE ~7 grade points, so a
-      // decimal on the number is false precision. The number is still shown,
-      // smaller and beside the band, because an archivist ranking two shows
-      // needs to break a tie the band cannot.
+      // Headline: the three-band verdict, and ONLY the verdict.
+      //
+      // The raw composite used to sit beside it, on the argument that an
+      // archivist ranking two shows needs to break a tie the band cannot.
+      // Removed 2026-08-21 (Ryan — a second time; it had been taken out once
+      // before and came back with the IO-61 unification, because this pane now
+      // renders from the same builder as the triage card). Validated fit is
+      // r 0.55 / MAE ~7 grade points: the number reads as precision the model
+      // does not have, and this is the listener's surface, not the harness.
+      // The dev surface in tools/ still shows the full decimal.
       const head = `
         <div class="rq-head">
           <span class="lq-verdict lq-verdict--${esc(band)}">${_LQ_BAND_TEXT[band] || '—'}</span>
-          <span class="rq-score" style="color:${_lqColour(q.listening_quality)}">${_fmt1(q.listening_quality)}</span>
-          <span class="rq-score-lbl">Listening Quality</span>
-          ${reanalyzeBtn}
         </div>`
 
       // Quick facts line — format, bitrate, cutoff. Same strip the triage card
@@ -9443,20 +9982,17 @@ const App = (() => {
     let showAll = false
     const rowsToShow = () => showAll ? sorted : sorted.filter(p => !p.genre_id)
 
-    const navBack = state.navBack
     setMainHTML(`
       <div class="action-bar">
-        ${navBack ? `<div class="breadcrumb" id="ga-back-btn">← ${esc(navBack.label)}</div>` : `<span style="font-size:13px; font-weight:500; color:var(--t0)">Assign Genres</span>`}
+        <!-- Titled, not back-linked: the App Header's arrow is the way back
+             from every view now (2026-08-22). -->
+        <span style="font-size:13px; font-weight:500; color:var(--t0)">Assign Genres</span>
         <label class="genre-assign-toggle" style="margin-left:auto">
           <input type="checkbox" id="ga-show-all" /> Show all <span class="genre-assign-toggle-hint">(default: unassigned only)</span>
         </label>
       </div>
       <div class="genre-assign-hint">Sorted by recording count, descending — the top acts cover most of the library fastest. Each pick saves immediately.</div>
       <div class="genre-assign-list" id="genre-assign-list"></div>`)
-
-    if (navBack) {
-      document.getElementById('ga-back-btn')?.addEventListener('click', () => { window.location.hash = navBack.hash })
-    }
 
     function rowHtml(p) {
       return `
@@ -9585,8 +10121,98 @@ const App = (() => {
   // detail for the navBack snapshot below, not app state anything else reads.
   let _lastRouteHash = null
 
+  // ── App-header navigation ────────────────────────────────────────────────
+  //
+  // Its own stack rather than history.back()/forward(). Two reasons:
+  //
+  //   1. The browser gives no way to ask whether a forward entry exists, so a
+  //      forward arrow driven by history.forward() can only ever be permanently
+  //      enabled — and an arrow that is always lit and usually does nothing is
+  //      worse than no arrow. With our own stack both buttons can be honest.
+  //   2. This is a PyWebView desktop app; the browser history also contains
+  //      whatever preceded the app, which is not ours to walk back into.
+  //
+  // route() is the single funnel every navigation passes through, so the stack
+  // is maintained there. `_navMoving` marks the hashchange we caused ourselves,
+  // so stepping back does not get recorded as a new destination.
+  const navHist = []
+  let navPos = -1
+  let _navMoving = false
+  let _navReplace = false
+
+  function _navRecord(hash) {
+    if (_navMoving) { _navMoving = false; return }
+    if (navHist[navPos] === hash) return          // re-dispatch of the same page
+    if (_navReplace && navPos >= 0) {
+      // Standing in for a page that turned out to be off-limits: overwrite it
+      // rather than stack on top of it, so Back does not walk straight into the
+      // page we just bounced out of. The forward tail goes too — it was reached
+      // through that page.
+      _navReplace = false
+      navHist.splice(navPos + 1)
+      navHist[navPos] = hash
+      return
+    }
+    _navReplace = false
+    navHist.splice(navPos + 1)                    // a new branch drops the forward tail
+    navHist.push(hash)
+    navPos = navHist.length - 1
+  }
+
+  // Views that exist only to edit the library. The three ingest steps — source
+  // picker, triage queue and metadata review — all live under '#/ingest'.
+  //
+  // Enforced in route(), not in setViewMode (Ryan, 2026-08-22). Toggling to
+  // Playback while standing on one of these is the case that prompted it, but
+  // it is not the only way to arrive: Back, Forward and a typed or bookmarked
+  // URL all get there too, and a listener has no toggle at all. One check on
+  // the way in covers every route.
+  const ADMIN_ONLY_HASHES = [
+    '#/ingest',          // Add Recordings — source picker, triage queue, metadata review
+    '#/batch',           // Batch import
+    '#/genres/assign',   // Assign Genres
+    '#/peers',           // Sharing
+    '#/venue/new', '#/performer/new', '#/artist/new',
+  ]
+  const isAdminOnlyHash = h => ADMIN_ONLY_HASHES.includes((h || '').split('?')[0])
+
+  function _navGo(delta) {
+    const target = navPos + delta
+    if (target < 0 || target >= navHist.length) return
+    navPos = target
+    _navMoving = true
+    window.location.hash = navHist[navPos]
+  }
+
+  function paintNavButtons() {
+    const back = document.getElementById('nav-back')
+    const fwd  = document.getElementById('nav-fwd')
+    if (back) back.disabled = navPos <= 0
+    if (fwd)  fwd.disabled  = navPos >= navHist.length - 1
+  }
+
+  function wireHeaderNav() {
+    document.getElementById('nav-home')?.addEventListener('click', () => {
+      window.location.hash = '#/'
+    })
+    document.getElementById('nav-back')?.addEventListener('click', () => _navGo(-1))
+    document.getElementById('nav-fwd')?.addEventListener('click', () => _navGo(1))
+  }
+
   function route() {
     const hash = window.location.hash || '#/'
+
+    // Bounce out of an admin-only view when there is no edit permission in
+    // force — Playback mode, or a listener who was sent the URL. The library is
+    // the honest destination: it is the one page everybody can use.
+    if (!canEditLibrary() && isAdminOnlyHash(hash)) {
+      _navReplace = true
+      window.location.hash = '#/'   // hashchange re-enters route() with '#/'
+      return
+    }
+
+    _navRecord(hash)
+    paintNavButtons()
 
     // Snapshot "where we're coming from" for the destination page's Back
     // link (state.navCurrent/navBack) — but only on a genuine navigation.
@@ -9704,6 +10330,10 @@ const App = (() => {
     const initials = user.username.slice(0,2).toUpperCase()
     userAvatar.textContent = initials
     userName.textContent   = user.username
+    // The view mode depends on the role, so it can only be resolved once we
+    // know who this is. Both entry points (init and login) call setUserUI, so
+    // this is the one place that covers a cold start and a fresh sign-in.
+    initViewMode()
   }
 
   // ── Login form ─────────────────────────────────────────────────────────────
@@ -9762,7 +10392,16 @@ const App = (() => {
         <div class="modal-header"><h3>Settings</h3>
           <button class="btn-icon" id="settings-close">✕</button></div>
         <div class="modal-body">
-          <label class="settings-label">Anthropic API key <span class="settings-hint">(BYOK — stored in your OS keychain)</span></label>
+          <!-- Appearance first: it is the one setting every user has an opinion
+               about, and the only one that applies the moment it is clicked
+               rather than on Save. -->
+          <label class="settings-label">Appearance</label>
+          <div class="view-mode-toggle settings-theme" id="settings-theme" role="group" aria-label="Theme">
+            <button type="button" class="vm-opt" data-theme="dark">Dark</button>
+            <button type="button" class="vm-opt" data-theme="light">Light</button>
+          </div>
+
+          <label class="settings-label" style="margin-top:14px">Anthropic API key <span class="settings-hint">(BYOK — stored in your OS keychain)</span></label>
           <div class="settings-key-row">
             <input type="password" id="settings-key" placeholder="${keySet ? '•••••••••• (key saved)' : 'sk-ant-…'}" autocomplete="off" />
             ${keySet ? '<button class="btn btn-ghost btn-sm" id="settings-clear-key">Clear</button>' : ''}
@@ -9780,6 +10419,16 @@ const App = (() => {
             <option value="move" ${behavior !== 'copy' ? 'selected' : ''}>Move into library (source removed)</option>
             <option value="copy" ${behavior === 'copy' ? 'selected' : ''}>Copy into library (keep source)</option>
           </select>
+
+          ${canEditLibrary() ? `
+          <!-- Sharing came out of the sidebar 2026-08-22 (Ryan). Managing peers
+               is account configuration, not a place in the library — and the
+               sidebar is now a shelf of shows you kept. It is a link out to the
+               full page rather than a panel here: peer enrolment is a
+               multi-step flow with its own state, not a preference. -->
+          <label class="settings-label" style="margin-top:14px">Sharing</label>
+          <button class="btn btn-ghost btn-sm settings-link-btn" id="settings-peers">
+            Manage peers &amp; shared collections →</button>` : ''}
         </div>
         <div class="modal-footer">
           <button class="btn btn-ghost btn-sm" id="settings-cancel">Cancel</button>
@@ -9791,7 +10440,29 @@ const App = (() => {
     const close = () => overlay.remove()
     overlay.addEventListener('click', e => { if (e.target === overlay) close() })
     overlay.querySelector('#settings-close').addEventListener('click', close)
+
+    // Theme applies immediately and is not part of Save — it is a local display
+    // preference, not one of the account settings this dialog persists, and you
+    // want to SEE it to judge it. Cancel therefore does not undo it, which is
+    // the honest behaviour for a live preview you chose on purpose.
+    const themeWrap = overlay.querySelector('#settings-theme')
+    const paintTheme = () => themeWrap.querySelectorAll('.vm-opt').forEach(b => {
+      const on = (b.dataset.theme === 'light') === isLightTheme()
+      b.classList.toggle('active', on)
+      b.setAttribute('aria-pressed', on ? 'true' : 'false')
+    })
+    paintTheme()
+    themeWrap.addEventListener('click', e => {
+      const b = e.target.closest('.vm-opt')
+      if (!b) return
+      setTheme(b.dataset.theme === 'light')
+      paintTheme()
+    })
     overlay.querySelector('#settings-cancel').addEventListener('click', close)
+    overlay.querySelector('#settings-peers')?.addEventListener('click', () => {
+      close()
+      window.location.hash = '#/peers'
+    })
     overlay.querySelector('#settings-clear-key')?.addEventListener('click', async () => {
       try { await API.preferences.update({ clear_api_key: true }); close() } catch (e) { alert(e.message) }
     })
@@ -10212,6 +10883,7 @@ const App = (() => {
   window.addEventListener('hashchange', route)
 
   wireSearchBar()
+  wireHeaderNav()
 
   // ── Init ───────────────────────────────────────────────────────────────────
 
@@ -10256,10 +10928,18 @@ const App = (() => {
       // more reliable than hunting play buttons through 10k lines of renderers.
       document.body.classList.toggle('drive-offline', nowOffline)
 
-      // Transition back to healthy: re-render so the placeholder SVGs the
-      // server handed out get replaced by real artwork.
-      if (offline && !nowOffline) route()
+      // Commit the flag BEFORE any side effect. route() re-renders an entire
+      // view and can throw for reasons that have nothing to do with the drive;
+      // if it does, isOffline() must not be left stuck reporting the old value
+      // while the banner already says we recovered.
+      const recovered = offline && !nowOffline
       offline = nowOffline
+
+      // Re-render so the placeholder SVGs the server handed out during the
+      // outage get replaced by real artwork.
+      if (recovered) {
+        try { route() } catch (e) { console.warn('post-reconnect re-render failed', e) }
+      }
     }
 
     async function check({ force = false } = {}) {
@@ -10273,7 +10953,10 @@ const App = (() => {
       }
     }
 
+    let started = false
     function start() {
+      if (started) return          // login path and boot path can both reach here
+      started = true
       check()
       setInterval(check, POLL_MS)
 
@@ -10300,6 +10983,7 @@ const App = (() => {
       state.user = user
       setUserUI(user)
       showApp()
+      libraryDrive.start()
       // Before the sidebar renders: the library selector reads
       // libraryState.remotes, and a selector that appears as a plain label and
       // then sprouts a dropdown a moment later reads as a glitch.

@@ -9,15 +9,99 @@ Usage:
     python run.py
 """
 
+import json
 import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
+
 import webview
 from app import create_app
 from config import Config
 
 app = create_app()
+
+
+# -- Window geometry ----------------------------------------------------------
+#
+# Lives beside the database rather than in the OS application-support directory:
+# `db/` is already where this app keeps its local, per-machine, never-committed
+# state, and one convention beats two. It is deliberately NOT a UserPreference
+# row -- window size is per-machine (a laptop and a desktop want different
+# answers from the same account) and it is needed before Flask is serving, let
+# alone before anyone has logged in.
+WINDOW_STATE_PATH = Path(__file__).parent / "db" / "window_state.json"
+
+MIN_W, MIN_H = 960, 640
+
+# The DEFAULT width is capped; the height is not (Ryan, 2026-08-22 — 88% of an
+# ultrawide is a window nobody wants, but 88% of any screen's height is fine).
+# 1760 is about a large laptop's full width, which is as wide as this layout has
+# anything to say: the sidebar is fixed, the search field is 620px, and past
+# roughly here the Track List is just growing whitespace between a title and its
+# duration. Only the default is capped — if you deliberately drag the window
+# wider, that is remembered as-is.
+MAX_DEFAULT_W = 1760
+
+
+def _screen_size():
+    """Primary screen in logical pixels, or None if PyWebView cannot say."""
+    try:
+        screen = webview.screens[0]
+        return int(screen.width), int(screen.height)
+    except Exception:
+        return None
+
+
+def _default_geometry():
+    """
+    Most of the screen, not a fixed number. The old 1440x900 default was picked
+    for one display and read as cramped on anything larger (Ryan, 2026-08-22) --
+    and a bigger fixed number would simply be wrong in the other direction on a
+    laptop. 88% leaves the dock and menu bar clear.
+
+    Width is then clamped to MAX_DEFAULT_W. Height is not: vertical space is
+    always useful here (it is more track rows), horizontal space past a point is
+    not.
+    """
+    screen = _screen_size()
+    if not screen:
+        return min(1600, MAX_DEFAULT_W), 1000
+    w, h = screen
+    width = min(max(MIN_W, int(w * 0.88)), MAX_DEFAULT_W)
+    return width, max(MIN_H, int(h * 0.88))
+
+
+def load_window_size():
+    """
+    Last used size, or the default. Validated rather than trusted: a size saved
+    on a large external display and restored on the laptop alone would open a
+    window bigger than the screen with its controls off the edge, which looks
+    like a crash. Anything unreadable, undersized or oversized falls back.
+    """
+    default = _default_geometry()
+    try:
+        data = json.loads(WINDOW_STATE_PATH.read_text(encoding="utf-8"))
+        w, h = int(data["width"]), int(data["height"])
+    except Exception:
+        return default
+    if w < MIN_W or h < MIN_H:
+        return default
+    screen = _screen_size()
+    if screen and (w > screen[0] or h > screen[1]):
+        return default
+    return w, h
+
+
+def save_window_size(width, height):
+    """Best-effort -- never let a failed write stop the app from closing."""
+    try:
+        WINDOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        WINDOW_STATE_PATH.write_text(
+            json.dumps({"width": int(width), "height": int(height)}), encoding="utf-8")
+    except Exception:
+        pass
 
 
 class FluxAPI:
@@ -85,12 +169,44 @@ if __name__ == "__main__":
     flask_thread.start()
 
     # PyWebView must own the main thread on macOS
-    webview.create_window(
+    start_w, start_h = load_window_size()
+    window = webview.create_window(
         title    = "Flux Audio",
         url      = f"http://{Config.HOST}:{Config.PORT}",
         js_api   = FluxAPI(),
-        width    = 1440,
-        height   = 900,
-        min_size = (960, 640),
+        width    = start_w,
+        height   = start_h,
+        min_size = (MIN_W, MIN_H),
     )
+
+    # Track the size as it changes and write it once on the way out, rather than
+    # writing on every resize event -- a single drag fires those continuously.
+    # `resized` is the source of truth: window.width/height are not guaranteed
+    # to be refreshed by the time `closing` runs on every backend, so the last
+    # event we saw is trusted over re-reading the object. Both subscriptions are
+    # wrapped because these event names have moved between PyWebView releases,
+    # and a window that will not open is a far worse bug than one that forgets
+    # how big it was.
+    latest = {"w": start_w, "h": start_h}
+
+    def _on_resized(width, height):
+        latest["w"], latest["h"] = width, height
+
+    def _on_closing():
+        save_window_size(latest["w"], latest["h"])
+
+    try:
+        window.events.resized += _on_resized
+    except Exception:
+        pass
+    try:
+        window.events.closing += _on_closing
+    except Exception:
+        pass
+
     webview.start()
+
+    # Belt and braces: if `closing` never fired -- the event is missing on this
+    # backend, or the window went away another way -- start() still returns on a
+    # normal quit, and the last size we saw gets written here.
+    save_window_size(latest["w"], latest["h"])

@@ -40,6 +40,9 @@ temp/
 *.db-shm
 *.db-wal
 
+# Per-machine PyWebView window size, written on quit by run.py
+db/window_state.json
+
 # Python
 __pycache__/
 *.py[cod]

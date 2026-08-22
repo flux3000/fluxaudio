@@ -46,7 +46,12 @@
 
   /* Layout */
   --sidebar-w: 264px;
+  /* Shared by the Recording view's meta block and Side Panel — defined here as
+     well as on .rec-view-shell so a stray .slide-panel outside that shell still
+     resolves calc() rather than collapsing to width:auto. */
+  --rec-panel-w: 42%;
   --player-h:  68px;
+  --header-h:   46px;
   --r-sm: 4px;
   --r-md: 8px;
   --r-lg: 12px;
@@ -182,18 +187,94 @@ body {
   flex-direction: column;
 }
 
+/* Two rows since 2026-08-22: the App Header spans both columns, then sidebar
+   and content below it. The header is chrome for the WINDOW — home, back,
+   forward, search and the view-mode toggle all act on the app, not the page —
+   so it sits above the sidebar rather than inside the content column. */
 .app-shell {
   flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: var(--header-h) 1fr;
   position: relative;
 }
+
+.app-header {
+  grid-column: 1 / -1;
+  display: grid;
+  /* 1fr | auto | 1fr — equal side columns, so the search box is centred in the
+     WINDOW and cannot be nudged by a longer wordmark or another nav button. */
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--bd-1);
+  position: relative;
+  z-index: 30;                      /* the search dropdown overlays the page */
+}
+.app-header-left   { display: flex; align-items: center; gap: 14px; min-width: 0; }
+/* 620 → 460 (2026-08-22): the right cell now carries the library selector, the
+   mode toggle AND the user chip, and the search field was taking room they
+   need. It is a jump-to box, not a place you read results. */
+.app-header-center { position: relative; width: 460px; max-width: 100%; }
+.app-header-right  {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 10px; min-width: 0;
+}
+
+/* Empty and invisible until a remote library exists — see renderLibrarySelector. */
+.lib-select-host { position: relative; display: flex; align-items: center; }
+
+.hdr-user {
+  display: flex; align-items: center; gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--bd-1);
+  min-width: 0;
+}
+.hdr-user .user-chip { flex: 0 1 auto; }
+.hdr-user .user-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Placeholder wordmark for the rename (Flux Audio is retiring). Deliberately
+   plain — it is standing in for a designed mark, and dressing up a placeholder
+   makes it harder to replace. */
+.app-wordmark {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--t0);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.app-nav-btns { display: flex; align-items: center; gap: 2px; }
+/* Sized to be hit without aiming (Ryan, 2026-08-22 — these were much too
+   small). ← and → replaced ‹ and › at the same time: the guillemets render at a
+   fraction of their point size in most faces, so no amount of font-size made
+   them read as buttons. */
+.hdr-btn {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 19px; line-height: 1;
+  color: var(--t2);
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.hdr-btn:hover:not(:disabled) { color: var(--t0); background: var(--bg-3); }
+/* Disabled rather than hidden: a control that vanishes when it has nothing to
+   do makes the row jump, and the greyed arrow is itself the answer to "can I
+   go back from here?". */
+.hdr-btn:disabled { opacity: 0.3; cursor: default; }
+.hdr-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* Draggable divider between sidebar and main content */
 .sidebar-resizer {
   position: absolute;
-  top: 0; bottom: 0;
+  top: var(--header-h); bottom: 0;
   left: var(--sidebar-w);
   width: 7px;
   margin-left: -3px;
@@ -214,52 +295,10 @@ body {
   min-height: 0;
 }
 
-.sidebar-header {
-  padding: 20px 18px 16px;
-  border-bottom: 1px solid var(--bd-0);
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.logo-mark {
-  width: 26px;
-  height: 26px;
-  background: var(--accent);
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  color: #fff;
-  flex-shrink: 0;
-  font-weight: 600;
-  letter-spacing: -0.5px;
-}
-
-.logo-text {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--t0);
-  letter-spacing: 0.01em;
-  flex: 1;
-}
-
-.theme-btn {
-  background: none;
-  border: none;
-  color: var(--t2);
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  padding: 3px 4px;
-  border-radius: var(--r-sm);
-  flex-shrink: 0;
-  transition: color 0.12s, background 0.12s;
-}
-
-.theme-btn:hover { color: var(--t1); background: var(--bg-4); }
+/* .sidebar-header / .logo-mark / .logo-text REMOVED 2026-08-22. The app name
+   and icon left the sidebar: the App Header now carries the wordmark, and the
+   sidebar is navigation only. The ◑ theme button went with it — light/dark is
+   now a Light/Dark segmented control in the Settings modal (.settings-theme). */
 
 .sidebar-nav {
   padding: 10px 8px 4px;
@@ -394,20 +433,15 @@ body {
 }
 .artist-subitem:hover .artist-name { color: var(--t1); }
 
-.sidebar-footer {
-  padding: 12px 12px;
-  border-top: 1px solid var(--bd-0);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
+/* .sidebar-footer REMOVED 2026-08-22 — the user chip, Settings and Sign out
+   moved to the App Header (.hdr-user). The sidebar is a list of places in the
+   library, and an account is not one of them. .user-chip / .user-avatar /
+   .user-name survive: the same markup renders up there. */
 
 .user-chip {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1;
   min-width: 0;
 }
 
@@ -551,7 +585,6 @@ body {
    on the wrapper so hero, tabs and panes share one gutter and can never drift
    apart. */
 .performer-page { padding: 22px 28px 32px; }
-.performer-page .pp-back-row { margin-bottom: 10px; }
 
 .pp-hero { display: flex; align-items: flex-start; gap: 20px; padding: 0 0 18px; }
 .pp-hero-main { flex: 1; min-width: 0; }
@@ -1173,18 +1206,30 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 
 /* Back link + collections, one row (Ryan, 2026-07-15 — collections used to
    live inside the top-right box; moved up here, aligned with the back link). */
+/* The back link that used to sit at the left of this row was removed
+   2026-08-22 (the App Header's arrow replaced it), so the action cluster is
+   all that is left and it hangs off the right. */
 .rec-top-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
   padding: 16px 28px 0;
 }
 .rec-top-row .rec-collections { margin-bottom: 0; }
 
+/* Two stacked rows: .rec-header-main (avatar + name/date/personnel/provenance)
+   then Notes across the full width. Single-column since 2026-08-21, when the
+   Source/Lineage/Quality block was broken up — Quality went to the action row
+   above, Source and Lineage down beside Members and Guests. */
 .rec-detail-header {
   padding: 10px 28px 18px;
   border-bottom: 1px solid var(--bd-0);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.rec-header-main {
   display: flex;
   align-items: flex-start;
   gap: 24px;
@@ -1202,8 +1247,12 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 }
 .rec-header-lines { flex: 1; min-width: 0; }
 .rec-header-avatar { flex-shrink: 0; padding-top: 2px; }
+/* 54px → 84px (Ryan, 2026-08-21). At the old size the act's face was a detail
+   in the header; at this size it anchors it, which is what a listening surface
+   wants. It now spans the name AND date lines, which is also why the meta block
+   opposite it aligns to the date line rather than the name. */
 .rec-header-photo {
-  width: 54px; height: 54px; border-radius: 50%; object-fit: cover;
+  width: 84px; height: 84px; border-radius: 50%; object-fit: cover;
   border: 2px solid var(--genre-fg, var(--bd-1)); background: var(--bg-2);
   display: block;
 }
@@ -1212,7 +1261,7 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
    everywhere it appears. */
 .rec-header-photo--initials {
   display: flex; align-items: center; justify-content: center;
-  font-size: 17px; font-weight: 600; letter-spacing: 0.02em;
+  font-size: 26px; font-weight: 600; letter-spacing: 0.02em;
   color: var(--t2);
 }
 
@@ -1220,11 +1269,48 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
    2026-08-18 (Ryan): it was a bordered two-tab panel, but with Fidelity moved
    into the Side Panel there is one pane left, and a box with a tab strip for a
    single pane is furniture around three rows of text. */
-.rec-header-right {
-  flex-shrink: 0;
-  width: 45%;
-  align-self: flex-start;
-  padding-top: 2px;
+/* .rec-header-right REMOVED 2026-08-21. Source / Lineage / Quality stopped
+   being one block: they were never one thing. Quality is a human verdict on the
+   whole recording and the attribute a collector sorts and chooses by, so it
+   moved UP to the action row at full size (.rec-quality-chip). Source and
+   Lineage are the tape's paperwork, so they moved DOWN beside Members and
+   Guests (.rec-sl-row), where the show's other supporting facts already sit.
+   The header is a single column again. */
+
+/* Quality, promoted (Ryan, 2026-08-21) — in the action row beside Add to
+   Collection, and deliberately the largest thing in that row. It is a human
+   judgement about the whole recording, and on a shelf of ROIO it is the number
+   a collector chooses by; at 12px in a three-row block it read as one field
+   among many. Still quick-editable in place: the .hm-val cell inside is what
+   the delegated handler targets. */
+.rec-quality-chip {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 2px 12px 2px 11px;
+  border: 1px solid var(--bd-1); border-radius: 13px;
+  white-space: nowrap;
+}
+.rec-quality-lbl {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--t3);
+}
+.rec-quality-chip .hm-val { line-height: 1; }
+.rec-quality-chip .quality { font-size: 18px; line-height: 1; }
+
+/* Source + Lineage, demoted to one quiet row under Guests. Left edge and label
+   treatment match .mg-row so the three read as one stack of supporting facts.
+   Lineage takes the remaining width because it is the one that can be long. */
+.rec-sl-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 22px;
+  padding: 6px 8px;
+  margin: 4px 0 6px;
+}
+.rec-sl-item { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rec-sl-item--lineage { flex: 1 1 260px; min-width: 0; }
+.rec-sl-item--lineage .hm-val {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* .hm-tabbed-panel / .hm-tabs / .hm-tab / .hm-pane / .hm-spectrogram / .hm-metric
    / .hm-hint / .hm-warn / .hm-reanalyze-btn were REMOVED 2026-08-18 with the
@@ -1259,6 +1345,17 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   word-break: break-word;
   line-height: 1.5;
 }
+
+/* Source and Quality carry a chip rather than plain text (2026-08-21) — the
+   same .badge / .quality treatment the Library rows and cards use. The cell
+   itself stays the edit target; the chip is just its contents, so quick-edit
+   is untouched. */
+.hm-val--chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+}
+.hm-val--chip .quality { font-size: 13px; }
 
 .hm-metric {
   font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
@@ -1306,10 +1403,8 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 
 .breadcrumb:hover { color: var(--t1); }
 
-/* Performer/Venue page back-link (2026-07-23) — shown only when reached via
-   a recording's nav-link icon (state.recFrom), see renderArtistView /
-   renderVenueView. */
-.pp-back-row { margin-bottom: 8px; }
+/* .pp-back-row REMOVED 2026-08-22 — the App Header's back arrow covers every
+   view, so per-page back links were three ways to do one thing. */
 
 .rec-detail-header h2 {
   font-size: 18px;
@@ -1324,13 +1419,17 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   margin-bottom: 6px;
 }
 
+/* Back inside the text column 2026-08-22 (Ryan): as a full-width row it began
+   under the performer avatar, out of line with every other line of text in the
+   header. It keeps the width it gained — the column is the whole header now
+   that the right-hand meta block is gone — but starts where the name, date and
+   personnel start. The old 480px cap is still gone. */
 .rec-header-notes {
   font-size: 12px;
   color: var(--t2);
   line-height: 1.5;
   white-space: pre-wrap;
-  margin-top: 2px;
-  max-width: 480px;
+  margin-top: 6px;
   /* Long notes scroll within a capped box instead of pushing the waveform
      and track list off-screen. */
   max-height: 140px;
@@ -1384,6 +1483,9 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   border-radius: var(--r-sm); padding: 1px 4px; font-size: 12px; margin-right: 3px;
 }
 .rec-artists-row { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 6px; }
+/* Unused as of 2026-08-22 — the inline instrument/note editor was cut from V1
+   and a name click now opens the Artist page. Kept because the data, the
+   resolver and the endpoint all survive; only the render function went. */
 .rec-personnel-detail { flex-basis: 100%; margin-top: 4px; }
 .rec-personnel-detail-inner {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -1409,15 +1511,12 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 }
 .ai-assist-hint { font-size: 11.5px; color: var(--t3); line-height: 1.5; }
 
-/* Bottom action row — admin/editing actions, full width, above the player bar */
-.rec-bottom-actions {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 24px;
-  border-top: 1px solid var(--bd-1);
-  background: var(--bg-1);
-  flex-shrink: 0;
-}
-.rec-bottom-actions #btn-delete-rec { margin-left: auto; }
+/* .rec-bottom-actions REMOVED 2026-08-21. Its four buttons went to two places:
+   Write Tags to Files into the File Tags pane's action slot, beside the tags it
+   writes; Open in Containing Folder / Mark as Official / Delete into the
+   Actions menu up in the top row. A row of admin buttons pinned below a
+   scrolling track list meant Delete was the hardest control on the page to
+   reach and the easiest to hit by accident on a short show. */
 
 .badge-row {
   display: flex;
@@ -1436,7 +1535,11 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 }
 
 /* Flex shell for the recording view — fills main-content and lets detail-panels grow */
+/* One token for two elements: the Record Header's meta block and the Side
+   Panel. They sit above one another and must share a left edge, so the width
+   lives here rather than being typed twice. */
 .rec-view-shell {
+  --rec-panel-w: 42%;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -1465,15 +1568,24 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   display: flex;
   flex-direction: row;
   flex-shrink: 0;
-  width: 28px;            /* collapsed: tab strip only */
+  width: 28px;            /* collapsed: the rail, nothing else */
   transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
-  background: var(--bg-1);
+  /* Same ground as the Main Area (Ryan, 2026-08-21). The panel used to sit on
+     --bg-1 with the tab strip on --bg-0, which read as a lighter box inset
+     into the page with a second, differently-shaded strip inside it — two
+     surfaces where the content wanted one. The left border is now the only
+     thing separating panel from track list, which is all the separation it
+     needed. */
+  background: var(--bg-2);
   border-left: 1px solid var(--bd-1);
 }
+/* --rec-panel-w is shared with the Record Header's meta block above, so the two
+   line up down the right side of the view. The +28px is the rail's column,
+   which it keeps in both states. */
 .slide-panel.open {
-  width: 42%;
-  min-width: 260px;
+  width: calc(var(--rec-panel-w) + 28px);
+  min-width: 288px;
 }
 
 .slide-panel-body {
@@ -1532,13 +1644,34 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .slide-pane-scroll::-webkit-scrollbar { width: 4px; }
 .slide-pane-scroll::-webkit-scrollbar-thumb { background: var(--bd-2); border-radius: 2px; }
 
+/* Pane content breathing room (Ryan, 2026-08-21). Each pane's body carries its
+   own padding — set for a bordered box, and too tight now that the box is gone
+   and the content sits directly on the panel. Scoped to .slide-panel--htabs so
+   the ingest Review screen, which reuses .rev-raw-section, .cksum-* and
+   .ai-results, keeps its own denser spacing. */
+.slide-panel--htabs .rev-raw-section { padding: 16px 20px 18px; }
+.slide-panel--htabs .rq-wrap         { padding: 18px 20px 24px; }
+.slide-panel--htabs .filetags-json   { padding: 18px 20px; }
+.slide-panel--htabs .cksum-summary   { padding: 14px 20px; }
+.slide-panel--htabs .cksum-rows      { padding: 6px 20px 18px; }
+.slide-panel--htabs .ai-results      { padding: 14px 20px 18px; }
+.slide-panel--htabs .info-panel-empty { padding: 36px 24px; }
+
 /* ── Horizontal tab variant (Ryan, 2026-08-18) ────────────────────────────
    Applied as a MODIFIER rather than changing .slide-tabs outright, because the
    ingest Review screen reuses these same classes and its layout was not part of
    this change. Extending it there is one class on the wrapper. */
-.slide-panel--htabs { flex-direction: column; }
+/* Row of two: the permanent rail, then the tabs+panes column. */
+.slide-panel--htabs { flex-direction: row; }
+.slide-panel-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.slide-panel--htabs:not(.open) .slide-panel-main { display: none; }
 .slide-panel--htabs .slide-tabs {
-  order: -1;                 /* strip above the panes, whatever the DOM order */
   width: auto;
   flex-direction: row;
   align-items: stretch;
@@ -1559,14 +1692,88 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   border-radius: 3px 3px 0 0;
 }
 .slide-panel--htabs .slide-tab.active { border-bottom-color: var(--accent); }
-/* Collapsed: the horizontal strip has nowhere to render at 28px wide, so it
-   hides and a rail takes over as the way back in. */
-.slide-panel--htabs:not(.open) .slide-tabs,
-.slide-panel--htabs:not(.open) .slide-panel-body { display: none; }
+/* Unwritten metadata: the database knows something the FLAC files do not.
+   Amber, matching .pane-act--staged on the button that resolves it, and a dot
+   so the signal survives at 9px where a colour shift alone is easy to miss. */
+.slide-tab--staged { color: var(--amber); }
+.slide-tab--staged::after {
+  content: '';
+  display: inline-block;
+  width: 5px; height: 5px;
+  margin-left: 5px;
+  vertical-align: 1px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+.slide-tab--staged.active { color: var(--amber); }
+
+/* Action row — its own band directly under the tab strip, one pane's controls
+   at a time. Every pane's action is the same size, weight and place, which is
+   the whole point: Re-Analyze, Write Tags, Re-validate, AI Assist and Edit File
+   are the same kind of thing and used to look like four different kinds.
+
+   A row rather than the right end of the tab strip (2026-08-21): squeezed in
+   beside five tabs, a label like "Write Tags to Files" pushed the strip into
+   horizontal scrolling and the action could end up off-screen. It hides itself
+   whenever the active pane has no action, so panes that need no toolbar do not
+   pay for one. */
+.pane-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;   /* Ryan, 2026-08-21 — actions hang off the right */
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--bd-0);
+  flex-shrink: 0;
+  min-height: 36px;
+}
+.pane-acts[hidden] { display: none; }
+.pane-acts > [hidden] { display: none; }
+
+.pane-act {
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: var(--t1);
+  background: transparent;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.pane-act:hover:not(:disabled) { color: var(--t0); border-color: var(--bd-2); background: var(--bg-3); }
+.pane-act:disabled { opacity: 0.45; cursor: default; }
+.pane-act--primary { color: var(--accent); border-color: var(--accent-dim2, var(--bd-2)); }
+/* Unwritten metadata changes are waiting for this button — same signal the old
+   .btn-staged carried, in this bar's vocabulary. */
+.pane-act--staged {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.pane-act-status {
+  font-size: 10px;
+  color: var(--t2);
+  white-space: nowrap;
+}
+/* Says what the amber tab means. Sits to the LEFT of the button that clears it,
+   so the row reads as a sentence: the problem, then the fix. */
+.pane-act-note {
+  font-size: 10.5px;
+  color: var(--amber);
+  white-space: nowrap;
+  margin-right: 2px;
+}
+/* The rail is always shown (Ryan, 2026-08-21) and toggles the panel both ways.
+   It keeps a fixed 28px column so opening the panel doesn't shift it, and it
+   carries the border that used to sit on .slide-panel itself. */
 .slide-rail { display: none; }
-.slide-panel--htabs:not(.open) .slide-rail {
+.slide-panel--htabs .slide-rail {
   display: block;
-  flex: 1;
+  width: 28px;
+  flex-shrink: 0;
   writing-mode: vertical-rl;
   text-orientation: mixed;
   transform: rotate(180deg);
@@ -1574,14 +1781,36 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--t3);
-  background: var(--bg-0);
-  border: none;
+  /* Reads as a control, not as chrome (Ryan, 2026-08-21). It was --t3 text on
+     --bg-0 — the quietest colour on the darkest ground, against a panel that
+     is now the same shade as the page, so it disappeared.
+     It is a raised strip on its own lighter ground with a border to bound it,
+     square-cornered and flush to the column — the rounded, inset variant was
+     tried on 2026-08-21 and Ryan preferred this. */
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--t1);
+  background: var(--bg-3);
+  border: 1px solid var(--bd-2);
+  border-radius: 0;
   cursor: pointer;
-  padding: 10px 5px;
+  padding: 10px 3px;
   user-select: none;
+  transition: color .12s, background .12s, border-color .12s;
 }
-.slide-panel--htabs:not(.open) .slide-rail:hover { color: var(--t1); background: var(--bg-2); }
+.slide-panel--htabs .slide-rail:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-3);
+}
+/* Open state is pressed-in: the accent border says "this is what is showing",
+   and the inset shadow gives it the depth a toggle needs to look toggled. */
+.slide-panel--htabs.open .slide-rail {
+  color: var(--accent);
+  border-color: var(--accent-dim2, var(--bd-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.slide-rail:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* Vertical tab strip */
 .slide-tabs {
@@ -1593,7 +1822,7 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   padding: 10px 0;
   gap: 4px;
   border-left: 1px solid var(--bd-1);
-  background: var(--bg-0);
+  background: transparent;   /* inherits the panel's ground — see .slide-panel */
 }
 
 .slide-tab {
@@ -1642,12 +1871,17 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
   background: var(--bg-2);
 }
 
+/* The play column dropped 30px → 16 on 2026-08-22: a centred glyph in a 30px
+   cell plus a 10px gutter left a visible gap before the track number, so the
+   two read as separate columns rather than one "which track" cluster. The type
+   went up a step at the same time and came straight back down — Ryan preferred
+   the original sizes. The bigger play glyph stayed. */
 .track-row {
   display: grid;
-  grid-template-columns: 30px 24px minmax(0, 2fr) minmax(0, 1.2fr) auto 44px;
+  grid-template-columns: 16px 24px minmax(0, 2fr) minmax(0, 1.2fr) auto 44px;
   align-items: center;
-  gap: 10px;
-  padding: 7px 24px;
+  gap: 8px;
+  padding: 9px 24px;
   cursor: pointer;
   border-radius: var(--r-sm);
   margin: 1px 6px;
@@ -1673,9 +1907,10 @@ textarea.pp-inline-input { resize: vertical; font-family: var(--font); font-size
 .track-row.playing { background: var(--accent-dim); }
 
 .track-play {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--t2);
   text-align: center;
+  line-height: 1;
   transition: color 0.1s;
 }
 
@@ -3007,6 +3242,34 @@ input[type="range"].progress-bar {
   border-top: 1px solid var(--bd-0);
 }
 
+.del-subject {
+  font-size: 13px;
+  color: var(--t0);
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.del-note {
+  font-size: 11.5px;
+  color: var(--t2);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.del-files-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--t1);
+  cursor: pointer;
+}
+.del-files-row input { width: auto; margin: 0; }
+.del-warn {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--red);
+}
+
 .settings-label {
   display: block;
   font-size: 11px;
@@ -3247,8 +3510,12 @@ input[type="range"].progress-bar {
 }
 .member-chip-x { color: var(--t2); cursor: pointer; font-size: 14px; line-height: 1; }
 .member-chip-x:hover { color: var(--red); }
-.member-chip-name { cursor: pointer; }
+/* An <a> since 2026-08-22 on the Recording view (it links to the person's
+   Artist page), still a <span> on the ingest Review form where there is no
+   artist row to point at yet — so inherit rather than assume link colours. */
+.member-chip-name { cursor: pointer; color: inherit; text-decoration: none; }
 .member-chip-name:hover { text-decoration: underline; }
+a.member-chip-name:hover { color: var(--accent); }
 .member-chip--expanded { border-color: var(--accent); background: rgba(196,149,106,0.12); }
 
 /* Members vs. Guests pill color (2026-07-22, two-row redesign — replaces the
@@ -3332,12 +3599,17 @@ input[type="range"].progress-bar {
    Above Add Recordings. With one library it is a plain label, not a control:
    a dropdown arrow opening a menu of one would promise something the app
    can't yet do. It grows a caret the moment a remote exists. */
+/* Lives in the App Header since 2026-08-22, so it is sized like a header
+   control: no block margins, a pill to match the mode toggle beside it, and a
+   width cap because a joined library can be named anything. */
 .lib-select {
-  display: flex; align-items: center; gap: 8px;
-  margin: 10px 12px 4px; padding: 8px 10px;
-  border: 1px solid var(--bd-1); border-radius: var(--r-sm);
-  background: var(--bg-2); font-size: 12px; color: var(--t0);
-  cursor: pointer; transition: border-color .12s, background .12s;
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 10px;
+  max-width: 200px;
+  border: 1px solid var(--bd-1); border-radius: 13px;
+  background: var(--bg-2); font-size: 11.5px; color: var(--t0);
+  cursor: pointer; white-space: nowrap;
+  transition: border-color .12s, background .12s;
 }
 .lib-select.is-solo { cursor: default; }
 .lib-select:not(.is-solo):hover { border-color: var(--accent); background: var(--bg-3); }
@@ -3349,10 +3621,17 @@ input[type="range"].progress-bar {
 .lib-select-name { flex: 1; min-width: 0; font-weight: 500; }
 .lib-select-caret { color: var(--t3); font-size: 10px; }
 
+/* Drops out of the header rather than pushing the row taller. */
 .lib-select-menu {
-  margin: 0 12px 6px; padding: 4px;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 220px;
+  padding: 4px;
   background: var(--bg-3); border: 1px solid var(--bd-1);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md, 8px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
 }
 .lib-select-opt {
   display: flex; align-items: center; gap: 8px;
@@ -3362,9 +3641,26 @@ input[type="range"].progress-bar {
 .lib-select-opt:hover { background: var(--bg-4); color: var(--t0); }
 .lib-select-opt.active { color: var(--accent-lit); }
 
+/* Section heading, not a link (Ryan, 2026-08-22). The Library nav item it
+   replaced went to the App Header's Home button; a heading that sometimes
+   navigates was the confusing half of having both. */
+.nav-header {
+  padding: 14px 16px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--t2);
+  flex-shrink: 0;
+}
+
+/* Pinned to the bottom of the column: it is the only ACTION in a list of
+   destinations, so it sits apart from them rather than at the top competing
+   with the shelf for first attention. */
 .nav-add-btn {
   display: flex; align-items: center; justify-content: center; gap: 7px;
-  margin: 4px 12px 10px; padding: 8px 12px;
+  margin: 8px 12px 10px; padding: 8px 12px;
+  flex-shrink: 0;
   background: var(--bg-2); color: var(--t0);
   border: 1px solid var(--bd-1); border-radius: var(--r-sm);
   font-size: 12px; font-weight: 500; letter-spacing: 0.02em;
@@ -3415,6 +3711,11 @@ input[type="range"].progress-bar {
 .nav-record.active { color: var(--accent); background: var(--bg-1); }
 .nav-record .truncate { flex: 1; min-width: 0; }
 .nav-record-count { font-size: 10px; color: var(--t3); }
+/* A favourite is a SHOW, so the row names it the way collectors do: the act,
+   then the date. The date is muted but present — for a live recording it is
+   half the identity, not a detail (see CONTEXT.md on the handbill card). */
+.nav-record-sub { font-size: 10px; color: var(--t3); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.nav-record--fav { gap: 8px; }
 .nav-record--empty { color: var(--t3); font-style: italic; cursor: default; }
 .nav-records--sub .nav-record { padding-left: 52px; }
 
@@ -3499,6 +3800,65 @@ input[type="range"].progress-bar {
 }
 .fav-toggle-btn.is-fav:hover { background: color-mix(in srgb, var(--amber) 20%, transparent); }
 .fav-toggle-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Actions menu (2026-08-21) ─────────────────────────────────────────────
+   Sits in the same pill cluster as Add to Collection and the favorite toggle,
+   but solid-bordered rather than dashed: those two are marks you toggle, this
+   opens a menu of verbs. */
+.rec-actions-wrap { position: relative; display: inline-block; }
+.actions-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px solid var(--bd-1); border-radius: 12px;
+  padding: 3px 10px; font-size: 11px; color: var(--t2); cursor: pointer;
+  white-space: nowrap; transition: color .12s, border-color .12s;
+}
+.actions-btn:hover, .actions-btn.is-open { color: var(--t0); border-color: var(--bd-2); }
+
+.actions-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 208px;
+  padding: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-md, 8px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  display: flex;
+  flex-direction: column;
+}
+.actions-menu[hidden] { display: none; }
+.actions-item {
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--t1);
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.actions-item:hover:not(:disabled) { background: var(--bg-4); color: var(--t0); }
+.actions-item:disabled { opacity: 0.5; cursor: default; }
+.actions-item--danger { color: var(--red); }
+.actions-item--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+}
+.actions-sep { height: 1px; background: var(--bd-0); margin: 4px 6px; }
+.actions-submenu { display: flex; flex-direction: column; }
+.actions-submenu[hidden] { display: none; }
+.actions-item--indent { padding-left: 24px; color: var(--t2); }
+.actions-note {
+  padding: 7px 10px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--t3);
+  white-space: nowrap;
+}
 
 /* Performers index page */
 .artist-index-list { padding: 6px 0; }
@@ -3835,6 +4195,19 @@ input[type="range"].progress-bar {
 }
 
 /* ── Official release badge + track flags ─────────────────────────────────── */
+
+/* Out of Library — the folder was moved to Workshop/Backlog and the record is
+   unpublished. Amber rather than red: nothing is broken or lost, the show is
+   just not on the shelf. */
+.badge-unpublished {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: 10px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--amber);
+  border: 1px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  white-space: nowrap;
+}
 
 .badge-official {
   display: inline-flex; align-items: center;
@@ -4361,6 +4734,10 @@ input[type="range"].progress-bar {
 }
 .info-file-btn:hover:not(.active) { background: var(--bg-4); }
 
+/* [hidden] must be spelled out: the UA rule that implements the attribute is
+   display:none at element-name specificity, so a class rule setting display
+   beats it and the row stays visible while locked. */
+.info-file-save-row[hidden] { display: none; }
 .info-file-save-row {
   display: flex;
   align-items: center;
@@ -4406,6 +4783,20 @@ input[type="range"].progress-bar {
   outline: none;
 }
 .rev-info-edit::placeholder { color: var(--t3); }
+
+/* Locked state (2026-08-21) — the Recording view's Info File pane is read-only
+   until "Edit File" is clicked. Kills the caret, the resize grip and the focus
+   box so a readonly textarea is indistinguishable from a block of text; without
+   this it still takes focus and looks like an invitation to type. */
+.rev-info-text--locked {
+  resize: none;
+  cursor: default;
+  caret-color: transparent;
+}
+.rev-info-text--locked:focus { border-color: transparent; background: transparent; }
+
+/* .pane-head-link lived for one day (2026-08-21). The pane headers it sat in
+   are gone and every pane action now uses .pane-act in the tab strip. */
 
 .rev-venue-note {
   font-size: 10px;
@@ -5852,19 +6243,8 @@ input[type="range"].progress-bar {
   flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.rq-score {
-  font-family: var(--font-mono);
-  font-size: 17px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.rq-score-lbl {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--t3);
-}
-.rq-reanalyze-btn { margin-left: auto; }
+/* .rq-score / .rq-score-lbl removed 2026-08-21 with the composite number
+   itself — see buildQualityPaneHtml() in app.js for why. */
 
 /* Quick facts — format, bitrate, cutoff. Plain facts on the pane's own
    background, not a boxed strip: they are readings you check against the info
@@ -5978,7 +6358,6 @@ input[type="range"].progress-bar {
 }
 
 .rq-empty { padding: 16px; font-size: 12px; color: var(--t3); font-style: italic; }
-.rq-empty .rq-reanalyze-btn { margin: 10px 0 0; display: block; }
 
 /* ══ Search (IO-46, 2026-08-18) ═════════════════════════════════════════════
    The Search Bar is persistent chrome above the page — distinct from the
@@ -5986,26 +6365,63 @@ input[type="range"].progress-bar {
    agreed UI-lexicon term for something else, and reusing it for this would
    make every future instruction ambiguous. */
 
-.search-bar {
-  position: relative;
-  flex: none;
-  padding: 10px 28px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--bd-1);
-  z-index: 30;                      /* the dropdown overlays page content */
-}
+/* .search-bar's own band is gone — the field lives in the App Header now
+   (2026-08-22) and #search-bar is the header's centre cell, keeping the id so
+   the outside-click handler that closes the dropdown still resolves. */
 
 /* Peer mode: this searches MY library, and the page behind it is someone
    else's. Showing a box that silently answers the wrong question is worse
    than showing none — peer search is IO-48 and must filter through the
    visible set or it leaks holdings. */
-html.peer-mode .search-bar { display: none; }
+/* Peer mode: this searches MY library and the page behind it is someone
+   else's. The whole centre cell goes; the header keeps its shape because the
+   side columns are 1fr each. */
+html.peer-mode .app-header-center { visibility: hidden; }
+
+/* Admin / Playback segmented control. Visually quiet by default — it is a
+   development and preview affordance, not a primary action — but the active
+   segment is unambiguous, because getting this wrong means wondering why
+   nothing on the page is clickable. */
+.view-mode-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--bd-1);
+  border-radius: 13px;
+}
+.view-mode-toggle.hidden { display: none; }
+.vm-opt {
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--t3);
+  background: none;
+  border: none;
+  border-radius: 11px;
+  padding: 3px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .12s, background .12s;
+}
+.vm-opt:hover:not(.active) { color: var(--t1); }
+.vm-opt.active {
+  color: var(--bg-1);
+  background: var(--accent);
+}
+/* Same control, used for Light/Dark in the Settings modal. Full width there
+   because it is a form field among form fields, not a corner affordance. */
+.settings-link-btn { width: 100%; justify-content: flex-start; text-align: left; }
+.settings-theme { display: flex; width: 100%; }
+.settings-theme .vm-opt { flex: 1; text-align: center; padding: 5px 12px; }
 
 .search-field {
   position: relative;
   display: flex;
   align-items: center;
-  max-width: 620px;
+  width: 100%;
   background: var(--bg-3);
   border: 1px solid var(--bd-1);
   border-radius: var(--r-md);
@@ -6064,12 +6480,13 @@ html.peer-mode .search-bar { display: none; }
 
 /* ── Dropdown ─────────────────────────────────────────────────────────────── */
 
+/* Hangs off the centre cell, which is exactly the field's width — so the
+   dropdown lines up with the box that produced it at any window size. */
 .search-dropdown {
   position: absolute;
-  top: calc(100% - 6px);
-  left: 28px;
-  width: 620px;
-  max-width: calc(100% - 56px);
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
   max-height: 60vh;
   overflow-y: auto;
   background: var(--bg-3);
@@ -6280,3 +6697,168 @@ body.drive-offline img[src*="/api/venues/images/"] {
   opacity: 0.45;
   filter: grayscale(1);
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE — first pass, 2026-08-21
+   ══════════════════════════════════════════════════════════════════════════
+
+   Goal: the LISTENER at a narrow window. Someone who wants what Spotify or
+   Apple Music give them — the act, the show, the tracks, transport — and who
+   does not care about lineage, checksums or Vorbis comments. So the rule
+   underneath every breakpoint here is the same: as space runs out, archivist
+   surfaces yield first and playback yields last.
+
+   Three widths, chosen from what actually breaks rather than from device
+   names:
+
+     1200px  the Recording view's two-column header stops fitting — the meta
+             block squeezes the performer name into a column too narrow to
+             read. Header stacks; the side-by-side split survives elsewhere.
+
+      900px  the Track List and the Side Panel can no longer share a row
+             without one of them being useless. The panel becomes an overlay
+             above the list instead of a sibling of it, which is also the
+             right behaviour on a touch screen. The rail stays put, so the
+             gesture that opens and closes it does not change.
+
+      640px  phone. Secondary track columns and the player's volume group go;
+             the transport does not.
+
+   KNOWN GAP, deliberate (Ryan's call needed): below 900px the Sidebar is
+   narrowed, not hidden. Hiding it would leave no navigation at all, and
+   giving it a drawer with a hamburger is JS plus a new UI element, not a
+   media query. Flagged rather than guessed at.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* ── ≤1200px: Record Header stacks ───────────────────────────────────────── */
+@media (max-width: 1200px) {
+  /* Lineage wraps under Source rather than fighting it for a narrow row. */
+  .rec-sl-item--lineage { flex-basis: 100%; }
+  .slide-panel.open { width: calc(52% + 28px); }
+}
+
+/* ── ≤900px: Side Panel overlays the Track List ──────────────────────────── */
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 190px 1fr; }
+  .sidebar-resizer { display: none; }   /* nothing left worth dragging */
+  /* Below this width a 620px centre cell would crowd the nav buttons off the
+     row, so the search field takes what is left instead of a fixed width. */
+  .app-header-center { width: auto; justify-self: stretch; }
+  .app-header { grid-template-columns: auto 1fr auto; }
+
+  .detail-panels { position: relative; }
+  /* The panel leaves the flex flow and floats over the list, so the tracks
+     keep their full width and the panel gets a usable one. The rail stays a
+     flex child pinned to the right edge, which is what keeps the open/close
+     gesture identical at every width. */
+  .slide-panel.open {
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: min(420px, 92%);
+    z-index: 12;
+    box-shadow: -12px 0 28px rgba(0, 0, 0, 0.28);
+  }
+  .track-panel { min-width: 0; }
+
+  .rec-detail-header { padding-left: 18px; }
+  .rec-header-photo  { width: 64px; height: 64px; }
+  .rec-header-photo--initials { font-size: 20px; }
+}
+
+/* ── ≤640px: phone ──────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .app-shell { grid-template-columns: 64px 1fr; }
+  .sidebar-label, .user-name { display: none; }
+  /* Header: the wordmark yields before the navigation does. */
+  .app-wordmark { display: none; }
+  .app-header { gap: 10px; padding: 0 10px; }
+
+  /* Track rows keep number, title and duration. Note and songwriter are
+     archivist columns and are the first thing off the row. */
+  .track-row {
+    grid-template-columns: 16px 22px minmax(0, 1fr) auto;
+    padding: 9px 14px;
+    gap: 8px;
+  }
+  .track-note-col, .track-sw-col { display: none; }
+
+  /* Transport survives; the volume group does not. */
+  .player-bar { grid-template-columns: minmax(0, 1fr) auto; padding: 0 12px; gap: 10px; }
+  .player-right { display: none; }
+
+  .rec-detail-header { padding: 8px 14px 14px; }
+  .rec-quality-chip .quality { font-size: 15px; }
+  .rec-header-main   { gap: 10px; }
+  .rec-header-photo  { width: 52px; height: 52px; }
+  .rec-header-photo--initials { font-size: 17px; }
+  .rec-detail-header h2 { font-size: 16px; }
+
+  .action-bar { flex-wrap: wrap; row-gap: 6px; }
+
+  .slide-panel.open { width: 100%; }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PLAYBACK MODE — belt to the JS braces
+   ══════════════════════════════════════════════════════════════════════════
+
+   Three JS choke points do the real work: makeInlineEditable() binds nothing
+   and strips its own affordance, entityShellHtml() drops the editable title and
+   the hero actions, and createPhotoGallery() renders pictures only. What is
+   left over is the handful of bespoke editors on the Performer page — the
+   roster rows, tenure stints, reference resources, the genre chip and the AI
+   dossier button — each with its own hand-rolled click handler.
+
+   Rather than thread a flag through all of them, this hides the controls and
+   makes the remaining display elements inert. `pointer-events: none` is a real
+   behavioural block, not just a cosmetic one, so a bespoke handler that was
+   missed still cannot fire.
+
+   None of this is a security boundary. Every endpoint enforces its own role
+   check server-side; Playback is a UI mode, and an admin who switches back gets
+   everything returned. See canEditLibrary() in app.js.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Controls that only exist to edit — gone entirely. */
+html.playback-mode .pp-delete,
+html.playback-mode .pp-hero-actions,
+html.playback-mode .pp-ph-acts,
+html.playback-mode .pp-drop,
+html.playback-mode .pp-fetch-tile,
+html.playback-mode .pp-gal-note,
+html.playback-mode .mg-add-btn,
+html.playback-mode .mg-add-picker,
+html.playback-mode .member-chip-x,
+html.playback-mode .pp-member-edit,
+html.playback-mode .pp-member-x,
+html.playback-mode .pp-stint-editor,
+html.playback-mode .pp-stint-add-btn,
+html.playback-mode .pp-stint-del,
+html.playback-mode .pp-resource-x,
+html.playback-mode .pp-res-entry,
+html.playback-mode .pp-res-hint,
+html.playback-mode #pp-res-add-btn,
+html.playback-mode #pp-dossier-run,
+html.playback-mode .pp-sec-msg { display: none !important; }
+
+/* .rec-pill-name is deliberately NOT in this list — as of 2026-08-22 it is a
+   link to the person's Artist page, and navigation is not editing. It must keep
+   working in Playback. */
+
+/* Content that stays readable but stops advertising — and stops accepting — a
+   click. These carry values a listener still wants to see. */
+html.playback-mode .pp-editable,
+html.playback-mode .pp-genre-field,
+html.playback-mode .pp-member-name,
+html.playback-mode .pp-member-tenure,
+html.playback-mode .hm-val--editable {
+  cursor: default;
+  pointer-events: none;
+}
+html.playback-mode .pp-editable:hover,
+html.playback-mode .hm-val--editable:hover { background: none; }
+
+/* "Tenure not set" is a prompt to an editor that is no longer reachable. */
+html.playback-mode .pp-member-tenure.is-unset { display: none; }

@@ -35,42 +35,30 @@
   <!-- ── App shell ──────────────────────────────────────────────────────────── -->
   <div id="app-shell" class="app-shell hidden">
 
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar-header">
-        <div class="logo-mark">FA</div>
-        <span class="logo-text">Flux Audio</span>
-        <button class="theme-btn" id="theme-btn" title="Toggle light / dark">◑</button>
-      </div>
+    <!-- ── App header (2026-08-22) ────────────────────────────────────────
+         Full width across the top, above BOTH the sidebar and the content —
+         it is chrome for the whole window, not for the page. Three cells:
+         wordmark + navigation on the left, the search field centred in the
+         window, the view-mode toggle on the right.
 
-      <div class="sidebar-nav" id="sidebar-nav"></div>
-
-      <div class="sidebar-footer">
-        <div class="user-chip">
-          <div class="user-avatar" id="user-avatar">?</div>
-          <span class="user-name" id="user-name">Loading...</span>
+         The centre cell is centred against the WINDOW, not against whatever
+         is left over after the side cells — hence 1fr / auto / 1fr with equal
+         side columns, so a longer wordmark or an extra nav button cannot
+         nudge the search box off centre. -->
+    <header class="app-header" id="app-header">
+      <div class="app-header-left">
+        <!-- Placeholder for the real logo. "Thread" is the leading candidate
+             in the rename (Flux Audio is retiring — see CONTEXT.md); this is a
+             wordmark standing in for a designed mark, not a final decision. -->
+        <span class="app-wordmark">Thread</span>
+        <div class="app-nav-btns">
+          <button type="button" class="hdr-btn" id="nav-home" title="Home" aria-label="Home">⌂</button>
+          <button type="button" class="hdr-btn" id="nav-back" title="Back" aria-label="Back" disabled>←</button>
+          <button type="button" class="hdr-btn" id="nav-fwd" title="Forward" aria-label="Forward" disabled>→</button>
         </div>
-        <button class="btn-icon" id="settings-btn" title="Settings">⚙</button>
-        <button class="btn-icon" id="logout-btn" title="Sign out">⎋</button>
-      </div>
-    </aside>
-
-    <div class="sidebar-resizer" id="sidebar-resizer" title="Drag to resize"></div>
-
-    <!-- The content column: Search Bar above, page below. The Search Bar is
-         persistent chrome — it is NOT the Action Bar, which is per-view markup
-         rendered inside five pages and absent from the Library landing page,
-         so it could never host a global search box (Ryan, 2026-08-18). -->
-    <div class="content-column">
-
-      <!-- Library drive status. Hidden while the drive is healthy, which is
-           almost always, so it costs no vertical space in normal use. -->
-      <div class="library-banner hidden" id="library-banner" role="status" aria-live="polite">
-        <span class="library-banner-icon" aria-hidden="true">⚠</span>
-        <span class="library-banner-text" id="library-banner-text"></span>
-        <button type="button" class="library-banner-btn" id="library-banner-recheck">Check again</button>
       </div>
 
-      <div class="search-bar" id="search-bar">
+      <div class="app-header-center" id="search-bar">
         <div class="search-field">
           <span class="search-icon" aria-hidden="true">⌕</span>
           <input type="text" id="search-input" class="search-input"
@@ -82,6 +70,58 @@
           <kbd class="search-hint" id="search-hint">/</kbd>
         </div>
         <div class="search-dropdown hidden" id="search-dropdown" role="listbox"></div>
+      </div>
+
+      <div class="app-header-right">
+        <!-- Which library am I looking at? Moved out of the sidebar 2026-08-22:
+             it is a whole-app context switch (the theme flips, every list
+             changes meaning), which puts it with the other context controls up
+             here, not among the navigation links. Rendered by
+             renderLibrarySelector(); empty and invisible with no remotes. -->
+        <div class="lib-select-host" id="lib-select-host"></div>
+
+        <!-- Admin / Playback (Ryan, 2026-08-21). Rendered hidden and revealed by
+             JS only for roles that can edit — a listener has no mode to choose
+             and never sees it. Playback is what a listener always gets, so the
+             toggle doubles as a way to look at the app through their eyes. -->
+        <div class="view-mode-toggle hidden" id="view-mode-toggle" role="group" aria-label="View mode">
+          <button type="button" class="vm-opt" data-mode="admin" aria-pressed="false">Admin</button>
+          <button type="button" class="vm-opt" data-mode="playback" aria-pressed="false">Playback</button>
+        </div>
+
+        <!-- Who am I, and the two things I might want to do about it. Came up
+             from the sidebar footer 2026-08-22 — the sidebar is now a list of
+             places in the library, and an account is not one of them. -->
+        <div class="hdr-user">
+          <div class="user-chip">
+            <div class="user-avatar" id="user-avatar">?</div>
+            <span class="user-name" id="user-name">Loading...</span>
+          </div>
+          <button class="btn-icon" id="settings-btn" title="Settings">⚙</button>
+          <button class="btn-icon" id="logout-btn" title="Sign out">⎋</button>
+        </div>
+      </div>
+    </header>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-nav" id="sidebar-nav"></div>
+    </aside>
+
+    <div class="sidebar-resizer" id="sidebar-resizer" title="Drag to resize"></div>
+
+    <!-- The content column: drive banner above, page below. The search box
+         moved up into the App Header on 2026-08-22 — it is chrome for the
+         window, and it was never the Action Bar (which is per-view markup
+         rendered inside five pages and absent from the Library landing page,
+         so it could never host a global search box). -->
+    <div class="content-column">
+
+      <!-- Library drive status. Hidden while the drive is healthy, which is
+           almost always, so it costs no vertical space in normal use. -->
+      <div class="library-banner hidden" id="library-banner" role="status" aria-live="polite">
+        <span class="library-banner-icon" aria-hidden="true">⚠</span>
+        <span class="library-banner-text" id="library-banner-text"></span>
+        <button type="button" class="library-banner-btn" id="library-banner-recheck">Check again</button>
       </div>
 
       <main class="main-content" id="main-content">
